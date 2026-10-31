@@ -11,8 +11,8 @@ LOOP = {"id": 348768222, "login": "kamonabe1927-stack"}
 IMPOSTOR = {"id": 1, "login": "kamonabe"}
 
 
-def labeled(name, actor):
-    return {"event": "labeled", "label": {"name": name}, "actor": actor}
+def labeled(name, actor, at="2026-11-01T10:00:00Z"):
+    return {"event": "labeled", "label": {"name": name}, "actor": actor, "created_at": at}
 
 
 class ParseFrozen(unittest.TestCase):
@@ -49,6 +49,11 @@ class Classify(unittest.TestCase):
             "docs/manifesto.md": "manifesto",
         })
 
+    def test_wildcard(self):
+        rules = [("guard", ".claude/settings*")]
+        self.assertEqual(g.classify([".claude/settings.json", ".claude/settings.local.json", ".claude/x/settings.json"], rules),
+                         {".claude/settings.json": "guard", ".claude/settings.local.json": "guard"})
+
     def test_rename_counts_both_sides(self):
         paths = g.changed_paths([{"filename": "docs/x.md", "previous_filename": "docs/manifesto.md"}])
         self.assertEqual(g.classify(paths, self.rules), {"docs/manifesto.md": "manifesto"})
@@ -65,6 +70,16 @@ class LabeledByOwner(unittest.TestCase):
 
     def test_impostor_login(self):
         self.assertFalse(g.labeled_by_owner("frozen-ok", ["frozen-ok"], [labeled("frozen-ok", IMPOSTOR)]))
+
+    def test_label_before_push_is_stale(self):
+        ev = [labeled("frozen-ok", OWNER, "2026-11-01T09:00:00Z")]
+        self.assertFalse(g.labeled_by_owner("frozen-ok", ["frozen-ok"], ev, "2026-11-01T09:30:00Z"))
+        self.assertTrue(g.labeled_by_owner("frozen-ok", ["frozen-ok"], ev, "2026-11-01T08:30:00Z"))
+
+    def test_head_pushed_at(self):
+        suites = [{"created_at": "2026-11-01T09:05:00Z"}, {"created_at": "2026-11-01T09:00:00Z"}]
+        self.assertEqual(g.head_pushed_at(suites), "2026-11-01T09:00:00Z")
+        self.assertIsNone(g.head_pushed_at([]))
 
     def test_label_not_present(self):
         self.assertFalse(g.labeled_by_owner("frozen-ok", [], [labeled("frozen-ok", OWNER)]))
@@ -87,7 +102,8 @@ class Decide(unittest.TestCase):
         self.assertFalse(g.decide(frozen, False, [7])[0])
 
     def test_links(self):
-        self.assertEqual(g.linked_issue_numbers("Refs #12\ncloses #3, Fixes #12 #99"), [3, 12])
+        self.assertEqual(g.linked_issue_numbers("Refs #12\ncloses #3, Fixes #12 #99, resolved #4"), [3, 4, 12])
+        self.assertEqual(g.linked_issue_numbers("Refs #12"), [])
         self.assertEqual(g.linked_issue_numbers(None), [])
 
 
