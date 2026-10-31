@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -26,7 +27,8 @@ STATUS_CONTEXT = "Frozen guard (status)"
 FROZEN_OK = "frozen-ok"
 MANIFESTO_CHANGE = "manifesto-change"
 CLASSES = ("guard", "manifesto")
-LINK_RE = re.compile(r"\b(?:refs|closes|fixes|resolves)\s+#(\d+)", re.I)
+# マニフェストの改訂は 1 回限りの許可にするため、issue を閉じる参照（Closes など）だけを数える（loop-guard §3.1）
+LINK_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)", re.I)
 
 
 # ---------------------------------------------------------------- 判定（純粋関数）
@@ -52,6 +54,8 @@ def matches(path: str, pattern: str) -> bool:
     if pattern.endswith("/**"):
         prefix = pattern[:-3]
         return path == prefix or path.startswith(prefix + "/")
+    if any(ch in pattern for ch in "*?["):
+        return fnmatch.fnmatchcase(path, pattern) and "/" not in path[len(pattern.split("*")[0]):]
     return path == pattern
 
 
@@ -77,15 +81,32 @@ def changed_paths(files: list[dict]) -> list[str]:
     return out
 
 
-def labeled_by_owner(label: str, current_labels: list[str], events: list[dict]) -> bool:
-    """ラベルが今付いていて、最後にそのラベルを付けたのが kamonabe かどうか。"""
+def labeled_by_owner(label: str, current_labels: list[str], events: list[dict], not_before: str | None = None) -> bool:
+    """ラベルが今付いていて、最後にそのラベルを付けたのが kamonabe かどうか。
+
+    not_before を渡したときは、そのラベルが not_before 以降に付けられたものだけを有効にする
+    （PR の最新 commit が push される前に付けた許可を、新しい commit に引き継がないため）。
+    """
     if label not in current_labels:
         return False
     last = None
     for e in events:
         if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == label:
             last = e
-    return bool(last) and (last.get("actor") or {}).get("id") == OWNER_ID
+    if not last or (last.get("actor") or {}).get("id") != OWNER_ID:
+        return False
+    if not_before is not None:
+        return (last.get("created_at") or "") >= not_before
+    return True
+
+
+def head_pushed_at(check_suites: list[dict]) -> str | None:
+    """最新 commit が push された時刻の代わりに、その commit の check suite の最も早い作成時刻を使う。
+
+    commit の日付はエージェントが自由に決められるが、check suite の作成時刻は GitHub が付ける。
+    """
+    times = sorted(cs["created_at"] for cs in check_suites if cs.get("created_at"))
+    return times[0] if times else None
 
 
 def linked_issue_numbers(body: str | None) -> list[int]:
@@ -174,11 +195,19 @@ def main() -> int:
                     raise
             labels.remove(FROZEN_OK)
 
-        frozen = classify(changed_paths(gh.pages(f"/pulls/{pr_no}/files")), rules)
+        files = gh.pages(f"/pulls/{pr_no}/files")
+        if len(files) != pr.get("changed_files"):
+            # files API は 3000 件までしか返さない。全部を見られないときは通さない
+            raise RuntimeError(f"変更ファイルを全部読めません（{len(files)} / {pr.get('changed_files')} 件）")
+        frozen = classify(changed_paths(files), rules)
         pr_ok = False
         issues_ok: list[int] = []
         if frozen:
-            pr_ok = labeled_by_owner(FROZEN_OK, labels, gh.pages(f"/issues/{pr_no}/events"))
+            suites = gh.call("GET", f"/commits/{head}/check-suites?per_page=100").get("check_suites", [])
+            pushed = head_pushed_at(suites)
+            if pushed is None:
+                raise RuntimeError("最新 commit の push の時刻（check suite）が見つかりません")
+            pr_ok = labeled_by_owner(FROZEN_OK, labels, gh.pages(f"/issues/{pr_no}/events"), pushed)
             if not pr_ok:
                 for n in linked_issue_numbers(pr.get("body")):
                     try:

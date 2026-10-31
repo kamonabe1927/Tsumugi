@@ -38,8 +38,8 @@
 
 | 区分 | 対象 | 変えてよいとき |
 |---|---|---|
-| `guard` | この文書、`CLAUDE.md`、`.github/` 配下（CI・凍結リスト・凍結ガード）、`.claude/skills/manifesto-gate/` | kamonabe が PR に `frozen-ok` ラベルを付けたときだけ |
-| `manifesto` | `docs/manifesto.md` | kamonabe が立てた、`manifesto-change` ラベル（kamonabe が付けたもの）のある開いた issue を、PR 本文で `Refs #<番号>` または `Closes #<番号>` と参照しているとき。または `frozen-ok` があるとき |
+| `guard` | この文書、`CLAUDE.md`、Kiro の入口、`.github/` 配下（CI・凍結リスト・凍結ガード）、`.claude/settings*`、`.claude/skills/manifesto-gate/`、マージの条件を機械化した `.claude/skills/loop-advance/scripts/` | kamonabe が PR に `frozen-ok` ラベルを付けたときだけ |
+| `manifesto` | `docs/manifesto.md` | kamonabe が立てた、`manifesto-change` ラベル（kamonabe が付けたもの）のある開いた issue を、PR 本文で `Closes #<番号>` と参照しているとき（マージで issue が閉じるので、許可は 1 回限りになる）。または `frozen-ok` があるとき |
 
 - ループは、`guard` 区分のファイルを変える PR を自分から出さない。改善したいことがあれば、朝のまとめ（§9）の「要確認」に書く。
 - ループは、マニフェストを自分から変えない。変えるのは、上の `manifesto-change` の issue を受けたときだけである。
@@ -50,7 +50,9 @@
 
 - ガードは `pull_request_target` で動き、`main` 側の定義とスクリプトを使う。PR の中でガードを書き換えても、その PR の検査には効かない。
 - `frozen-ok` と `manifesto-change` は、ラベルを最後に付けたのが kamonabe（user id `19951033`）のときだけ有効とする。
-- PR に新しい commit が足されると、ガードは `frozen-ok` を外す。許可は commit ごとに付け直す。
+- `frozen-ok` は、PR の最新 commit が push されたあと（その commit の check suite が作られたあと）に付けたものだけを有効とする。PR に新しい commit が足されると、ガードは `frozen-ok` を外す。許可は commit ごとに付け直す。
+- 変更ファイルを全部読めない、push の時刻が分からないなど、判定できないときは通さない。
+- `main` のルールセットで、`Frozen guard (status)` を GitHub Actions が付けたものに限って必須にする（ループ用アカウントが同じ名前の status を付けても通らないようにするため）。ループ用アカウントには、ルールセットを迂回する権限を与えない。この設定は kamonabe が行う。
 - ループは `frozen-ok`・`manifesto-change`・`loop:halt` のラベルを付けない・外さない。
 
 ## 4. マニフェストに反するものを入れない（3 段の守り）
@@ -70,14 +72,18 @@
 ```
 🤖 Claude Code manifesto-gate <最新 commit の先頭 7 桁>
 <原則ごとの判定の表（manifesto-gate スキルの形式）>
-判定: 適合 ／ 判定: 疑いあり
+判定: 適合
 ```
 
-Fable 以外のモデルで代替した審査は、最初の行の末尾に `（代替: Opus）` を付ける（§5.1）。
+疑いがあるときは、最後の行を `判定: 疑いあり` にする。
+
+- 最後の空でない行だけを判定に使う。`判定: 疑いあり` の行が本文のどこかにあれば、最後の行にかかわらず疑いありとする。
+- 1 行目の commit が PR の最新 commit と違うもの、書いたあとに編集されたものは無効とする。
+- Fable 以外のモデルで代替した審査は、最初の行の末尾に `（代替: Opus）` を付ける（§5.1）。
 
 ### 4.3 疑いがあるとき
 
-- 審査で `判定: 疑いあり` が出たら、その PR は往復させずに止める。PR を閉じ、対象のスライスを `slices.toml` で `blocked` にする状態整理を、次の回で行う。
+- 審査で `判定: 疑いあり` が出たら、その PR は往復させずに止める。すぐに、対象のスライスの `needs-design` issue（タイトル `[needs-design] <スライスID>: manifesto 疑い`）を立てて着手できないようにし、PR を閉じる。そのうえで、スライスを `slices.toml` で `blocked` にする状態整理の PR（`Closes #<その issue>`）を出す。
 - `blocked_reason` は `manifesto: 原則<N>（<原則名>）— <何がどう衝突するか>` と書く。
 - 判断役（§5）が「反しない選択肢が無い」「判断がつかない」とした場合も同じく `blocked` にする。
 - `blocked` を解くのは、kamonabe の issue を受けたときだけである。ループが自分から解かない。
@@ -86,8 +92,9 @@ Fable 以外のモデルで代替した審査は、最初の行の末尾に `（
 
 事後点検で見逃しが見つかったら、朝の点検の回が、該当のマージを取り消す PR（`git revert`）を出し、`loop:revert` ラベルを付ける。
 
-- 取り消しの PR は、§6 の条件のうち 6（3 時間待ち）と §7 の 1 日の上限を適用しない。それ以外の条件は同じである。
-- 取り消したスライスは `blocked` に戻す（§4.3 の書き方で理由を書く）。
+- 取り消しの PR は、ブランチ `revert/<元の PR 番号>`、commit 1 本で、差分は `git revert -m 1 <マージ commit>` と、対象のスライスを `blocked` に戻す `slices.toml` の変更（§4.3 の書き方で理由を書く）だけとする。
+- この形を満たす取り消しの PR は、§6 の条件のうち 6（3 時間待ち）と §7 の 1 日の上限を適用しない。それ以外の条件は同じである。形を満たさない `loop:revert` は通常の PR として扱う。
+- 取り消す差分が凍結ファイルを含むときは、§3.1 の許可が要る。朝のまとめの「要確認」に書いて、kamonabe の `frozen-ok` を待つ（この場合だけは人間を待つ）。
 
 ## 5. 役の分離
 
@@ -114,24 +121,27 @@ Fable 以外のモデルで代替した審査は、最初の行の末尾に `（
 
 ループの PR（`loop:design`・`loop:impl`・`loop:revert` のどれかのラベル）は、kamonabe の承認なしに、次をすべて満たせばループがマージしてよい。
 
-1. `loop:running`・`loop:stuck` のどちらのラベルも付いていない
+1. マージを始める前の時点で、`loop:running`・`loop:stuck` のどちらのラベルも付いていない（マージする回は、確かめたあとで `loop:running` を付けてよい）
 2. CI がすべて成功している（`Frozen guard (status)` を含む、最新 commit に対して）
-3. 凍結ファイルを変えている場合は、§3.1 の条件を満たしている
-4. レビュー役のレビューコメント（手順書の形式）が最新 commit より後にあり、`結論: 指摘なし` である
-5. 審査役の `manifesto-gate` のコメントが最新 commit より後にあり、`判定: 適合` である
-6. 最新 commit から 3 時間以上たっている
-7. kamonabe の `保留:` が無い（後に kamonabe の `保留解除:` があれば外れる）。また、最新 commit より後に kamonabe のコメント・レビューが無い（あれば、それを先に処理する）
-8. GitHub 上でマージ可能である
-9. §7 の 1 日の上限に達していない
+3. 凍結ファイルを変えている場合は、§3.1 の条件を満たしている。マニフェストの改訂なら、マージの直前に、参照している issue がまだ開いていて `manifesto-change` が kamonabe のものとして付いていることを確かめ直す
+4. レビュー役のレビューコメント（手順書の形式）が最新 commit を 1 行目に挙げ、最後の行が `結論: 指摘なし` である
+5. 審査役の `manifesto-gate` のコメントが最新 commit を 1 行目に挙げ、§4.2 のとおり `判定: 適合` である
+6. 最新 commit が push されてから（その commit の check suite が作られてから）3 時間以上たっている
+7. kamonabe の `保留:` が無い（後に kamonabe の `保留解除:` があれば外れる）。また、エージェントがまだ応えていない kamonabe の書き込みが無い（エージェントの最後の書き込みより後の、kamonabe の書き込み。`保留解除:` は除く）
+8. 決まっていない判断の候補（手順書の「判断の扱い」）が無い
+9. GitHub 上でマージ可能である
+10. §7 の 1 日の上限に達していない
 
-マージは merge commit で行い、PR に「🤖 Claude Code: 自動マージの条件（loop-guard §6）を満たしたためマージしました」と残す。
+- マージは merge commit で行い、マージの API には確かめた最新 commit の sha を必ず付ける（確かめたあとで commit が足されていれば、マージは失敗する）。
+- 1 回の進行の回でマージするのは 1 本までとする。
+- マージしたら、PR に「🤖 Claude Code: 自動マージの条件（loop-guard §6）を満たしたためマージしました」と残す。
 
 ## 7. 上限
 
 | 対象 | 上限 |
 |---|---|
 | 1 日（JST）にマージする PR | 4 本（`loop:revert` は数えない） |
-| 同じスライスで完了できなかった回 | 2 回で `blocked`（理由は `stuck: <原因>`） |
+| 同じスライスで完了できなかった回 | 2 回で `blocked`（理由は `stuck: <原因>`）。完了できなかった PR は `loop:stuck` を付けたまま閉じ、閉じた `loop:stuck` の PR の数を回数とする |
 | 審査の `疑いあり` | 往復なしですぐ止める（§4.3） |
 
 時間・規模・レビューの往復などの上限は手順書が持つ。
