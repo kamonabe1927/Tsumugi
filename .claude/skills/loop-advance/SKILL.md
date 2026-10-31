@@ -18,24 +18,28 @@ PM は spec も実装も自分で書かない。各役を Agent ツールで**�
 3. `python3 .claude/skills/loop-advance/scripts/state.py` を実行する
    - `halt` が空でなければ、何も書き込まずに終了する（loop-guard §8）
    - 終了コードが 0 でなければ、同じことを `gh api` で手で確かめてから進む
-4. 読む: tsumugi の `CLAUDE.md`、`docs/loop-guard.md`、`docs/documentation-guide.md`、`docs/slices.toml`、手順書の §3〜§8
+4. 読む: tsumugi の `CLAUDE.md`、`docs/loop-guard.md`、`docs/documentation-guide.md`、`docs/slices.toml`、手順書の全体
 
 ## 2. 続きを片付ける（手順書 §6.1）
 
-`state.py` の結果を見て、手順書 §6.1 の順に片付ける。
+`state.py` の結果を見て、手順書 §6.1 の 1〜8 の順に片付ける。
 
 - `running_stale` が true の PR: `loop:running` を外して一言残す
 - `owner_writes_to_handle`: 手順書 §5 のとおり応える（`修正依頼:` は書いた役に直させる）
 - `gate` が `ng` の PR: loop-guard §4.3 のとおり止める
-- `review` または `gate` が `null` の PR（最新 commit より後に無い）: `loop:running` を付け、
+- `pending_decisions`: 判断役（`model: "fable"`、loop-decide）を起動し、決まった内容を書いた役に反映させる
+- `stuck_counts` が 2 以上: そのスライスを `blocked` にする状態整理の PR を出す
+- CI が赤・`main` と競合・`gate` が `findings` の PR: 手順書 §6.1 の 6 のとおり
+- `review` または `gate` が `null` の PR（最新 commit を名指ししたものが無い）: `loop:running` を付け、
   - review が無ければレビュー役（`model: "opus"`、loop-review）を起動する
   - review が `ok` で gate が無ければ審査役（`model: "fable"`、manifesto-gate）を起動する。Fable が応答できなければ `model: "opus"` で代替させ、代替であることを伝える
   - 終わったら `loop:running` を外す。1 回で回すのは PR 1 本まで
 - `review` が `findings` の PR: 指摘が機械的なら書いた役に直させ（`loop:design` は設計役 opus、`loop:impl` は実装役 sonnet）、新しいレビュー役で再レビューする（往復 2 回まで）。選択肢のある指摘は手順書 §7 の判断にかける
-- `merge_candidate` が true の PR: loop-guard §6 の全条件を改めて確かめる
+- `merge_candidate` が true の PR（1 回で 1 本まで）: loop-guard §6 の全条件を改めて確かめる
   - CI: `gh api repos/kamonabe1927/Tsumugi/commits/<head_sha>/check-runs` と `.../commits/<head_sha>/status`（`Frozen guard (status)` を含む）がすべて成功
   - マージ可能: `gh api repos/kamonabe1927/Tsumugi/pulls/<番号> --jq .mergeable` が true
-  - 満たせば `gh api -X PUT repos/kamonabe1927/Tsumugi/pulls/<番号>/merge -f merge_method=merge` でマージし、loop-guard §6 の一言を残す
+  - マニフェストの改訂なら、参照している issue が開いていて `manifesto-change` が付いていること
+  - 満たせば `gh api -X PUT repos/kamonabe1927/Tsumugi/pulls/<番号>/merge -f merge_method=merge -f sha=<head_sha>` でマージし、loop-guard §6 の一言を残す（sha が違えば失敗するので、そのときは次の回に回す）
 
 ## 3. 次の 1 つを進める（手順書 §6.2）
 
@@ -43,7 +47,7 @@ PM は spec も実装も自分で書かない。各役を Agent ツールで**�
 
 | やること | 起動する役 | モデル | 渡すスキル・節 |
 |---|---|---|---|
-| 週次計画 | 計画役 | `fable`（だめなら `opus` で代替） | 手順書 §9。結果を PM が `loop:plan` issue にする |
+| 週次計画 | 計画役 | `fable`（だめなら `opus` で代替し、issue に `（代替: Opus）`） | 手順書 §9。結果を PM が `loop:plan` issue にする |
 | issue の仕分け | PM 自身 | — | 手順書 §8。仕分けで判断が要れば判断役 |
 | ずれの修正 | 設計役 | `opus` | loop-design（手順書 §12.3） |
 | 実装 | 実装役 | `sonnet`（難しいスライスは `opus`） | loop-impl |

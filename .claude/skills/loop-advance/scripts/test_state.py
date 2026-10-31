@@ -23,9 +23,10 @@ def c(user, body, at):
     return {"user": user, "body": body, "created_at": at}
 
 
-def pr(n=1, labels=("loop:impl",), head="2026-11-01T06:00:00Z", comments=()):
-    return {"number": n, "title": "t", "labels": [{"name": x} for x in labels], "head": {"sha": "abc"},
-            "head_committed_at": head, "comments": list(comments), "reviews": [], "review_comments": []}
+def pr(n=1, labels=("loop:impl",), head="2026-11-01T06:00:00Z", comments=(), ref="feat/x", commits=2):
+    return {"number": n, "title": "t", "labels": [{"name": x} for x in labels],
+            "head": {"sha": "abc1234def", "ref": ref}, "commit_count": commits,
+            "head_pushed_at": head, "comments": list(comments), "reviews": [], "review_comments": []}
 
 
 def ok_comments():
@@ -45,19 +46,38 @@ class MergeCandidate(unittest.TestCase):
 
     def test_revert_skips_wait_and_limit(self):
         merged = [{"merged_at": "2026-11-01T0%d:00:00Z" % i, "labels": [{"name": "loop:impl"}]} for i in range(4)]
-        p = pr(labels=("loop:revert",), head="2026-11-01T11:00:00Z", comments=[
-            c(LOOP, REVIEW_OK, "2026-11-01T11:10:00Z"), c(LOOP, GATE_OK, "2026-11-01T11:20:00Z")])
+        com = [c(LOOP, REVIEW_OK, "2026-11-01T11:10:00Z"), c(LOOP, GATE_OK, "2026-11-01T11:20:00Z")]
+        p = pr(labels=("loop:revert",), head="2026-11-01T11:00:00Z", comments=com, ref="revert/300", commits=1)
         self.assertTrue(self.one(p, merged)["merge_candidate"])
+        # 形を満たさない loop:revert は例外にならない
+        fake = pr(labels=("loop:revert",), head="2026-11-01T11:00:00Z", comments=com, ref="feat/x", commits=1)
+        self.assertFalse(self.one(fake, merged)["merge_candidate"])
 
     def test_daily_limit(self):
         merged = [{"merged_at": "2026-11-01T0%d:00:00Z" % i, "labels": [{"name": "loop:impl"}]} for i in range(4)]
         self.assertFalse(self.one(pr(comments=ok_comments()), merged)["merge_candidate"])
 
-    def test_review_before_head_does_not_count(self):
-        p = pr(head="2026-11-01T07:30:00Z", comments=ok_comments())
-        out = self.one(p)
+    def test_review_must_name_head_commit(self):
+        com = [c(LOOP, REVIEW_OK.replace("abc1234", "0000000"), "2026-11-01T07:00:00Z"),
+               c(LOOP, GATE_OK, "2026-11-01T07:10:00Z")]
+        out = self.one(pr(comments=com))
         self.assertIsNone(out["review"])
         self.assertFalse(out["merge_candidate"])
+
+    def test_edited_agent_comment_is_void(self):
+        com = ok_comments()
+        com[1]["updated_at"] = "2026-11-01T08:00:00Z"
+        self.assertIsNone(self.one(pr(comments=com))["gate"])
+
+    def test_ng_line_anywhere_wins(self):
+        both = "🤖 Claude Code manifesto-gate abc1234\n判定: 疑いあり\n判定: 適合"
+        out = self.one(pr(comments=[c(LOOP, REVIEW_OK, "2026-11-01T07:00:00Z"), c(LOOP, both, "2026-11-01T07:10:00Z")]))
+        self.assertEqual(out["gate"], "ng")
+
+    def test_sample_line_is_not_ok(self):
+        sample = "🤖 Claude Code manifesto-gate abc1234\n判定: 適合 ／ 判定: 疑いあり"
+        out = self.one(pr(comments=[c(LOOP, REVIEW_OK, "2026-11-01T07:00:00Z"), c(LOOP, sample, "2026-11-01T07:10:00Z")]))
+        self.assertEqual(out["gate"], "findings")
 
     def test_findings_and_gate_ng(self):
         self.assertEqual(self.one(pr(comments=[c(LOOP, REVIEW_NG, "2026-11-01T07:00:00Z")]))["review"], "findings")
@@ -76,8 +96,17 @@ class MergeCandidate(unittest.TestCase):
         released = held + [c(OWNER, "保留解除: OK", "2026-11-01T06:40:00Z")]
         self.assertFalse(self.one(pr(comments=released))["hold"])
 
-    def test_owner_after_head_blocks(self):
-        self.assertFalse(self.one(pr(comments=ok_comments() + [c(OWNER, "質問です", "2026-11-01T08:00:00Z")]))["merge_candidate"])
+    def test_unanswered_owner_blocks_until_agent_replies(self):
+        asked = ok_comments() + [c(OWNER, "質問です", "2026-11-01T08:00:00Z")]
+        self.assertFalse(self.one(pr(comments=asked))["merge_candidate"])
+        answered = asked + [c(LOOP, "🤖 Claude Code: お答えします", "2026-11-01T08:10:00Z")]
+        self.assertTrue(self.one(pr(comments=answered))["merge_candidate"])
+
+    def test_pending_decision_blocks(self):
+        cand = [c(LOOP, "🤖 Claude Code 判断の候補 x\nQ1. ...", "2026-11-01T06:30:00Z")]
+        self.assertFalse(self.one(pr(comments=cand + ok_comments()))["merge_candidate"])
+        decided = cand + [c(LOOP, "🤖 Claude Code 判断: Q1=A", "2026-11-01T06:40:00Z")] + ok_comments()
+        self.assertTrue(self.one(pr(comments=decided))["merge_candidate"])
 
     def test_impostor_and_agent_prefix_are_not_owner(self):
         out = self.one(pr(comments=ok_comments() + [c(IMPOSTOR, "保留: x", "2026-11-01T08:00:00Z"),
@@ -108,6 +137,14 @@ class Issues(unittest.TestCase):
                "comments": [c(LOOP, "🤖 Claude Code 仕分け", "2026-11-01T01:00:00Z"),
                             c(OWNER, "やっぱりこうして", "2026-11-01T02:00:00Z")]}
         self.assertEqual(s.judge([], [iss], [], NOW)["owner_writes_to_handle"], [{"where": "issue #3", "count": 1}])
+
+
+class Stuck(unittest.TestCase):
+    def test_counts_by_slice(self):
+        closed = [{"labels": [{"name": "loop:stuck"}], "head": {"ref": "feat/e4"}},
+                  {"labels": [{"name": "loop:stuck"}], "head": {"ref": "fix/e4"}},
+                  {"labels": [], "head": {"ref": "feat/e4"}}]
+        self.assertEqual(s.judge([], [], [], NOW, closed)["stuck_counts"], {"e4": 2})
 
 
 class MergedToday(unittest.TestCase):

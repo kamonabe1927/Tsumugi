@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -26,10 +25,12 @@ LOOP_LABELS = {"loop:design", "loop:impl", "loop:revert"}
 BLOCK_LABELS = {"loop:running", "loop:stuck"}
 TRIAGE_EXCLUDE = {"needs-design", "loop:triaged", "wontfix", "loop:plan", "loop:drift"}
 REVIEW_HEAD = "🤖 Claude Code review（シニア）"
-NO_FINDINGS = re.compile(r"^結論: 指摘なし\s*$", re.M)
 GATE_HEAD = "🤖 Claude Code manifesto-gate"
-GATE_OK = re.compile(r"^判定: 適合\s*$", re.M)
-GATE_NG = re.compile(r"^判定: 疑いあり\s*$", re.M)
+GATE_OK = "判定: 適合"
+GATE_NG = "判定: 疑いあり"
+REVIEW_OK = "結論: 指摘なし"
+CANDIDATES_HEAD = "🤖 Claude Code 判断の候補"
+DECISION_HEAD = "🤖 Claude Code 判断:"
 JST = timezone(timedelta(hours=9))
 RUNNING_STALE = timedelta(hours=2)
 MERGE_WAIT = timedelta(hours=3)  # loop-guard §6 の 6
@@ -69,7 +70,8 @@ def writes(item: dict) -> list[dict]:
     def add(user, body, created, updated, kind):
         if not user or not created:
             return
-        w = {"who": who(user), "body": body or "", "at": parse_time(created), "kind": kind}
+        w = {"who": who(user), "body": body or "", "at": parse_time(created), "kind": kind,
+             "edited": bool(updated) and updated != created}
         if is_owner(w) and updated:  # kamonabe が後から編集したものは、編集した時刻に書かれたものとして扱う
             w["at"] = max(w["at"], parse_time(updated))
         out.append(w)
@@ -103,21 +105,62 @@ def hold(ws: list[dict]) -> bool:
     return held
 
 
-def agent_after(ws: list[dict], head_at: datetime | None, head: str, ok: re.Pattern, ng: re.Pattern | None = None):
-    """最新 commit より後の、先頭が head のエージェントの書き込みのうち最後のものの結論。"""
-    if head_at is None:
+def last_line(body: str) -> str:
+    lines = [ln.strip() for ln in body.strip().splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def verdict(ws: list[dict], head_sha: str | None, head: str, ok: str, ng: str | None = None):
+    """最新 commit を 1 行目に挙げた、先頭が head のエージェントの書き込みのうち最後のものの結論（loop-guard §4.2・§6）。
+
+    1 行目に最新 commit の先頭 7 桁が無いもの、書いたあとで編集されたものは数えない。
+    ng の行が本文のどこかにあれば ng とする。ok は最後の空でない行がちょうど ok のときだけ。
+    """
+    if not head_sha:
         return None
+    sha7 = head_sha[:7]
     last = None
     for w in ws:
-        if is_agent(w) and w["at"] > head_at and w["body"].lstrip().startswith(head):
+        body = w["body"].lstrip()
+        if is_agent(w) and body.startswith(head) and sha7 in body.splitlines()[0] and not w["edited"]:
             last = w
     if last is None:
         return None
-    if ok.search(last["body"]):
-        return "ok"
-    if ng is not None and ng.search(last["body"]):
+    lines = [ln.strip() for ln in last["body"].splitlines()]
+    if ng is not None and ng in lines:
         return "ng"
-    return "findings"
+    return "ok" if last_line(last["body"]) == ok else "findings"
+
+
+def pending_candidates(ws: list[dict]) -> bool:
+    """判断の候補（手順書「判断の扱い」）のうち、後に判断役の判断が無いものがあるか。"""
+    pending = False
+    for w in ws:
+        if not is_agent(w):
+            continue
+        body = w["body"].lstrip()
+        if body.startswith(CANDIDATES_HEAD):
+            pending = True
+        elif body.startswith(DECISION_HEAD):
+            pending = False
+    return pending
+
+
+def unanswered_owner(ws: list[dict]) -> list[dict]:
+    """エージェントがまだ応えていない kamonabe の書き込み（`保留解除:` は除く。loop-guard §6 の 7）。"""
+    return [w for w in owner_after_last_agent(ws) if not w["body"].lstrip().startswith("保留解除:")]
+
+
+def stuck_counts(closed: list[dict]) -> dict[str, int]:
+    """閉じた `loop:stuck` の PR の数を、ブランチ名（`feat/<スライスID>` など）のスライス ID ごとに数える（loop-guard §7）。"""
+    out: dict[str, int] = {}
+    for pr in closed:
+        if "loop:stuck" not in {lb["name"] for lb in pr.get("labels", [])}:
+            continue
+        ref = (pr.get("head") or {}).get("ref", "")
+        sid = ref.split("/", 1)[1] if "/" in ref else ref
+        out[sid] = out.get(sid, 0) + 1
+    return out
 
 
 def merged_today(merged: list[dict], now: datetime) -> int:
@@ -132,30 +175,35 @@ def merged_today(merged: list[dict], now: datetime) -> int:
     return n
 
 
-def judge(prs: list[dict], issues: list[dict], merged: list[dict], now: datetime) -> dict:
+def judge(prs: list[dict], issues: list[dict], merged: list[dict], now: datetime, closed: list[dict] = ()) -> dict:
     halt = [i["number"] for i in issues if "loop:halt" in {lb["name"] for lb in i.get("labels", [])}]
     today = merged_today(merged, now)
-    out_prs, owner_new, triage = [], [], []
+    out_prs, owner_new, triage, decisions = [], [], [], []
     for pr in prs:
         labels = {lb["name"] for lb in pr.get("labels", [])}
         if not labels & LOOP_LABELS:
             continue
         ws = writes(pr)
-        head_at = parse_time(pr.get("head_committed_at"))
+        head_sha = (pr.get("head") or {}).get("sha")
+        pushed_at = parse_time(pr.get("head_pushed_at"))
         running_at = parse_time(pr.get("running_labeled_at"))
-        review = agent_after(ws, head_at, REVIEW_HEAD, NO_FINDINGS)
-        gate = agent_after(ws, head_at, GATE_HEAD, GATE_OK, GATE_NG)
-        new_owner = owner_after_last_agent(ws)
-        owner_after_head = head_at is not None and any(is_owner(w) and w["at"] > head_at for w in ws)
+        review = verdict(ws, head_sha, REVIEW_HEAD, REVIEW_OK)
+        gate = verdict(ws, head_sha, GATE_HEAD, GATE_OK, GATE_NG)
+        new_owner = unanswered_owner(ws)
         held = hold(ws)
-        is_revert = "loop:revert" in labels
-        waited = head_at is not None and now - head_at >= MERGE_WAIT
+        pending = pending_candidates(ws)
+        # 取り消しの例外は、形（ブランチ revert/<N>・commit 1 本）を満たすものだけ（loop-guard §4.4）
+        is_revert = ("loop:revert" in labels
+                     and (pr.get("head") or {}).get("ref", "").startswith("revert/")
+                     and pr.get("commit_count") == 1)
+        waited = pushed_at is not None and now - pushed_at >= MERGE_WAIT
         candidate = (
             not labels & BLOCK_LABELS
             and review == "ok"
             and gate == "ok"
             and not held
-            and not owner_after_head
+            and not new_owner
+            and not pending
             and (is_revert or waited)
             and (is_revert or today < DAILY_MERGES)
         )
@@ -163,20 +211,24 @@ def judge(prs: list[dict], issues: list[dict], merged: list[dict], now: datetime
             "number": pr["number"],
             "title": pr.get("title"),
             "labels": sorted(labels),
-            "head_sha": (pr.get("head") or {}).get("sha"),
-            "head_committed_at": pr.get("head_committed_at"),
+            "head_sha": head_sha,
+            "head_pushed_at": pr.get("head_pushed_at"),
+            "revert_exempt": is_revert,
+            "pending_decision": pending,
             "running_stale": "loop:running" in labels and (running_at is None or now - running_at >= RUNNING_STALE),
             "review": review,  # ok / findings / None（最新 commit より後のレビューが無い）
             "gate": gate,  # ok / ng / findings / None
             "gate_substituted": any("（代替: Opus）" in w["body"].splitlines()[0]
                                     for w in ws if is_agent(w) and w["body"].lstrip().startswith(GATE_HEAD)),
             "hold": held,
-            "owner_after_head": owner_after_head,
+            "unanswered_owner": len(new_owner),
             # CI・凍結ファイル・マージ可能かは含まない。候補でも loop-guard §6 を改めて確かめる
             "merge_candidate": candidate,
         })
         if new_owner:
             owner_new.append({"where": f"PR #{pr['number']}", "count": len(new_owner)})
+        if pending:
+            decisions.append(f"PR #{pr['number']}")
     for iss in issues:
         labels = {lb["name"] for lb in iss.get("labels", [])}
         ws = writes(iss)
@@ -185,9 +237,11 @@ def judge(prs: list[dict], issues: list[dict], merged: list[dict], now: datetime
             triage.append({"number": iss["number"], "title": iss.get("title"),
                            "manifesto_change": "manifesto-change" in labels})
         elif labels & {"loop:triaged", "needs-design", "loop:drift", "loop:plan"}:
-            new_owner_iss = owner_after_last_agent(ws)
+            new_owner_iss = unanswered_owner(ws)
             if new_owner_iss:
                 owner_new.append({"where": f"issue #{iss['number']}", "count": len(new_owner_iss)})
+            if pending_candidates(ws):
+                decisions.append(f"issue #{iss['number']}")
     return {
         "halt": halt,
         "merged_today": today,
@@ -195,6 +249,8 @@ def judge(prs: list[dict], issues: list[dict], merged: list[dict], now: datetime
         "open_loop_prs": out_prs,
         "owner_writes_to_handle": owner_new,
         "issues_to_triage": triage,
+        "pending_decisions": decisions,
+        "stuck_counts": stuck_counts(list(closed)),
     }
 
 
@@ -222,8 +278,12 @@ def collect(repo: str, now: datetime):
         pr["reviews"] = gh(f"repos/{repo}/pulls/{n}/reviews?per_page=100")
         pr["review_comments"] = gh(f"repos/{repo}/pulls/{n}/comments?per_page=100")
         commits = gh(f"repos/{repo}/pulls/{n}/commits?per_page=100")
-        if commits:
-            pr["head_committed_at"] = commits[-1]["commit"]["committer"]["date"]
+        pr["commit_count"] = len(commits)
+        # push の時刻は、commit の日付ではなく check suite の作成時刻で見る（loop-guard §6 の 6）
+        sha = (pr.get("head") or {}).get("sha")
+        suites = gh(f"repos/{repo}/commits/{sha}/check-suites?per_page=100", paginate=False).get("check_suites", [])
+        times = sorted(cs["created_at"] for cs in suites if cs.get("created_at"))
+        pr["head_pushed_at"] = times[0] if times else None
         if "loop:running" in {lb["name"] for lb in pr.get("labels", [])}:
             events = gh(f"repos/{repo}/issues/{n}/events?per_page=100")
             at = [e["created_at"] for e in events
@@ -236,7 +296,7 @@ def collect(repo: str, now: datetime):
     # 直近に更新された 100 本だけを見る（全ページはたどらない）
     closed = gh(f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100", paginate=False)
     merged = [p for p in closed if p.get("merged_at") and p["merged_at"] >= since]
-    return prs, issues, merged
+    return prs, issues, merged, closed
 
 
 def main() -> int:
@@ -246,7 +306,8 @@ def main() -> int:
     args = ap.parse_args()
     now = parse_time(args.now) if args.now else datetime.now(timezone.utc)
     try:
-        result = judge(*collect(args.repo, now), now)
+        prs, issues, merged, closed = collect(args.repo, now)
+        result = judge(prs, issues, merged, now, closed)
     except Exception as e:  # noqa: BLE001
         detail = getattr(e, "stderr", "") or repr(e)
         print(json.dumps({"error": str(detail).strip()[:500]}, ensure_ascii=False))
