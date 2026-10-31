@@ -59,7 +59,7 @@ AI エージェント・人間のどちらも、新しい情報を書く前に�
 | **実装スライスの一覧・状態・依存・着手順** | **[`slices.toml`](slices.toml)** | ✕（link のみ） |
 | 開発ループの守り（信頼する入力・凍結・マニフェストの 3 段の守り・マージの条件・上限・人間の入口）。凍結 | [開発ループの守り](loop-guard.md) | ✕ |
 | 定時実行の開発ループの実行手順 | [開発ループ手順書](loop-runbook.md) | ✕ |
-| 開発ループの各モードの入口（読む順と、拾うものの機械的な判定。規則は手順書が正本） | `.claude/skills/<モード>/`（確認モードは [loop-check](../.claude/skills/loop-check/SKILL.md)） | ✕ |
+| 開発ループの各モード・各役の手順（規則は loop-guard と手順書が正本） | `.claude/skills/<名前>/`（進行は [loop-advance](../.claude/skills/loop-advance/SKILL.md)、朝の点検は [loop-morning](../.claude/skills/loop-morning/SKILL.md)。審査役の [manifesto-gate](../.claude/skills/manifesto-gate/SKILL.md) は凍結） | ✕ |
 | 詳細レビュー報告書（原本） | [`semantic-review/Tsumugi-detailed-review-20260907.md`](../semantic-review/Tsumugi-detailed-review-20260907.md) | ✕（link のみ） |
 | 歴史的測定値・ベンチマーク・検証スナップショット | [`docs/history/`](history/) | ✕ |
 | **どの update-image（マイルストーン）が存在し、どこまで終わり、何が残るか（進捗のみ）** | **[ロードマップ](roadmap.md)** | ◯（唯一の役割） |
@@ -85,7 +85,7 @@ AI エージェント・人間のどちらも、新しい情報を書く前に�
 
 ## 実装スライスの運用
 
-ここでいう **ループ** とは、エージェントが「`ready` のスライスを 1 つ選ぶ → spec を読んで実装する → 実装 PR を出す → マージを待つ」を繰り返す開発の進め方を指す。定時実行でも対話でも、規則は本節に従う。定時実行での 1 回分の実行手順（実行モード・判断待ちの出し方・マージの条件）は [開発ループ手順書](loop-runbook.md) に置く。
+ここでいう **ループ** とは、エージェントが「`ready` のスライスを 1 つ選ぶ → spec を読んで実装する → 実装 PR を出す → マージを待つ」を繰り返す開発の進め方を指す。定時実行でも対話でも、規則は本節に従う。定時実行の守り（マージの条件など）は [開発ループの守り](loop-guard.md)、役・モード・判断の扱いは [開発ループ手順書](loop-runbook.md) に置く。
 
 ### 書き手と承認
 

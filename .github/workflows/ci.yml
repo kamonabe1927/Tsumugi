@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Unit tests for .claude/skills
-        run: python3 -m unittest discover -s .claude/skills/loop-check/scripts -v
+        run: python3 -m unittest discover -s .claude/skills/loop-advance/scripts -v
 
       - name: Unit tests for the frozen guard
         run: python3 -m unittest discover -s .github/scripts -v
