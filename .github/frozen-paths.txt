@@ -1,0 +1,13 @@
+# 凍結するファイルの一覧（正本）。規則は docs/loop-guard.md §3。
+# 1 行に「区分 パターン」を書く。区分は guard か manifesto。
+# パターンはリポジトリのルートからの相対パス。末尾の /** はその配下すべて、* は / を含まない任意の文字列を表す。
+# この一覧も .github/ 配下なので guard 区分である。
+
+guard      docs/loop-guard.md
+guard      CLAUDE.md
+guard      .github/**
+guard      .claude/skills/manifesto-gate/**
+guard      .claude/skills/loop-advance/scripts/**
+guard      .claude/settings*
+guard      .kiro/steering/agent-entry.md
+manifesto  docs/manifesto.md
