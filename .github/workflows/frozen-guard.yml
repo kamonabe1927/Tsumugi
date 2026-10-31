@@ -1,0 +1,40 @@
+name: Frozen guard
+
+# 凍結ファイル（.github/frozen-paths.txt）を変える PR に、kamonabe の許可があるかを確かめる。
+# 規則の正本は docs/loop-guard.md §3。
+# pull_request_target なので、main 側のこの定義とスクリプトで動く（PR の中で書き換えても、その PR の検査には効かない）。
+# PR のコードは checkout しない・実行しない。読むのは GitHub API の情報だけ。
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  statuses: write
+
+concurrency:
+  group: frozen-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Frozen guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main（PR のコードではない）
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check frozen files
+        run: python3 .github/scripts/frozen_guard.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_ACTION: ${{ github.event.action }}

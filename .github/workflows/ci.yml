@@ -50,6 +50,9 @@ jobs:
       - name: Unit tests for .claude/skills
         run: python3 -m unittest discover -s .claude/skills/loop-check/scripts -v
 
+      - name: Unit tests for the frozen guard
+        run: python3 -m unittest discover -s .github/scripts -v
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
