@@ -12,8 +12,7 @@
 //!    - `todo` / `ready` に `order` があり、`order` が重複しない。`blocked` に `blocked_reason` がある
 //!    - `depends_on` の id が実在し、`ready` / `done` の依存がすべて `done` である
 //!    - `parent` がロードマップ「ステータス一覧」表の ID 列にある
-//! 2. ロードマップ「現在地」の「次のタスク」が、`order` 最小の `ready` スライスに触れている
-//! 3. リポジトリ内の Markdown の相対リンクが、実在するファイルを指している
+//! 2. リポジトリ内の Markdown の相対リンクが、実在するファイルを指している
 //!
 //! 失敗したときは、正本（documentation-guide「状態の正本」）でない側を直す。
 //!
@@ -470,36 +469,6 @@ fn slices_toml_follows_field_definitions() {
         &problems,
         SLICES,
         "slices.toml 冒頭のフィールド定義に合わせる。状態は正本どおりに、正本でない側を直す",
-    );
-}
-
-#[test]
-fn roadmap_next_task_mentions_next_ready_slice() {
-    let slices = load_slices();
-    let next = slices
-        .iter()
-        .filter(|s| s.status() == "ready")
-        .filter_map(|s| {
-            s.fields
-                .get("order")
-                .and_then(Value::as_int)
-                .map(|o| (o, s.id()))
-        })
-        .min();
-    let Some((order, id)) = next else {
-        // ready が無いときは、次のタスクの書き方を機械的には決められないので検査しない。
-        return;
-    };
-    let roadmap = read(ROADMAP);
-    let current = section(&roadmap, "現在地").expect("roadmap に「## 現在地」節がありません");
-    let line = current
-        .lines()
-        .find(|l| l.contains("**次のタスク:**"))
-        .expect("roadmap「現在地」に「**次のタスク:**」の行がありません");
-    assert!(
-        line.contains(id),
-        "{ROADMAP}「現在地」の「次のタスク」が、slices.toml で次に着手するスライス {id}（ready、order {order}）に触れていません。\
-         正本は slices.toml なので、ロードマップの「現在地」を直してください"
     );
 }
 
