@@ -105,6 +105,30 @@ depends_on = ["R-1a"]
 # 未着手（roadmap.md「現在地」「Phase 6 残」から分解。order は暫定）
 # ════════════════════════════════════════════════════════════════
 
+# issue #292（kamonabe、仕分け「受け入れ」）から作った不具合の fix 2 本。order は loop-runbook §8 の「不具合の報告」の既定
+# （今ある ready より前の空いている値）。parent は VM conformance（determinism Slice 6）を含む Phase 5 残。
+# 1 本目は determinism-and-audit §4.8（この設計 PR で追加）と §2.1 を VM の builtin 名の呼び出しで満たす。
+# 2 本目（ループの外の break / continue を VM が compile error にする件）は issue の補足で、設計時に再現を確かめた。
+# 触る仕組みが別（ループ制御の lowering）で、try の中で catch できるかを言語仕様が決めていないため todo で置く。
+[[slice]]
+id         = "fix-vm-builtin-call-lowering"
+title      = "VM の builtin 名の呼び出しの lowering を、push(xs) で panic せず、引数の bytecode を 2 経路で共有して入れ子の深さに線形にする（determinism-and-audit §4.8、issue #292）"
+status     = "ready"
+parent     = "Phase 5 残"
+spec_slice = "determinism Slice 6"
+spec       = { doc = "docs/determinism-and-audit.md", section = "fix-vm-builtin-call-lowering 実装スライス（builtin 名の呼び出しの lowering を panic せず線形にする）" }
+acceptance = ["VBC-AT-01..05"]
+design_pr  = 313
+order      = 3
+
+[[slice]]
+id         = "fix-vm-loop-control-outside-loop"
+title      = "VM がループの外の break / continue を compile error にせず、tree と同じく到達時の control_flow runtime error にする（言語仕様「break / continue」、issue #292）"
+status     = "todo"
+parent     = "Phase 5 残"
+spec_slice = "determinism Slice 6"
+order      = 4
+
 # loop:drift #302 の D-21（判断済み Q3=A）から作った fix。order は loop-runbook §12.3・§8 の「不具合の報告」の既定
 # （今ある ready より前の空いている値）。parent は call 評価順の doc drift 解消の REV-012。
 [[slice]]
