@@ -62,20 +62,23 @@ AI エージェント・人間のどちらも、新しい情報を書く前に�
 | 開発ループの各モード・各役の手順（規則は loop-guard と手順書が正本） | `.claude/skills/<名前>/`（進行は [loop-advance](../.claude/skills/loop-advance/SKILL.md)、朝の点検は [loop-morning](../.claude/skills/loop-morning/SKILL.md)。審査役の [manifesto-gate](../.claude/skills/manifesto-gate/SKILL.md) は凍結） | ✕ |
 | 詳細レビュー報告書（原本） | [`semantic-review/Tsumugi-detailed-review-20260907.md`](../semantic-review/Tsumugi-detailed-review-20260907.md) | ✕（link のみ） |
 | 歴史的測定値・ベンチマーク・検証スナップショット | [`docs/history/`](history/) | ✕ |
-| **どの update-image（マイルストーン）が存在し、どこまで終わり、何が残るか（進捗のみ）** | **[ロードマップ](roadmap.md)** | ◯（唯一の役割） |
+| **今後の予定: どの update-image（マイルストーン）が存在し、どこまで終わり、何が残るか（項目の状態のみ）** | **[ロードマップ](roadmap.md)** | ◯（唯一の役割） |
 
 ## ロードマップと spec の責務分離
 
-ロードマップは「今どのフェーズにいて、次に何をやるか」と「各項目の状態」だけを管理する。具体的には次を持つ。
+ロードマップは「今後の予定」、つまり「今どのフェーズにいて、この先に何が残るか」と「各項目の状態」だけを管理する。次に何をやるか（スライスの一覧・状態・着手順）は [`slices.toml`](slices.toml)、日々の進捗（何がいつ終わったか）は git log と spec の実装スライス小節が持つ。ロードマップは日報ではないので、スライスが進むたびには書き換えない。具体的には次を持つ。
 
-- 現在地（フェーズ・現在のスライス・次のスライス）を数行で。直近完了は 1 件だけ書き、それ以前の履歴は持たない（履歴は spec の実装スライス小節と git log にある）。
+- 現在地（今のフェーズ）を数行で。次の作業は [`slices.toml`](slices.toml) を指す 1 行だけにし、スライス名・直近完了・完了の履歴は書かない。
 - マイルストーン（Phase 0〜7）の目的・設計正本 link・状態・完了 gate。
 - 項目の状態の唯一の正本である「ステータス一覧」表（ID・一行概要・状態・owning spec）。項目の状態は配下スライスの状態から判断する。
-- 着手順は [`slices.toml`](slices.toml) の `order` を正とし、ロードマップは link だけを持つ。
+- 今後の予定（フェーズ単位の優先順）。スライス単位の着手順は [`slices.toml`](slices.toml) の `order` を正とし、ロードマップは link だけを持つ。
 
-> **移行中:** ロードマップの「現在地」「着手順」はまだ上記の形に縮小していない（直近完了の履歴と着手順の本文が残っている）。縮小は別 PR で行う。それまでの間も、次に何をやるかは [`slices.toml`](slices.toml) を正とする。
+ロードマップは次を持たない。
 
-ロードマップは次を持たない。これらは spec doc の役割である。
+- 次に何をやるか・スライスの状態（[`slices.toml`](slices.toml) の役割）。
+- 日々の進捗・完了の履歴（git log と spec の実装スライス小節の役割）。
+
+次は spec doc の役割である。
 
 - 機能の実装詳細（型名・PR 単位の変更内容・コミット単位の説明）。
 - 設計判断の根拠（採用理由・却下した案・トレードオフ）。
@@ -101,8 +104,8 @@ AI エージェント・人間のどちらも、新しい情報を書く前に�
 |---|---|---|
 | （新規追加）→ todo | 設計 PR または状態整理 PR | `slices.toml` へのエントリ追加 |
 | （新規追加）→ ready（issue から、[開発ループ手順書](loop-runbook.md)「issue の仕分け」） | 設計 PR | `slices.toml` へのエントリ追加と、todo → ready と同じもの。ready の条件を満たさなければ todo で追加する |
-| todo → ready | 設計 PR | spec の実装スライス小節の追加・更新、`status` の変更、`spec`・`acceptance`・`design_pr` の記入、ロードマップの「現在地」の更新（次のスライスが変わる場合） |
-| ready → done | 実装 PR | 実装・テスト、spec の逸脱一覧の更新（新しい逸脱・未実装範囲の追加、解消した行の削除）、`status` の変更、`impl_pr` の記入、ロードマップの「現在地」と「ステータス一覧」の該当行の更新（状態が変わる場合） |
+| todo → ready | 設計 PR | spec の実装スライス小節の追加・更新、`status` の変更、`spec`・`acceptance`・`design_pr` の記入 |
+| ready → done | 実装 PR | 実装・テスト、spec の逸脱一覧の更新（新しい逸脱・未実装範囲の追加、解消した行の削除）、`status` の変更、`impl_pr` の記入、ロードマップの「ステータス一覧」の該当行の更新（項目の状態が変わる場合） |
 | ready → todo（差し戻しの確定） | 設計 PR | spec の修正、`issues` への追記、needs-design issue のクローズ |
 | → blocked / blocked → todo | 状態整理 PR | `blocked_reason` の記入・削除 |
 

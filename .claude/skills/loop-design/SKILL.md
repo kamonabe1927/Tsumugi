@@ -20,7 +20,7 @@ description: Tsumugi 開発ループの設計役として、スライスの設�
 
 1. 読む: `docs/manifesto.md`、tsumugi の `CLAUDE.md`、`docs/documentation-guide.md`（「ready の条件」「実装スライスの運用」）、手順書 §7・§8・§12.3・§14.1、対象の spec と逸脱一覧、関係する issue
 2. 書く（対象に応じて）
-   - スライスの設計: spec の「実装slice」章に小節を書く（実装範囲・範囲外・受入基準 ID と確かめ方・想定の変更規模）。`slices.toml` を「ready の条件」を満たせば `ready`、満たさなければ `todo` にする。ロードマップの「現在地」も更新する
+   - スライスの設計: spec の「実装slice」章に小節を書く（実装範囲・範囲外・受入基準 ID と確かめ方・想定の変更規模）。`slices.toml` を「ready の条件」を満たせば `ready`、満たさなければ `todo` にする。ロードマップは更新しない（次の作業は `slices.toml` が正本）
    - issue の受け入れ: spec の目標の章を直し、小節とスライスを足す。PR 本文に `Closes #<番号>`
    - ずれの修正: 手順書 §12.3
    - マニフェストの改訂: issue の依頼の範囲だけを変え、原則どうしの矛盾が生まれないかを本文に書く
