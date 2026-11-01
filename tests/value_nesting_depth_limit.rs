@@ -416,4 +416,7 @@ fn vnd_at_05_usage_unchanged_within_limit() {
 }
 
 const TREE_EXPECTED: (u64, u64, u64) = (242, 25204, 25204);
-const VM_EXPECTED: (u64, u64, u64) = (242, 24260, 24260);
+// fix-vm-builtin-call-lowering で、builtin 名の呼び出しの引数の bytecode を 2 経路で共有したため、
+// VM の bytecode_chunk の課金（64 + 16 × 命令数 + 32 × 定数数）が 640 byte 減った。fuel と tree の値、
+// bytecode 以外の heap は変わらない。
+const VM_EXPECTED: (u64, u64, u64) = (242, 23620, 23620);
