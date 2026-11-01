@@ -1,8 +1,29 @@
 # Tsumugi — 次期意味論・実装決定
 
-最終更新: 2026-10-31
+最終更新: 2026-11-01
 
-設計ステータス: **次期仕様確定・未実装**
+設計ステータス: **次期仕様確定（本文）＋ 実装の現在地（下記の逸脱一覧）**
+
+本書の各章は **到達目標の確定仕様**であり、現在の実装状態ではない。現在の実装が目標仕様からどう逸脱しているか・
+何が未実装かは、下の **逸脱一覧** が唯一の正本である（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。
+表は現在の逸脱と未実装範囲だけを持ち、解消した行は削除する。実装スライスの進捗の正本は [`slices.toml`](slices.toml)、
+項目（AUD・REV）の状態の正本は [ロードマップ](roadmap.md)「ステータス一覧」である。
+
+逸脱一覧は loop:drift #302 の D-20 を受けて新設した。本文の節ごとに置いていた「ステータス」「実装状況」の注記に
+状態を書き続けず、事実を確かめた残りだけを逸脱一覧に置く案（Q2=A）は、返信なしのため推奨案で確定した（issue #302 の
+Q2=A。当時の[開発ループ手順書](loop-runbook.md) §7.5）。理由: 状態の正本は粒度ごとに 1 箇所だけとし（ドキュメント運用ガイド
+「大原則」）、spec 本文に状態を書き続けると #302 の D-20 のような食い違いがまた生まれる。載せたのは 2026-10-31 の整合点検
+（§4〜§12・§17・§20 を実装と release ビルドの実行〔tree・`--vm`〕で照合）と、2026-11-01 にこの PR で §5・§10・§14.3・
+§17.5・§20 を実装と照合して確かめた差だけである。照合していない節（§3・§13〜§16・§17.7・§17.8 ほか）の逸脱と、本文の
+節ごとに残る「ステータス」注記（§13・§14.1・§14.2 など）は、まだ表へ移していない。§10（AUD-036）・§20（`format_time` の
+`%z` / `%Z`）は照合の結果、逸脱が無かった。
+
+## 逸脱一覧（目標仕様に対する現在の逸脱と未実装範囲）
+
+| 逸脱内容 | 対象の節(§) | 発生スライス |
+|---|---|---|
+| user call の評価順が目標と違う。目標（§5.1・§17.5.2）は「動的 callee を先に一度だけ評価・分類し、user callable の場合だけ step と深度を検査する」（callee 先行）だが、実装は現行の [言語仕様](language-spec.md)「ユーザー定義関数の呼び出し順序」のとおり「step と深度を検査してから callee を評価する」。tree（`src/eval.rs` の user call の準備で `begin_user_call` が callee の評価より前）と VM で同じで、深度 128 の内側で `[print("x"), g][1](…)` を呼ぶと、両 backend とも `x` を出さずに `overflow` になる。深度の境界値（128 user frame、§5.1）は両 backend で目標どおり。callee 先行への切り替えは `LanguageRevision` を上げる破壊的変更で、まだスライスが無い（ロードマップの REV-012 の `callee-precedence`） | §5.1・§17.5 | —（本ガイド導入前からの実装） |
+| process-global の `OnceLock` が残る。目標（§14.3）は process-global な `OnceLock` を廃止し `FilesystemCapability` を実行 request へ注入することだが、`src/sandbox.rs` の `SANDBOX_PATHS`（`TSUMUGI_SANDBOX` を一度だけ読む `OnceLock`）が残り、評価器内蔵の `ModuleLoader`（`src/module.rs`）が import のファイルを読むときに `sandbox::check_path` で検査する。fs builtin は capability handle 経由に移っており（C10）、`OnceLock` を読まない。run 層の import の展開が link の結果を使わない差と scheduler の handle 経路の差は [Capability Model仕様](capability-model.md) の逸脱一覧（§10）にあり、run 層の側はスライス `fix-import-run-from-link-graph` で扱う | §14.3 | —（本ガイド導入前からの実装。fs builtin の移行は C10） |
 
 ## 1. 本書の位置づけ
 
@@ -688,7 +709,7 @@ lineはLexerが生成するEOF tokenの行。未閉じblockのcanonical message�
 
 ## 10. lossy変換境界（AUD-036）
 
-> **実装状況（2026-09-09）:** 🟡 部分実装。**Float→Int 変換**（`to_int` / `floor` /
+> **実装の経緯（2026-09-09 時点の記録。現在の実装状態は冒頭の逸脱一覧を見る）:** **Float→Int 変換**（`to_int` / `floor` /
 > `ceil` / `round`）と **file_size** の u64→i64 変換を checked helper へ集約し、`NaN` /
 > `±Infinity` / i64 範囲外を lossy な `as` cast に頼らず `conversion` / `int_overflow`
 > エラーにした。`src/builtin_core.rs` の `checked_float_to_i64`（`RoundMode`）と
@@ -698,10 +719,10 @@ lineはLexerが生成するEOF tokenの行。未閉じblockのcanonical message�
 > （丸めモード・境界）・`builtin_core` の `aud_036_tests`（private file_size helper の
 > `i64::MAX+1` / `u64::MAX`）で固定した。
 >
-> **未実装（本節の残り）:** `exit` の構造化 `ExecutionOutcome::Exited { code, usage }` 化。
-> これは `BudgetUsage` と REV-023（`exit()` の process 終了廃止・Phase 3 budget 基盤）に
-> 依存するため、本節の他項目とは切り離し、REV-023 と同一マイルストーンで実装する。
-> それまで `exit` は従来どおり process を終了する（`language-spec.md` の記述は据え置き）。
+> 当時は `exit` の構造化 `ExecutionOutcome::Exited { code, usage }` 化を、`BudgetUsage` と
+> REV-023（`exit()` の process 終了廃止・Phase 3 budget 基盤）に依存するため本節の他項目と切り離していた。
+> これは後に C7（REV-023）で実装された（`src/builtin.rs` の `exit` は process を終了せず `Exited` へ写す）。
+> [言語仕様](language-spec.md)の `exit` の行は loop:drift #302 の D-19（Q1=A）で 0..=255 と範囲外の `argument` を補った。
 
 ### 10.1 採用判断
 
@@ -1032,7 +1053,7 @@ source意味論は変えない。新builtin追加手順は「handler実装+Built
 
 ### 14.3 sandbox OnceLockのExecutionContext capability化
 
-**ステータス:** 実装契約確定・未実装。Phase 2 capabilityの先行縦切り。
+**ステータス:** 実装契約確定。Phase 2 capabilityの先行縦切り。実装状態は冒頭の逸脱一覧を見る（loop:drift #302 の D-20、Q2=A）。
 
 **採用判断:** process-global `OnceLock` を廃止し、immutableな `FilesystemCapability` を実行requestへ注入する。libraryの`CapabilitySet::empty()`はfilesystem deny-by-defaultであり、CLIもsafe/legacy profile builderが必要な`DirectoryHandle` / `FileHandle` authorityを明示構築する。`ExecutionContext`は前executionのcapabilityを保持しない。
 
@@ -1815,6 +1836,8 @@ user call の最終評価順の正本は第5節（AUD-017）§5.1 および第3.
   - `callee-precedence`（callee 先行への precedence 変更）: planned
 - tree / compiler / VM / callback の評価順切替は同一 commit で行い、backend 差を残さない。
 
+ロードマップには AUD-017 / AUD-050 の行が無い（ステータス一覧の規則で完了扱い）ため、上の 2 sub-status は REV-012 の行に書く（loop:drift #302 の D-21、Q3=A。返信なしのため推奨案で確定、当時の[開発ループ手順書](loop-runbook.md) §7.5）。`src/limits.rs` の doc comment を current と target に分けて書き直す作業は、スライス `fix-limits-call-order-doc`（[実行予算・協調実行仕様](execution-control.md) §14 の小節）で扱う。理由: §17.5.2 の決定そのものを変えずに、ロードマップの行の置き場所だけを今の表に合わせる。
+
 status 表現は §19（文書全体の最終受入基準）および REV-011（メタデータ単一正本、`roadmap.md`）の機械可読 status で管理し、手作業同期の再 drift を避ける。
 
 #### 17.5.3 tree / VM 変更箇所
@@ -2218,7 +2241,7 @@ DESIGN ONLY（本節はテストを記述しない。意図するテストを記
 
 ## 20. `format_time` のタイムゾーンマーカー（`%z` / `%Z`）
 
-設計ステータス: **設計確定・未実装**
+設計ステータス: **設計確定**（実装状態は冒頭の逸脱一覧を見る。loop:drift #302 の D-20、Q2=A）
 
 本節は組み込み関数 `format_time(timestamp, format)` に、UTC を示すタイムゾーンマーカー用のフォーマット記号 `%z` と `%Z` を追加する決定を定める。既存6記号（`%Y %m %d %H %M %S`）の挙動は変えず、記号を追加するのみである。
 
@@ -2287,7 +2310,7 @@ Tsumugi の時刻は内部表現も出力基準も UTC 固定である。`now()`
 
 ### 20.8 変更箇所（実装フェーズの入力）
 
-本節は設計確定・未実装である。実装時には以下へ手を入れる。
+実装時に手を入れる箇所の記録である（実装状態は冒頭の逸脱一覧を見る）。
 
 **ソースコード**
 - `src/builtin_core.rs` の `format_unix_timestamp`: 既存の `.replace("%Y", ...)` チェーンへ `.replace("%z", "+0000")` と `.replace("%Z", "UTC")` を追加する。暦計算部分は不変。`builtin_format_time` 自体は引数検査のみで変更不要。
