@@ -1,6 +1,6 @@
 # Tsumugi 決定性・実行時監査仕様
 
-最終更新: 2026-10-28
+最終更新: 2026-11-01
 
 設計ステータス: **到達目標の確定仕様（§1〜§13）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -31,6 +31,8 @@
 | `AuditField` の `original_bytes` を §9.1 の canonical subtree 長（§9.2 の encoding で測る）ではなく値の UTF-8 byte 長で代用（Path は canonical label または requested path の長さ、引数型エラーは 0）。strict CBOR スライスで揃える | §9.1 | R-1a |
 | Path の HMAC-SHA-256 の入力が canonical label の UTF-8 生 byte（`src/audit.rs::RedactionPolicy::hmac_path`）。§9.1/§9.2 の「redaction 前 subtree の canonical encoding」（label を値とする `AuditValue` の deterministic CBOR）ではないため、digest 値が目標仕様と異なる（秘匿性・決定性は保たれる）。strict CBOR スライスで揃える | §9.1/§9.2 | R-1a |
 | `AuditFrame.module_id` / `AuditError.module_id` が §7.2 の `AuditField`（Identifier/Path policy 適用済み）ではなく plain `String`（`Option<String>`）。現在は常に空文字列 / `None` で埋めており（`src/embedding.rs` の Terminal error 構築）module 情報を記録しない。§9.2 の encoding も `AuditField` ではなく text / `Option` になる | §7.2/§9.1 | A-1 |
+| VM の compile が `push` の引数が 1 個の呼び出し（`push(xs)`）で panic する（`src/compiler.rs` の `push` の lowering が `args[1]` を無検査で読む）。また、builtin 名の呼び出しは builtin 経路と user 経路の 2 つを出し、そのたびに引数式を 2 回 compile するため、builtin の入れ子 k 段で bytecode が 2^k に増える（20 段で heap 上限エラー） | §4.8/§2.1 | —（issue #292。fix-vm-builtin-call-lowering で解消予定） |
+| VM の compile が、ループの外の `break` / `continue` を compile error にする（`src/compiler.rs` の `compile_break` / `compile_continue`）。tree はその文に到達したときの runtime error で、到達しなければ実行が続く。VM は到達しない分岐にあっても script 全体を実行前に拒否し、それより前の文の出力も出ない | §2.1/§4.8 | —（issue #292。fix-vm-loop-control-outside-loop で扱う。未設計） |
 | 公開 `ExecutionOutcome`（`src/embedding.rs`、crate root では `EmbeddingOutcome`）は `Completed` / `Exited` / `RuntimeError` / `BudgetExceeded` / `DeadlineExceeded` / `Cancelled` / `InternalFailure` の 7 variant だけで、§7.2 の `TerminalOutcome` と 1 対 1 に対応しない。link 時の拒否と resolver の host 失敗は `Engine::link` の `Result<_, LinkError>`（`LinkError::Denied` / `LinkError::Resolve(HostError)` ほか）で返し、run 中の capability 拒否と host function の失敗は `RuntimeError`（`ErrorKind::Capability` / `ErrorKind::Host`）に含める。監査失敗は監査付き経路だけの別型 `AuditedOutcome::AuditFailed` で返す。`RecordFailure` / `ReplayMismatch` は record/replay が未実装のため無い | §7.2 | A-1（7 variant の構成は [組み込みAPI仕様](embedding-api.md) の E 系スライス由来） |
 
 上の表の `ExecutionOutcome` が 7 variant だけである行（D-8）は、loop:drift #263 を受けて載せた。本文（§7.2 の 1 対 1 対応）を実装に合わせて後退させず、逸脱として記録する案を選んだ（issue #263 Q1=A。返信なしのため推奨案で確定、[開発ループ手順書](loop-runbook.md) §7.5）。理由: spec が実装の正本であり、現在の逸脱は事実を確かめて逸脱一覧に置く（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。D-8 の `ExecutionOutcome` は `#[non_exhaustive]` で、後続 Phase で variant を足す前提になっている。[組み込みAPI仕様](embedding-api.md) の `ExecutionOutcome`（13 variant）との差は、同 spec が逸脱一覧を作るときに載せる（ドキュメント運用ガイドの移行中注記）。
@@ -256,6 +258,14 @@ AUD-048は、規範言語仕様どおり「同じ動的function instanceだけ�
 - 同じsource位置・同じchunk・upvalueなしでも、別評価なら別IDとする。
 - treeは現在のobject identityをこのIDへ明示化し、VMはclosure生成opcodeごとに新IDを付与する。
 - IDはexecution内の比較専用で、scriptとaudit eventへ生値を公開しない。`ContextSnapshot`および暗号化・access controlされたrecord storeでは、同一executionのDAG identityを再現するlocal IDとして保存できるが、execution外の永続identityや認可tokenとして扱わない。
+
+### 4.8 compileの資源と失敗
+
+VMのcompileも、script由来の入力に対してhostを止めない処理として扱う（issue #292 の受け入れで追加）。
+
+- compileはどのASTに対してもpanicしない。引数の個数や形が誤った呼び出しでも、compileは失敗せず、[言語仕様](language-spec.md)「コンテキスト依存組み込み関数の呼び出し順序」「ユーザー定義関数の呼び出し順序」のとおり、到達したときにtreeと同じruntime errorを出すbytecodeを生成する。
+- compileが生成するbytecodeの量（命令数と定数の数）は、ASTのnode数に対して線形に抑える。1つのsource式のbytecodeを、入れ子の深さに応じて何倍にも複製しない。
+- VMは、treeが受け付けて実行するプログラムを、compile時の資源の都合（bytecodeの大きさなど）を理由に拒否しない。compile前に拒否してよいのは、両backendに共通の上限（[言語仕様](language-spec.md)「構文・AST深度制限」、source budget）だけである。backend固有のcompile上限を置くと、同じscriptの成否がbackendで変わり、§2.1の適合方針に反する。
 
 ## 5. 注入hostとfake host
 
@@ -1960,6 +1970,40 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
 
 - Charge opcode、StableError、FunctionId、host boundary、transaction、audit semantic eventをtreeと一致させる
 - differential matrix/fuzzを通し、既知非適合が0件になったcommitでのみexperimental flagを外す
+
+#### fix-vm-builtin-call-lowering 実装スライス（builtin 名の呼び出しの lowering を panic せず線形にする）
+
+> 状態: **未実装**（設計のみ）。issue #292（kamonabe、仕分け「受け入れ」）から作った `fix` スライス。§4.8（この設計 PR で追加）と §2.1 の適合方針、[言語仕様](language-spec.md)「コンテキスト依存組み込み関数の呼び出し順序」を VM で満たす。
+
+設計時点（main `b1b72cc`）の事実:
+
+- builtin 名（`builtin_registry` の public builtin。`print` を除く）の呼び出しで、名前が local・upvalue に解決できないとき、Compiler（`src/compiler.rs` の `Expr::Call`）は `JumpIfGlobalDefined(name)` で分岐し、builtin 経路（`compile_builtin_call`）と user 経路（`compile_user_call`）の両方を出す。どちらの経路も引数式をそれぞれ compile するため、引数の中に同じ形の呼び出しがあると、その引数の bytecode も 2 つずつ出る。入れ子 k 段で bytecode は 2^k に比例する（再現: `print(abs(abs(…abs(1)…)))` の 16 段で debug build 0.13 秒、20 段で bytecode の heap が 64 MiB を超えて heap 上限エラー。tree は 22 段で 5 ms）。AST 深度上限は 256 なので、上限内の source で compile が実質止まらなくなる。
+- builtin 経路の順序: context builtin なら `ValidateBuiltinCall(name, 引数の数, 第1引数が識別子か)`（個数・識別子の検査。失敗すると引数を評価しない）→ 引数 → `CallBuiltin(id, n)`。user 経路の順序: `PrepareCall`（step/depth）→ callee（`GetGlobal`）→ `ValidateCall(n)`（callable/arity）→ 引数 → `Call(n)`。分岐を決めるのは引数を評価する前の 1 回だけである。
+- `push` の lowering（`compile_builtin_call` の中）は、`!args.is_empty()` と第1引数が識別子であることだけを確かめて `args[1]` を読むため、`push(xs)` で index 範囲外の panic になる（`ValidateBuiltinCall` はその前に出しているが、panic は compile 時なので届かない）。`pop` の lowering は引数をすべて compile するので panic しないが、引数が 2 個以上でも特別な経路に入る。`len(識別子)`（`LenLocal`）は識別子 1 個だけの形にしか入らない。
+- tree は `push(xs)` を「`push の引数個数が一致しません: 期待 2, 実際 1`」の `argument` error（catch できる）にする。
+
+- **実装範囲**:
+  - `push` の特別な lowering（`ListPushBinding`）に入る条件を「引数がちょうど 2 個で、第1引数が識別子」にする。`pop` の特別な lowering（`PopUpdate`）に入る条件を「引数がちょうど 1 個で、第1引数が識別子」にする。それ以外の形は汎用の builtin 経路（引数を compile して `CallBuiltin`）へ落とす。どの形でも、先に出す `ValidateBuiltinCall` が、引数を評価する前に tree と同じ `argument` / `builtin_type` error を出す。
+  - builtin 名の呼び出しで、1 つの source の引数式の bytecode を 1 回だけ出すようにする。分岐（`JumpIfGlobalDefined`）は今と同じく引数の評価より前の 1 回で決め、経路ごとに違う部分（引数より前の検査と callee の準備、引数より後の呼び出し）だけを 2 つ出し、引数の bytecode は 2 経路で共有する。どちらの経路を通ったかは、引数の bytecode の後の呼び出しで分かるようにする（例: 経路ごとに operand stack の同じ位置へ callee または builtin 経路の印を置き、引数の後の 1 つの命令がそれを見て `CallBuiltin` と `Call` のどちらの処理をするか決める。命令の形は実装 PR で決めてよい。`OpCode` は `unstable-bytecode` feature の下でだけ公開され、安定した公開 API ではない）。`push` の特別な lowering でも、第2引数の bytecode を 2 経路で共有する（builtin 経路は今と同じく binding storage を in-place で書き換え、対象 List を operand stack へ複製しない）。
+  - 命令を足す・意味を変える場合は、`src/verifier.rs` の検査（jump 先・stack の深さ）と、不正な bytecode を `internal` error にする VM の防御（[設計ドキュメント](design.md)「2026-08-28: VMの内部不変条件をinternal errorへ置換（AUD-023）」、`tests/defensive_vm.rs`）を同じ PR で対応させる。
+- **変えないもの**: 観測結果。出力、error の kind・message・行、catch できるかどうか、評価順と side effect 順、fuel・step の消費、heap / peak_heap（REV-015 Slice 6 の `push` の in-place 課金を含む）、REPL・import・後から宣言した同名 global を user binding として優先する規則（`JumpIfGlobalDefined` の判定位置）。tree は変えない。
+- **範囲外**:
+  - ループの外の `break` / `continue` を VM が compile error にする件（issue #292 の補足）。設計時に再現を確かめた（`print(1)` の次の行に `break` を置くと、tree は `1` を出してから runtime error、VM は何も出さず error。`if false` の中に置くと tree は最後まで実行し、VM は script 全体を拒否する）。触る仕組みが別（ループ制御の lowering）で、`try` の中で catch できるかを言語仕様が決めていない（tree は catch しない）ため、別スライス `fix-vm-loop-control-outside-loop`（`todo`）にした。
+  - `print` の lowering（予約 token で、経路は 1 つ）。
+  - local・upvalue に同名の binding がある呼び出し（今も user 経路だけを出す）。
+  - VM の命令数で止める watchdog の上限値。命令の並びが変わるため、watchdog が数える命令数は変わり得るが、watchdog は fuel から独立した停止性の backstop で、fuel・step の消費は変えない（[次期意味論・実装決定](semantic-decisions.md) §17.7）。
+- **不採用案**:
+  - compile 時に bytecode の大きさの上限を置き、超えたら制御された error で止める: §4.8 の 3 項目めに反する（tree が実行できる script を VM だけが拒否する）。manifesto 原則 5。
+  - プログラム全体に同名の global 定義・import が無いときだけ builtin 経路だけを出す: 同名の global を書いた script では今と同じく 2^k に増える。REPL で後の入力が同名の関数を定義した場合、前の入力で定義した関数の中の呼び出しが user binding を優先しなくなり、意味論が変わる。
+  - 引数を分岐より前に評価する: builtin 経路の「個数の検査に失敗したら引数を評価しない」と、user 経路の「callee の検査に失敗したら引数を評価しない」（[言語仕様](language-spec.md)「ユーザー定義関数の呼び出し順序」）に反する。
+- **done PR で行う逸脱一覧の更新**: 逸脱一覧の「VM の compile が `push` の引数が 1 個の呼び出し…」の行を削除する。ループの外の `break` / `continue` の行は残す。
+- **受入基準**:
+  - **VBC-AT-01（引数の個数・形の誤りで panic しない）**: `push(xs)`・`push(xs, 1, 2)`・`push()`・`pop(xs, 1)`・`pop()` と、第1引数が識別子でない `push([1], 2)` を、`let xs = []` の後に置いた script で、VM は panic せず、tree と同じ kind・message・行の error になる。`try` / `catch` で catch でき、catch の後の文が両 backend で同じように実行される。引数に `print` を含む形（例: `push(xs, print("a"), print("b"))`）で、両 backend とも引数を評価しない（出力が無い）。library 経路（`Backend::VmExperimental` の `Engine::compile`）でも compile が panic しない。確かめ方: tree/VM の differential test（`tests/differential.rs` かこのスライスの新しい test file）。
+  - **VBC-AT-02（bytecode の量が入れ子の深さに線形）**: `print(abs(abs(…abs(1)…)))` の入れ子 k 段の compile 結果の命令数を k = 1〜200 で測り、隣り合う k の差が k によらず一定である（線形）。`len(str(abs(…)))` のように違う builtin を混ぜた入れ子、`push(xs, push(ys, …))` の入れ子、user 関数の引数の中の builtin の入れ子でも同じく線形である。確かめ方: `src/compiler.rs` の `#[cfg(test)]` の unit test（Chunk の命令数と定数の数を数える）。
+  - **VBC-AT-03（深い入れ子を実行できる）**: 入れ子 200 段の `abs`・`str` の混在、`push` の 50 段の入れ子を VM で実行すると、既定の上限の下で tree と同じ出力で完了し、compile と実行が合わせて 1 秒以内（release build）に終わる。確かめ方: differential test。
+  - **VBC-AT-04（user binding の優先と資源の一致）**: 同名の global を、呼び出しより前に宣言した場合・後で宣言した関数から呼ぶ場合・import した場合・REPL の後の入力で定義した場合のそれぞれで、入れ子の builtin 名の呼び出しが tree と同じく user binding を呼ぶ（入れ子の内側と外側で経路が違う混在も含む）。builtin の入れ子と `push` の入れ子で、fuel の消費・heap / peak_heap・出力 byte が tree と一致する。確かめ方: differential test と既存の REPL test の追加ケース。
+  - **VBC-AT-05（非破壊と防御）**: 既存の `tests/differential.rs`・golden fixture・`tests/defensive_vm.rs`・REV-015 Slice 6 の `push` の peak_heap parity test（`tests/scaling.rs` の `push_peak_heap_has_no_full_clone_spike_across_engines`）が無改変で緑。足した・意味を変えた命令について、`src/verifier.rs` が compiler の出力を受け入れ、手組みの不正な Chunk（stack の不足・印の位置の誤り）を VM が panic せず `internal` error にする。確かめ方: `tests/defensive_vm.rs` と verifier の unit test への追加。
+- **想定の変更規模**: `src/compiler.rs` 約 60〜120 行（`push` / `pop` の条件、builtin 名の呼び出しの共有 lowering）、`src/vm.rs` 約 40〜80 行（経路の印と引数の後の呼び出し）、`src/opcode.rs`・`src/verifier.rs`・`src/chunk.rs` 合わせて約 20〜40 行。合わせて約 120〜240 行。テストは unit test と differential test で約 250〜400 行。触る仕組みは VM の builtin 名の呼び出しの lowering 1 つ、受入基準は 5 項目。
 
 ## 15. 受入基準
 
