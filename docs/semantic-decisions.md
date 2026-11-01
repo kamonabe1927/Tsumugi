@@ -1990,7 +1990,7 @@ verify(chunk: Chunk) -> Result<VerifiedChunk, ChunkVerifyError>
   (V5) capture 記述子:    §17.3 の CaptureDesc の Local(slot)/Upvalue(index) が
                           親プロトタイプの範囲内（REV-005 の範囲検証をここで実施）
   (V6) jump target 範囲:  Jump / JumpIfFalse / JumpIfFalseKeep / JumpIfTrueKeep /
-                          Loop / SetupTry / JumpIfGlobalDefined の target が
+                          Loop / SetupTry / JumpIfGlobalDefined / JumpIfBuiltinMark の target が
                           0 ..= code.len()（= 末尾＝暗黙 return 位置を許可）
   (V7) builtin id:        CallBuiltin(id, _) の id が registry に存在
                           （AUD-049 の BuiltinId は型で保証されるが、防御的に再確認）

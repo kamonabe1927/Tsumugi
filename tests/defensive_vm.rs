@@ -311,3 +311,45 @@ fn repl_rolls_back_malformed_chunk_and_recovers() {
     vm.run_repl_chunk(unverified(valid))
         .expect("不正な入力の後にREPL VMが回復しませんでした");
 }
+
+/// VBC-AT-05（fix-vm-builtin-call-lowering）: `JumpIfBuiltinMark` の印の位置に要素が無い、
+/// または引数の数が `usize::MAX` でも host panic せず internal error になる。
+#[test]
+fn jump_if_builtin_mark_without_operands_returns_internal_error() {
+    let mut chunk = Chunk::new();
+    chunk.emit(OpCode::JumpIfBuiltinMark(2, 1), 1);
+    chunk.emit(OpCode::Return, 1);
+    run_expecting_internal_error("印の位置に要素が無い", chunk);
+
+    let mut chunk = Chunk::new();
+    chunk.emit(OpCode::JumpIfBuiltinMark(usize::MAX, 1), 1);
+    chunk.emit(OpCode::Return, 1);
+    run_expecting_internal_error("引数の数が usize::MAX", chunk);
+}
+
+/// VBC-AT-05: 印（Null）を取り除いた後に builtin の後処理へ飛んでも、引数が足りなければ
+/// internal error になる。印が Null でない（user 経路の callee 位置）ときは何もせず次の
+/// `Call` に進み、callee 検査の `not_callable` で止まる（host panic しない）。
+#[test]
+fn misplaced_builtin_mark_returns_structured_error() {
+    let mut chunk = Chunk::new();
+    let null = chunk.add_constant(Value::Null);
+    chunk.emit(OpCode::LoadConst(null), 1); // 印
+    chunk.emit(OpCode::JumpIfBuiltinMark(0, 3), 1); // 印を取り除いて jump
+    chunk.emit(OpCode::Return, 1);
+    let abs = tsumugi::builtin_registry::id_of("abs").expect("abs");
+    chunk.emit(OpCode::CallBuiltin(abs, 1), 1); // 引数が無い
+    chunk.emit(OpCode::Return, 1);
+    run_expecting_internal_error("印の後の引数不足", chunk);
+
+    let mut chunk = Chunk::new();
+    let one = chunk.add_constant(Value::Int(1));
+    chunk.emit(OpCode::LoadConst(one), 1); // 印ではない値
+    chunk.emit(OpCode::JumpIfBuiltinMark(0, 4), 1); // 何もしない
+    chunk.emit(OpCode::Call(0), 1);
+    chunk.emit(OpCode::Return, 1);
+    let error = Vm::new(unverified(chunk))
+        .run()
+        .expect_err("callee でない値の Call が成功しました");
+    assert_eq!(error.error_type(), "type", "{}", error.message());
+}

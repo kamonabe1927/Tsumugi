@@ -3,20 +3,27 @@
 //! （docs/determinism-and-audit.md の同名スライス小節）。
 //!
 //! VBC-AT-02（命令数の線形性）は `src/compiler.rs` の unit test、VBC-AT-05 の verifier 側は
-//! `src/verifier.rs` の unit test で確かめる。
+//! `src/verifier.rs` の unit test、VM の防御（不正な bytecode は internal error）は
+//! `tests/defensive_vm.rs` で確かめる。
 
+use std::num::NonZeroU128;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tsumugi::chunk::Chunk;
-use tsumugi::opcode::OpCode;
-use tsumugi::value::Value;
-use tsumugi::verifier::VerifiedChunk;
+use std::sync::Arc;
+
+use tsumugi::budget::{BudgetConfig, BudgetUsage};
+use tsumugi::compiler::Compiler;
+use tsumugi::error::TsumugiError;
+use tsumugi::eval::Evaluator;
+use tsumugi::lexer::Lexer;
+use tsumugi::parser::Parser;
 use tsumugi::vm::Vm;
 use tsumugi::{
-    Backend, CompileOptions, EmbeddingEngine, EngineConfig, LanguageRevision, Source, SourceId,
+    Backend, CapabilitySet, CompileOptions, EmbeddingEngine, EngineConfig, LanguageRevision,
+    Source, SourceId, SystemOutput,
 };
 
 struct TestDir {
@@ -114,10 +121,6 @@ fn run_repl(inputs: &str, use_vm: bool) -> Observed {
         .collect::<Vec<_>>()
         .join(" ");
     observed
-}
-
-fn nested(open: &str, inner: &str, close: &str, depth: usize) -> String {
-    format!("{}{}{}", open.repeat(depth), inner, close.repeat(depth))
 }
 
 // ---------------------------------------------------------------------------
@@ -276,93 +279,99 @@ fn vbc_at_04_repl_later_definition_wins() {
     assert_eq!(tree, vm);
 }
 
+/// 出力を grant した capability set（`tests/differential.rs` と同じ）。
+fn print_capabilities() -> CapabilitySet {
+    let pid = NonZeroU128::new(1).expect("non-zero");
+    CapabilitySet::builder()
+        .stdout(Arc::new(SystemOutput::new(pid)))
+        .expect("stdout grant")
+        .build()
+}
+
+fn tree_run(source: &str, fuel: u64) -> (BudgetUsage, Result<(), TsumugiError>) {
+    let tokens = Lexer::new(source).tokenize();
+    let program = Parser::new(tokens).parse().expect("parse");
+    let mut evaluator = Evaluator::with_budget(BudgetConfig::for_legacy(fuel, 1_000_000));
+    evaluator.set_capabilities(print_capabilities());
+    let result = evaluator.run(&program, source.len() as u64);
+    (evaluator.budget_usage(), result)
+}
+
+fn vm_run(source: &str, fuel: u64) -> (BudgetUsage, Result<(), TsumugiError>) {
+    let tokens = Lexer::new(source).tokenize();
+    let program = Parser::new(tokens).parse().expect("parse");
+    let chunk = Compiler::new().compile(&program).expect("compile");
+    let mut vm = Vm::new(chunk);
+    vm.set_capabilities(print_capabilities());
+    vm.set_max_steps(fuel);
+    vm.charge_link(source.len() as u64, &[])
+        .expect("charge_link");
+    let result = vm.run();
+    (vm.budget_usage(), result)
+}
+
+/// 成功する最小の fuel 上限（tree で探す）。
+fn min_success_fuel(source: &str) -> u64 {
+    (0..=500)
+        .find(|fuel| tree_run(source, *fuel).1.is_ok())
+        .expect("500 以内で成功しない")
+}
+
+/// builtin の入れ子と push の入れ子を loop と user 呼び出しの中に置いた script で、
+/// 成功する最小の fuel 上限 N の一致、N-1 の terminal の一致、engine 間不変軸と
+/// per-item peak の exact 一致、heap の向き（課金がある・peak が live 以上）を確かめる。
 #[test]
-fn vbc_at_04_budget_and_output_match_on_nested_builtins() {
-    let mut source = String::from("let xs = []\nlet ys = []\n");
-    source.push_str(&format!("print({})\n", nested("abs(", "-1", ")", 30)));
-    let mut expr = String::from("1");
-    for i in 0..20 {
-        expr = if i % 2 == 0 {
-            format!("push(xs, {expr})")
-        } else {
-            format!("push(ys, {expr})")
-        };
+fn vbc_at_04_budget_axes_match_on_nested_builtins() {
+    let sources = [
+        concat!(
+            "fn id(x)\n  return x\nend\n",
+            "let xs = []\nlet ys = []\nlet i = 0\n",
+            "while i < 5\n",
+            "  push(xs, push(ys, abs(abs(id(0 - i)))))\n",
+            "  print(len(to_str(abs(to_int(i)))))\n",
+            "  i = i + 1\n",
+            "end\n",
+            "print(len(xs), len(ys))\n",
+        ),
+        concat!(
+            "fn add(xs, v)\n  push(xs, push(xs, abs(v)))\n  return pop(xs)\nend\n",
+            "let zs = []\nlet n = 0\n",
+            "while n < 4\n  add(zs, abs(abs(n)))\n  n = n + 1\nend\n",
+            "print(len(zs))\n",
+        ),
+    ];
+    for source in sources {
+        let n = min_success_fuel(source);
+        assert!(n > 0, "fuel が 0 の script では確かめにならない");
+
+        let (tree, tree_result) = tree_run(source, n);
+        let (vm, vm_result) = vm_run(source, n);
+        assert!(tree_result.is_ok(), "tree: {tree_result:?}");
+        assert!(vm_result.is_ok(), "vm: {vm_result:?}");
+        // fuel は exact 一致。
+        assert_eq!(tree.committed.fuel, vm.committed.fuel, "fuel");
+        // engine 間不変軸と per-item peak。
+        assert_eq!(
+            tree.committed.string_allocations,
+            vm.committed.string_allocations
+        );
+        assert_eq!(tree.committed.string_bytes, vm.committed.string_bytes);
+        assert_eq!(tree.committed.output_calls, vm.committed.output_calls);
+        assert_eq!(tree.committed.output_bytes, vm.committed.output_bytes);
+        assert_eq!(tree.reserved.output_calls, vm.reserved.output_calls);
+        assert_eq!(tree.peaks, vm.peaks, "per-item peak");
+        // heap は課金の向き（数値は engine 固有の code artifact を含む）。
+        for usage in [&tree, &vm] {
+            assert!(usage.live_heap_bytes > 0);
+            assert!(usage.peak_heap_bytes >= usage.live_heap_bytes);
+        }
+
+        // N-1 では両 engine が同じ terminal で止まる。
+        let (_, tree_stop) = tree_run(source, n - 1);
+        let (_, vm_stop) = vm_run(source, n - 1);
+        let tree_err = tree_stop.expect_err("tree が N-1 で成功した");
+        let vm_err = vm_stop.expect_err("vm が N-1 で成功した");
+        assert_eq!(tree_err.error_type(), vm_err.error_type());
+        assert_eq!(tree_err.message(), vm_err.message());
     }
-    source.push_str(&format!("{expr}\nprint(len(xs), len(ys))\n"));
-    // 予算を絞った環境でも同じ観測結果（同じ step / heap の上限で同じ成否）になる。
-    for fuel in ["100000", "1000", "40"] {
-        let (tree, _) = run_with_env(&source, false, fuel);
-        let (vm, _) = run_with_env(&source, true, fuel);
-        assert_eq!(tree.success, vm.success, "fuel={fuel}: {tree:?} / {vm:?}");
-        assert_eq!(tree.stdout, vm.stdout, "fuel={fuel}");
-    }
-    assert_same(&[], &source);
-}
-
-fn run_with_env(main: &str, use_vm: bool, steps: &str) -> (Observed, Duration) {
-    let dir = TestDir::new();
-    std::fs::write(dir.path.join("main.tsg"), main).expect("write main");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tsumugi"));
-    if use_vm {
-        command.arg("--vm");
-    }
-    command
-        .arg("main.tsg")
-        .env("TSUMUGI_MAX_STEPS", steps)
-        .current_dir(&dir.path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let start = Instant::now();
-    let output = command.output().expect("run tsumugi");
-    (finish(output), start.elapsed())
-}
-
-// ---------------------------------------------------------------------------
-// VBC-AT-05: 防御（不正な bytecode は internal error）
-// ---------------------------------------------------------------------------
-
-fn run_chunk(chunk: Chunk) -> tsumugi::error::TsumugiError {
-    Vm::new(VerifiedChunk::from_trusted(chunk))
-        .run()
-        .expect_err("不正な命令列が成功しました")
-}
-
-#[test]
-fn vbc_at_05_jump_if_builtin_mark_without_operands_is_internal_error() {
-    // 印の位置（トップから 引数の数 + 1 番目）に要素が無い。
-    let mut chunk = Chunk::new();
-    chunk.emit(OpCode::JumpIfBuiltinMark(2, 1), 1);
-    chunk.emit(OpCode::Return, 1);
-    assert_eq!(run_chunk(chunk).error_type(), "internal");
-
-    // 引数の数が usize::MAX でも panic しない。
-    let mut chunk = Chunk::new();
-    chunk.emit(OpCode::JumpIfBuiltinMark(usize::MAX, 1), 1);
-    chunk.emit(OpCode::Return, 1);
-    assert_eq!(run_chunk(chunk).error_type(), "internal");
-}
-
-#[test]
-fn vbc_at_05_misplaced_mark_is_internal_error() {
-    // 印（Null）の後の stack が builtin の後処理に足りない: CallBuiltin が internal error。
-    let mut chunk = Chunk::new();
-    let null = chunk.add_constant(Value::Null);
-    chunk.emit(OpCode::LoadConst(null), 1); // 印
-    chunk.emit(OpCode::JumpIfBuiltinMark(0, 3), 1); // 取り除いて jump
-    chunk.emit(OpCode::Return, 1);
-    let abs = tsumugi::builtin_registry::id_of("abs").expect("abs");
-    chunk.emit(OpCode::CallBuiltin(abs, 1), 1); // 引数が無い
-    chunk.emit(OpCode::Return, 1);
-    assert_eq!(run_chunk(chunk).error_type(), "internal");
-
-    // 印の位置が Null でない（user 経路の扱い）なら Call に進み、callee 検査で止まる。
-    // どちらも host panic せず、構造化 error になる。
-    let mut chunk = Chunk::new();
-    let one = chunk.add_constant(Value::Int(1));
-    chunk.emit(OpCode::LoadConst(one), 1);
-    chunk.emit(OpCode::JumpIfBuiltinMark(0, 4), 1);
-    chunk.emit(OpCode::Call(0), 1);
-    chunk.emit(OpCode::Return, 1);
-    let error = run_chunk(chunk);
-    assert_ne!(error.error_type(), "");
 }
