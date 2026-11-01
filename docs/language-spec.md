@@ -674,7 +674,7 @@ import はプログラムの実行を始める前にすべて解決する。読�
 - `@NAME/...` による root の選択と、unqualified path（`@` で始まらないパス）を root `default` へ割り当てる扱いは [Capability Model仕様](capability-model.md) §14.1 に従う
 - ネストした import（A が B を import し、B が C を import する）にも対応
 - import 先のファイルの中の import も、そのファイルのディレクトリではなく import root を基準に解決する。`import "b.tsg"` は、どのファイルに書いても root `default` の直下の `b.tsg` を指す。`..` と絶対パスは使えず、link 時に拒否する
-- 実行するのは、link 時に import root の下で確かめたファイルの内容そのものである。実行時にファイルを読み直さないので、link の後でファイルを書き換えても、実行される内容は変わらない（[Capability Model仕様](capability-model.md) §10）。現在の実装との差は上の「現在の既知非適合」にある
+- 実行するのは、link 時に import root の下で確かめたファイルの内容そのものである。実行時にファイルを読み直さないので、link の後でファイルを書き換えても、実行される内容は変わらない（[Capability Model仕様](capability-model.md) §10）
 
 ### 循環 import
 

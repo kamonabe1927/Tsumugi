@@ -5170,9 +5170,9 @@ mod tests {
     use std::sync::Mutex;
 
     /// 書き込まれた bytes を蓄積する観測用 Output double（FixedClock の stdout 版）。
-    struct CapturingOutput {
-        policy_id: NonZeroU128,
-        sink: Arc<Mutex<Vec<u8>>>,
+    pub(super) struct CapturingOutput {
+        pub(super) policy_id: NonZeroU128,
+        pub(super) sink: Arc<Mutex<Vec<u8>>>,
     }
 
     impl crate::capability::Output for CapturingOutput {
@@ -6713,88 +6713,100 @@ mod c6c_tests {
     const ILG_MISMATCH_PREFIX: &str =
         "import に失敗しました: 同じモジュールが別の内容で既に展開されています: ";
 
+    /// stdout を capture する request で run し、outcome と書き込まれた stdout を返す。
+    fn ilg_run_captured(
+        engine: &Engine,
+        linked: &LinkedScript,
+        ctx: &mut ExecutionContext,
+    ) -> (ExecutionOutcome, String) {
+        let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let caps = CapabilitySet::builder()
+            .stdout(Arc::new(super::tests::CapturingOutput {
+                policy_id: pid(11),
+                sink: Arc::clone(&sink),
+            }))
+            .expect("grant stdout")
+            .build();
+        let outcome = engine.run(linked, ctx, ilg_request().with_capabilities(caps));
+        let out = String::from_utf8(sink.lock().unwrap().clone()).expect("utf8");
+        (outcome, out)
+    }
+
+    /// ILG-AT-03(e) の 2 回目の run が import error で終わり、root と module のどの文も実行しない
+    /// （capture した stdout が空）ことを確かめる。
+    fn ilg_assert_mismatch(
+        engine: &Engine,
+        linked: &LinkedScript,
+        ctx: &mut ExecutionContext,
+        module_id: &str,
+        line: u32,
+    ) {
+        let (outcome, out) = ilg_run_captured(engine, linked, ctx);
+        match outcome {
+            ExecutionOutcome::RuntimeError { error, .. } => {
+                assert_eq!(error.code, ErrorKind::Import);
+                assert_eq!(
+                    error.safe_message,
+                    format!("{ILG_MISMATCH_PREFIX}{module_id}")
+                );
+                assert_eq!(error.line, Some(line));
+            }
+            other => panic!("期待: RuntimeError, 実際: {other:?}"),
+        }
+        assert_eq!(
+            out, "",
+            "root と module のどの文も実行しない（print が出ない）"
+        );
+        assert!(!ctx.is_poisoned());
+    }
+
     /// ILG-AT-03(e): 同じ ModuleId が別の内容になる 2 つの LinkedScript を同じ context で順に run すると、
     /// 2 回目は Link フェーズの import error で 1 文も実行しない。context は poison しない。
     #[test]
     fn ilg_at_03e_hash_mismatch_fails_in_link_phase_without_poison() {
         let engine = Engine::builder().build().unwrap();
         let mut ctx = ExecutionContext::new(&engine);
-        ilg_completed(
-            &engine,
-            &ilg_link_mem(&engine, "let hits = 0\nlet marker = 0\n", &[]),
-            &mut ctx,
+        let root = "print(\"root\")\nimport \"a.tsg\"\n";
+        let first = ilg_link_mem(&engine, root, &[("@default/a.tsg", "print(\"a1\")\n")]);
+        let second = ilg_link_mem(&engine, root, &[("@default/a.tsg", "print(\"a2\")\n")]);
+        let (outcome, out) = ilg_run_captured(&engine, &first, &mut ctx);
+        assert!(
+            matches!(outcome, ExecutionOutcome::Completed { .. }),
+            "{outcome:?}"
         );
-        let root = "marker = marker + 1\nimport \"a.tsg\"\n";
-        let first = ilg_link_mem(&engine, root, &[("@default/a.tsg", "hits = hits + 1\n")]);
-        let second = ilg_link_mem(&engine, root, &[("@default/a.tsg", "hits = hits + 100\n")]);
-        ilg_completed(&engine, &first, &mut ctx);
-        assert_eq!(
-            (ilg_int(&ctx, "hits"), ilg_int(&ctx, "marker")),
-            (Some(1), Some(1))
-        );
+        assert_eq!(out, "root\na1\n");
 
-        match engine.run(&second, &mut ctx, ilg_request()) {
-            ExecutionOutcome::RuntimeError { error, .. } => {
-                assert_eq!(error.code, ErrorKind::Import);
-                assert_eq!(
-                    error.safe_message,
-                    format!("{ILG_MISMATCH_PREFIX}@default/a.tsg")
-                );
-                assert_eq!(error.line, Some(2));
-            }
-            other => panic!("期待: RuntimeError, 実際: {other:?}"),
-        }
-        assert_eq!(
-            (ilg_int(&ctx, "hits"), ilg_int(&ctx, "marker")),
-            (Some(1), Some(1)),
-            "root と module のどの文も実行しない"
+        ilg_assert_mismatch(&engine, &second, &mut ctx, "@default/a.tsg", 2);
+
+        // 同じ graph はその後も同じ context で run できる（a.tsg は展開済みなので再展開しない）。
+        let (outcome, out) = ilg_run_captured(&engine, &first, &mut ctx);
+        assert!(
+            matches!(outcome, ExecutionOutcome::Completed { .. }),
+            "{outcome:?}"
         );
-        assert!(!ctx.is_poisoned());
-        ilg_completed(&engine, &first, &mut ctx);
-        assert_eq!(
-            (ilg_int(&ctx, "hits"), ilg_int(&ctx, "marker")),
-            (Some(1), Some(2)),
-            "同じ graph はその後も run できる"
-        );
+        assert_eq!(out, "root\n");
 
         // 推移: a.tsg は同じ内容、その下の b.tsg だけが違う。
         let mut ctx = ExecutionContext::new(&engine);
-        ilg_completed(
-            &engine,
-            &ilg_link_mem(&engine, "let hits = 0\n", &[]),
-            &mut ctx,
-        );
-        let a = "let pad = 0\nimport \"b.tsg\"\n";
+        let a = "print(\"a\")\nimport \"b.tsg\"\n";
         let first = ilg_link_mem(
             &engine,
-            "import \"a.tsg\"\n",
-            &[
-                ("@default/a.tsg", a),
-                ("@default/b.tsg", "hits = hits + 1\n"),
-            ],
+            root,
+            &[("@default/a.tsg", a), ("@default/b.tsg", "print(\"b1\")\n")],
         );
         let second = ilg_link_mem(
             &engine,
-            "import \"a.tsg\"\n",
-            &[
-                ("@default/a.tsg", a),
-                ("@default/b.tsg", "hits = hits + 100\n"),
-            ],
+            root,
+            &[("@default/a.tsg", a), ("@default/b.tsg", "print(\"b2\")\n")],
         );
-        ilg_completed(&engine, &first, &mut ctx);
-        match engine.run(&second, &mut ctx, ilg_request()) {
-            ExecutionOutcome::RuntimeError { error, .. } => {
-                assert_eq!(error.code, ErrorKind::Import);
-                assert_eq!(
-                    error.safe_message,
-                    format!("{ILG_MISMATCH_PREFIX}@default/b.tsg")
-                );
-                assert_eq!(error.line, Some(2), "a.tsg の中の import 文の行");
-            }
-            other => panic!("期待: RuntimeError, 実際: {other:?}"),
-        }
-        assert_eq!(ilg_int(&ctx, "hits"), Some(1));
-        assert!(!ctx.is_poisoned());
+        let (outcome, out) = ilg_run_captured(&engine, &first, &mut ctx);
+        assert!(
+            matches!(outcome, ExecutionOutcome::Completed { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(out, "root\na\nb1\n");
+        // line は a.tsg の中の `import "b.tsg"` の行。
+        ilg_assert_mismatch(&engine, &second, &mut ctx, "@default/b.tsg", 2);
     }
 
     /// ILG-AT-05: source/import の課金は root と保持 source の byte 長どおりで、imported module record の
