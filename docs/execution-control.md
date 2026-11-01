@@ -1,6 +1,6 @@
 # Tsumugi 実行予算・協調実行仕様
 
-最終更新: 2026-10-30
+最終更新: 2026-11-01
 
 設計ステータス: **到達目標の確定仕様（§1〜§13）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -2616,6 +2616,22 @@ issue #290 から作ったスライス（不具合の修正、`slices.toml` の 
 - **実装での判断（実装 PR #301 のレビュー C1、判断待ち Q1）:** 深度超過のエラーは公開型 `ControlStop` に variant を足して運ばない。`ControlStop` は変えず（§7 の「どの variant も script から捕捉できない terminal」を保つ）、tree-walk 版・VM 版の呼び出し側が値の生成・変更の primitive（`Value::new_list` / `new_dict` / `list_push_tracked` / `index_set_tracked`）を呼ぶ前に crate 内部の検査（`Value::check_element_depth`）で深度を確かめ、超過なら catch できる `overflow` を直接返す。深度の要約と検査の関数（`ChildDepth`・`depth` など）は `pub(crate)` にし、公開の生成関数（`Tracked::new` / `constant` / `new_via_handle`）に trait 境界を足さない。理由: 公開 API を増やさず（[マニフェスト](manifesto.md)原則 8、§21.6 が公開 API を増やさない理由と同じ）、停止理由の型の意味を一つに保つ（原則 5）。返信なしのため推奨案で確定（Q1=B、[開発ループ手順書](loop-runbook.md) §7.5）。
 - **実装での判断（実装 PR #301 の再レビュー 43e885d の C1、判断待ち Q1）:** List / Dict リテラルの深度は、要素・値を 1 つ評価して入れるたびに検査する（VM の `ListPush` / `DictInsert` と同じ位置）。tree-walk 版も同じ位置で検査し（`src/eval.rs` の List / Dict リテラルの 2 経路 × 2 か所。`check_collection` の後、要素を入れる前）、リテラルを作り終えてからまとめて検査しない。`[e, print("side")]`（`e` は深度 256）は両 backend で `side` を出す前に `overflow`、`{"a": e, "a": 1}` も両 backend で `overflow` になる。VM・バイトコードは変えない。VND-AT-01 に両入力の paired test を足した。理由: 「List / Dict に値を入れるたびにその値の深度を見る」という 1 つの規則が §21.3 の「List / Dict に値を入れるすべての経路」と同じ読み方になり、collection の上限の検査順とも揃う（[マニフェスト](manifesto.md)原則 5・8）。返信なしのため推奨案で確定（Q1=A、[開発ループ手順書](loop-runbook.md) §7.5）。
 - **実装での判断（実装 PR #301 の再レビュー 4b95225 の C1、判断待ち Q1）:** List の最も深い要素の差し替えや `push` / `pop` の往復で `settle_child_depth` が全要素を読み直し、時間が要素数の 2 乗になる件は、実装を変えずに未実装範囲として記録する（上の「未実装範囲」の表の 1 行）。受入基準 VND-AT-03 は満たしており、1 回の読み直しは `max_collection_elements`、回数は fuel で上限があるので止まらなくはならない。直し方（backing に深度ごとの子の数の histogram を持たせる、または読み直しへ fuel を課金する）は、前者が論理サイズに入らないメモリを足し、後者が §21.3「課金しない」と VND-AT-05 を変えるため、どちらも spec の判断を要するので `needs-design` の [issue #304](https://github.com/kamonabe/Tsumugi/issues/304) に回す。spec の目標の章は変えない。返信なしのため推奨案で確定（Q1=B、[開発ループ手順書](loop-runbook.md) §7.5）。
+
+### fix-limits-call-order-doc 実装スライス（`MAX_USER_CALL_DEPTH` の doc を current と target に分ける）
+
+loop:drift #302 の D-21 から作ったスライス（文書と実装のずれの修正、`slices.toml` の `fix-limits-call-order-doc`）。目標の規範は[次期意味論・実装決定](semantic-decisions.md) §17.5.2（REV-012）の「`src/limits.rs` の doc comment は current と target を混在させず、どちらの revision の契約かを明記する。実装が現行のうちは current を書く」で、#302 の Q3=A（返信なしのため推奨案で確定、当時の[開発ループ手順書](loop-runbook.md) §7.5）でこのスライスを足すことにした。
+
+- **現状のずれ:** `src/limits.rs` の `MAX_USER_CALL_DEPTH` の doc comment（「いつ拒否するか」）は「動的 callee は先に一度だけ評価・分類し、user callable の場合だけ引数評価より前に深度を検査する」と、target（callee 先行、[次期意味論・実装決定](semantic-decisions.md) §5.1）の順を current の区別なしに書く。実装は [言語仕様](language-spec.md)「ユーザー定義関数の呼び出し順序」のとおり「step と深度を検査してから callee を評価する」（tree は `src/eval.rs` の user call の準備で `begin_user_call` が callee の評価より前。VM も観測上同じ）。この差は[次期意味論・実装決定](semantic-decisions.md)の逸脱一覧（§5.1・§17.5）にある。
+- **実装範囲:**
+  - `MAX_USER_CALL_DEPTH` の doc comment の「いつ拒否するか」を、current と target に分けて書く。current: 128 個目の user frame は実行でき、129 個目を作る直前に拒否する。user call では step と深度の検査が callee の評価より前にあり、検査に失敗すると callee 式と引数を評価しない（言語仕様「ユーザー定義関数の呼び出し順序」へのリンクか節名を書く）。target: 次の `LanguageRevision` で callee 先行へ切り替える予定であること（[次期意味論・実装決定](semantic-decisions.md) §5.1・§17.5.2）と、切り替えの commit でこの doc を target へ書き換えること。
+  - 「何を数えるか」と、tree と VM が同じ境界を判定する段落は、current と target で変わらないので残す。
+- **範囲外:**
+  - 評価順の切り替え（callee 先行への変更）。`LanguageRevision` を上げる破壊的変更で、tree / compiler / VM / callback を同じ commit で変える（§17.5.2）。まだスライスは無い。
+  - `src/limits.rs` 以外のコメント・コード、[言語仕様](language-spec.md)・[次期意味論・実装決定](semantic-decisions.md) の本文。逸脱一覧の行（§5.1・§17.5）は評価順のずれそのものを記録しているので、このスライスでは消さない。
+- **想定の変更規模:** `src/` はコメントだけで 10〜20 行程度（`src/limits.rs` の doc comment）。コードとテストの変更は無い。触る仕組みは「`src/limits.rs` の doc comment」1 つ。受入基準は 2 項目。§14.1（[開発ループ手順書](loop-runbook.md)）に収まる。
+- **受入基準:**
+  - **LCD-AT-01（current と target を分ける）:** `MAX_USER_CALL_DEPTH` の doc comment が、current（step と深度の検査が callee の評価より前。言語仕様「ユーザー定義関数の呼び出し順序」）と target（callee 先行。次の `LanguageRevision` で切り替え、[次期意味論・実装決定](semantic-decisions.md) §5.1・§17.5.2）を見出しか前置きで区別して書き、current の記述が tree（`src/eval.rs` の `begin_user_call` の位置）と VM の実装に合う。確かめ方: レビューで doc comment と実装・言語仕様を照合する。`cargo doc --no-deps --document-private-items` で `src/limits.rs` を指す警告が出ない（ほかの警告の件数は main から増えない。`MAX_USER_CALL_DEPTH` は `pub(crate)` なので `--document-private-items` が要る）。
+  - **LCD-AT-02（挙動は変えない）:** `src/` の差分がコメント行だけで、既存のテストが期待値の変更なしで通る。確かめ方: 差分の確認と `cargo test`。
 
 ## 15. 境界受入テスト
 

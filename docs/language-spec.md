@@ -2,7 +2,7 @@
 
 バージョン: 0.21
 
-最終更新: 2026-10-31
+最終更新: 2026-11-01
 
 この番号は言語仕様のrevisionであり、Cargo package / REPLの実装バージョン `0.1.0` とは独立して管理する。
 
@@ -18,6 +18,8 @@
 - 許可の無い操作は、スクリプト実行中なら catch 可能な `capability`（ファイルシステム操作は `sandbox`）エラーになる。import の拒否だけは実行開始前の link 時に起き、catch できない（「モジュール / import」の「パス解決」）
 
 本節と、組み込み関数表・「実行安全性」の権限に関する記述は、loop:drift #298 の D-17・D-18 を受けて CLI の既定（safe profile）に合わせて直した。実装は変えず、本書を [Capability Model仕様](capability-model.md) §14 と実装に合わせる案（Q1=A・Q2=A）は、返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5、issue #298）。理由: Capability Model仕様が採択した safe 既定はマニフェスト原則 2「権限はホストが明示的に付与する」に沿い、実装もそれに一致している。本書だけが CLI が ambient に権限を持つ前提で書かれていた。これは既に実装されている CLI の既定を記述し直したもので、`LanguageRevision` で分岐する言語挙動の変更ではないため、仕様 revision は 0.21 のまま変えない。
+
+組み込み関数表の `exit` の行は、loop:drift #302 の D-19 を受けて、実装（C7 で `Exited` へ写すようにした `exit`）と [Capability Model仕様](capability-model.md) §9 に合わせて 0〜255 の範囲・範囲外の `argument` エラー・許可が要ることを補った。実装は変えず本書を補う案（Q1=A）は、返信なしのため推奨案で確定した（issue #302、当時の[開発ループ手順書](loop-runbook.md) §7.5）。理由: 既に実装されている挙動の記述漏れで、`LanguageRevision` で分岐する言語挙動の変更ではないため、仕様 revision は 0.21 のまま変えない。
 
 ### 現在の既知非適合
 
@@ -908,7 +910,7 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 | `floor(num)` | 負の無限大方向へ丸めて整数で返す。`NaN` / `±Infinity` / 丸め後に i64 範囲外となる値は `conversion` エラー |
 | `ceil(num)` | 正の無限大方向へ丸めて整数で返す。`NaN` / `±Infinity` / 丸め後に i64 範囲外となる値は `conversion` エラー |
 | `round(num)` | 最も近い整数へ丸めて返す（中間値は 0 から遠い側）。`NaN` / `±Infinity` / 丸め後に i64 範囲外となる値は `conversion` エラー |
-| `exit(code?)` | プロセスを終了する。引数省略時は終了コード 0。引数は整数のみ |
+| `exit(code?)` | 実行を終了コード `code` で終える（CLI ではその終了コードでプロセスが終わる。埋め込みでは `Exited` になり、ホストのプロセスは終わらない）。引数省略時は終了コード 0。引数は整数のみで、整数以外は `builtin_type` エラー、0〜255 の範囲外は `argument` エラー（`exit の終了コードは 0 から 255 の範囲で指定してください: {code}`）。終了の許可が要り（冒頭の「外部操作の権限」）、許可が無ければ `capability` エラー。許可があるときの終了は `try` / `catch` で捕捉できない（[Capability Model仕様](capability-model.md) §9） |
 | `map(list, fn)` | リストの各要素に関数を適用し、結果のリストを返す |
 | `filter(list, fn)` | リストの各要素に関数を適用し、真を返した要素のリストを返す |
 | `each(list, fn)` | リストの各要素に関数を適用する（戻り値なし、副作用用途） |
