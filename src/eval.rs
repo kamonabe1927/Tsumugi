@@ -483,8 +483,18 @@ pub struct Evaluator {
     /// 実行予算の課金台帳（REV-015 Slice 1）。
     /// step（fuel）と collection 要素数の検査をここへ一本化する。
     budget: BudgetLedger,
-    /// import の解決状態（実行前にリンクする。AUD-030）
+    /// import の解決状態（実行前にリンクする。AUD-030）。REPL・scheduler の handle 経路・
+    /// [`Self::run`] / [`Self::run_phased`] が使う評価器内蔵の読み込み元。
     loader: crate::module::ModuleLoader,
+    /// link が確かめた graph から展開した module（`ModuleId` → `source_hash`、capability-model §10）。
+    /// [`Self::begin_execution_from_graph`] だけが使う。context の再利用をまたいで保持し、
+    /// `clear_user_state`（評価器の作り直し）で捨てる。
+    graph_expanded:
+        std::collections::HashMap<crate::embedding::ModuleId, crate::embedding::SourceHash>,
+    /// graph から展開した module の imported module record token（§5.1）。`graph_expanded` と
+    /// 寿命を揃え、巻き戻しで drop して live heap を release する。
+    graph_record_tokens:
+        std::collections::HashMap<crate::embedding::ModuleId, Rc<crate::value::HeapToken>>,
     /// 関数値へ発番する次の FunctionId（AUD-048）。単調増加し、
     /// REPL の失敗入力でも巻き戻さない。
     next_function_id: u64,
@@ -688,6 +698,8 @@ struct RunSession {
     base_depth: usize,
     /// 実行完了しなかったとき解決マーカーを巻き戻す import module 群（AUD-030）。
     newly_loaded: Vec<crate::module::LoadedModule>,
+    /// 実行完了しなかったとき未展開へ戻す、graph から新しく展開した module（capability-model §10）。
+    newly_expanded: Vec<crate::embedding::ModuleId>,
     /// REPL transaction 経路か（未捕捉エラーで language-state を rollback する。AUD-024）。
     transactional: bool,
 }
@@ -713,6 +725,8 @@ impl Evaluator {
             call_stack: Vec::new(),
             budget,
             loader: crate::module::ModuleLoader::new(),
+            graph_expanded: std::collections::HashMap::new(),
+            graph_record_tokens: std::collections::HashMap::new(),
             next_function_id: 0,
             script_args: Vec::new(),
             ast_token: None,
@@ -1163,6 +1177,43 @@ impl Evaluator {
             self.loader
                 .register_record_token(module.path.clone(), token);
         }
+        self.charge_linked_ast(linked_program)
+    }
+
+    /// graph から展開した module を予算へ課金する（capability-model §10、execution-control
+    /// §5.1・§5.3）。[`Self::charge_link`] の `ModuleId` 版で、root と各 module の保持 source の
+    /// byte 長で `charge_source`・`charge_import` を行い、imported module record を
+    /// 96 + `ModuleId` の UTF-8 byte 長で heap に課金する。token は `graph_expanded` と同じ寿命で持つ。
+    fn charge_link_graph(
+        &mut self,
+        root_source_bytes: u64,
+        expanded: &[crate::module::ExpandedModule],
+        linked_program: &Program,
+    ) -> Result<(), TsumugiError> {
+        self.budget
+            .charge_source(root_source_bytes, ExecutionPhase::Link)
+            .map_err(|stop| self.control_stop_to_error(stop, 0))?;
+        for module in expanded {
+            self.budget
+                .charge_source(module.byte_len, ExecutionPhase::Link)
+                .map_err(|stop| self.control_stop_to_error(stop, module.line))?;
+            self.budget
+                .charge_import(module.byte_len, ExecutionPhase::Link)
+                .map_err(|stop| self.control_stop_to_error(stop, module.line))?;
+            let token = Value::new_heap_token(
+                crate::budget::heap_size::imported_module_record(module.id.as_str().len() as u64),
+                &self.budget.heap_handle(),
+                ExecutionPhase::Link,
+            )
+            .map_err(|stop| self.control_stop_to_error(stop, module.line))?;
+            self.graph_record_tokens.insert(module.id.clone(), token);
+        }
+        self.charge_linked_ast(linked_program)
+    }
+
+    /// 実行対象 AST（linked program）を live heap へ課金する（[`Self::charge_link`] と
+    /// [`Self::charge_link_graph`] の共通部）。
+    fn charge_linked_ast(&mut self, linked_program: &Program) -> Result<(), TsumugiError> {
         // 実行対象 AST（linked program）を live heap へ課金する（REV-015 PR-d / Slice 6）。
         // 前入力の token を先に drop（release）してから今回ぶんを課金し、二重計上しない。tree
         // engine は AST を直接実行するため execution の寿命でトークンを保持する。
@@ -1527,10 +1578,44 @@ impl Evaluator {
         root_source_bytes: u64,
         transactional: bool,
     ) -> Result<(), (RunPhase, TsumugiError)> {
+        self.begin_execution_with(program, root_source_bytes, transactional, None)
+    }
+
+    /// [`Self::begin_execution`] と同じだが、import を評価器内蔵の [`crate::module::ModuleLoader`]
+    /// ではなく、link が確かめた graph（`graph`）から展開する（capability-model §10、
+    /// fix-import-run-from-link-graph）。`Engine::run`・`run_audited` だけがこの入口を選ぶ。
+    ///
+    /// 同じ `ModuleId` が別の内容で既に展開されていれば、1 文も実行せずに `Link` フェーズの
+    /// import error（`import.hash_mismatch`）で失敗する。
+    pub fn begin_execution_from_graph(
+        &mut self,
+        program: &Program,
+        root_source_bytes: u64,
+        transactional: bool,
+        graph: &crate::module::GraphModules,
+    ) -> Result<(), (RunPhase, TsumugiError)> {
+        self.begin_execution_with(program, root_source_bytes, transactional, Some(graph))
+    }
+
+    fn begin_execution_with(
+        &mut self,
+        program: &Program,
+        root_source_bytes: u64,
+        transactional: bool,
+        graph: Option<&crate::module::GraphModules>,
+    ) -> Result<(), (RunPhase, TsumugiError)> {
         if transactional {
             self.env.begin_submission();
         }
-        let (linked, newly_loaded) = match self.loader.link(program) {
+        let linked_result = match graph {
+            None => self
+                .loader
+                .link(program)
+                .map(|(linked, loaded)| (linked, loaded, Vec::new())),
+            Some(graph) => crate::module::expand_from_graph(program, graph, &self.graph_expanded)
+                .map(|(linked, expanded)| (linked, Vec::new(), expanded)),
+        };
+        let (linked, newly_loaded, expanded) = match linked_result {
             Ok(linked) => linked,
             Err(e) => {
                 if transactional {
@@ -1540,12 +1625,23 @@ impl Evaluator {
                 return Err((RunPhase::Link, e));
             }
         };
+        for module in &expanded {
+            self.graph_expanded
+                .insert(module.id.clone(), module.source_hash);
+        }
+        let newly_expanded: Vec<crate::embedding::ModuleId> =
+            expanded.iter().map(|module| module.id.clone()).collect();
         let target = linked.as_ref().unwrap_or(program);
-        if let Err(e) = self.charge_link(root_source_bytes, &newly_loaded, target) {
+        let charged = match graph {
+            None => self.charge_link(root_source_bytes, &newly_loaded, target),
+            Some(_) => self.charge_link_graph(root_source_bytes, &expanded, target),
+        };
+        if let Err(e) = charged {
             if transactional {
                 self.env.rollback_submission();
             }
             self.loader.forget(&newly_loaded);
+            self.forget_graph_modules(&newly_expanded);
             return Err((RunPhase::Link, e));
         }
         if let Err(e) = validate_program_depth(target) {
@@ -1553,6 +1649,7 @@ impl Evaluator {
                 self.env.rollback_submission();
             }
             self.loader.forget(&newly_loaded);
+            self.forget_graph_modules(&newly_expanded);
             return Err((RunPhase::Run, e));
         }
         // root 文列を Block（Rc<[Stmt]>）へ写して frame へ所有させる。frame が Rc を持つので
@@ -1569,6 +1666,7 @@ impl Evaluator {
         self.session = Some(RunSession {
             base_depth,
             newly_loaded,
+            newly_expanded,
             transactional,
         });
         Ok(())
@@ -1793,6 +1891,16 @@ impl Evaluator {
                 self.env.rollback_submission();
             }
             self.loader.forget(&session.newly_loaded);
+            self.forget_graph_modules(&session.newly_expanded);
+        }
+    }
+
+    /// graph から展開した module を未展開へ戻し、imported module record token を release する
+    /// （[`crate::module::ModuleLoader::forget`] と同じ巻き戻し、capability-model §10）。
+    fn forget_graph_modules(&mut self, modules: &[crate::embedding::ModuleId]) {
+        for id in modules {
+            self.graph_expanded.remove(id);
+            self.graph_record_tokens.remove(id);
         }
     }
 

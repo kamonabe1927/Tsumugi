@@ -315,21 +315,19 @@ fn unqualified_path_requires_default_mount() {
     }
 }
 
-/// C6-c: `@foo/...` qualified import は両 engine で exit 1 になる（理由は engine で異なる）。
+/// C6-c / ILG-AT-03(b): `@foo/...` qualified import は両 engine で成功し、import した名前を使える。
 ///
-/// tree 経路では link 層の resolver が `@foo/bar.tsg` を mount `foo` へ routing して**解決は成功**する
-/// が、実行時の import 展開は依然 評価器内 `ModuleLoader`（ambient、`@mount` routing 未配線）が担う
-/// ため、`@foo/bar.tsg` をリテラル相対 path として扱い run 時 import error になる（link と run で
-/// resolver が別経路という既知の Phase 2 ギャップ）。E9 で VM 経路も link 層 gate を通る（resolver
-/// grant 済みなので link は成功する）が、run 層 ambient `ModuleLoader` が `@foo/...` をリテラル扱い
-/// して未解決 import error になる。どちらも exit 1（run 層の挙動が tree/VM で一致）。
+/// link 層の resolver が `@foo/bar.tsg` を mount `foo` へ routing して解決し、run 層は link が読んだ
+/// source から展開する（capability-model §10、fix-import-run-from-link-graph）。以前は run 層の
+/// 評価器内 `ModuleLoader` が `@foo/...` をリテラル相対 path として扱い import error だった。
 #[test]
-fn at_syntax_import_fails_in_both_engines() {
+fn at_syntax_import_runs_in_both_engines() {
     for use_vm in [false, true] {
         let dir = TestDir::new("imp");
         std::fs::write(dir.path.join("bar.tsg"), "let v = 1\n").unwrap();
-        let script = dir.path.join("s.tsg");
-        std::fs::write(&script, "import \"@foo/bar.tsg\"\nprint(1)").unwrap();
+        let script_dir = TestDir::new("imp-script");
+        let script = script_dir.path.join("s.tsg");
+        std::fs::write(&script, "import \"@foo/bar.tsg\"\nprint(v)").unwrap();
         let mut cmd = Command::new(tsumugi_bin());
         if use_vm {
             cmd.arg("--vm");
@@ -339,8 +337,14 @@ fn at_syntax_import_fails_in_both_engines() {
             .arg(&script);
         let output = cmd.output().expect("spawn");
         assert!(
-            !output.status.success(),
-            "@foo/... は両 engine で import error [vm={use_vm}]"
+            output.status.success(),
+            "@foo/... は両 engine で成功する [vm={use_vm}]: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim_end(),
+            "1",
+            "[vm={use_vm}]"
         );
     }
 }
@@ -544,5 +548,144 @@ fn allow_exit_out_of_range_maps_to_runtime_error_via_profile() {
                 "範囲外 exit は RuntimeError 写像（exit 1）で正常終了する [vm={use_vm}] src={source:?}"
             );
         }
+    }
+}
+
+// =============================================================================
+// fix-import-run-from-link-graph: run 層の import は link が確かめた graph から展開する
+// （capability-model §10、issue #291 の再現 1）
+// =============================================================================
+
+/// `--allow-import-root default=<root>` を付けて `script` を実行する。`env` は追加の環境変数。
+fn run_with_import_root(
+    use_vm: bool,
+    import_root: &str,
+    script: &std::path::Path,
+    env: &[(&str, &str)],
+) -> Run {
+    let mut cmd = Command::new(tsumugi_bin());
+    if use_vm {
+        cmd.arg("--vm");
+    }
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    cmd.arg("--allow-import-root")
+        .arg(format!("default={import_root}"))
+        .arg(script);
+    let output = cmd.output().expect("spawn tsumugi");
+    Run {
+        status_ok: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout)
+            .replace("\r\n", "\n")
+            .trim_end()
+            .to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr)
+            .replace("\r\n", "\n")
+            .trim_end()
+            .to_string(),
+    }
+}
+
+/// ILG-AT-01: issue #291 の再現 1。import root（`libs`）で確かめた `a.tsg` が実行され、スクリプトの
+/// 隣の `evil/a.tsg` と、その中の `import "../secret/s.tsg"` は読まれない（tree / `--vm`）。
+#[test]
+fn ilg_at_01_import_runs_link_verified_source_not_sibling() {
+    for use_vm in [false, true] {
+        let base = TestDir::new("ilg01");
+        let libs = base.path.join("libs");
+        let evil = base.path.join("evil");
+        let secret = base.path.join("secret");
+        for d in [&libs, &evil, &secret] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(libs.join("a.tsg"), "fn who()\n    return \"LIBS\"\nend\n").unwrap();
+        std::fs::write(
+            evil.join("a.tsg"),
+            "import \"../secret/s.tsg\"\nprint(\"EVIL\")\nfn who()\n    return \"EVIL\"\nend\n",
+        )
+        .unwrap();
+        std::fs::write(secret.join("s.tsg"), "print(\"SECRET\")\n").unwrap();
+        let main = evil.join("main.tsg");
+        std::fs::write(&main, "import \"a.tsg\"\nprint(who())\n").unwrap();
+
+        let r = run_with_import_root(use_vm, libs.to_str().unwrap(), &main, &[]);
+        assert!(r.status_ok, "[vm={use_vm}] {}", r.stderr);
+        assert_eq!(r.stdout, "LIBS", "[vm={use_vm}]");
+        assert!(!r.stdout.contains("EVIL"), "[vm={use_vm}]");
+        assert!(!r.stdout.contains("SECRET"), "[vm={use_vm}]");
+    }
+}
+
+/// ILG-AT-03(a): `default` root の `sub/a.tsg` の `import "b.tsg"` は root の `b.tsg` を展開し、
+/// `sub/b.tsg` は読まない（tree / `--vm`）。
+#[test]
+fn ilg_at_03a_module_import_is_relative_to_mount_root() {
+    for use_vm in [false, true] {
+        let root = TestDir::new("ilg03a-root");
+        std::fs::create_dir_all(root.path.join("sub")).unwrap();
+        std::fs::write(root.path.join("sub").join("a.tsg"), "import \"b.tsg\"\n").unwrap();
+        std::fs::write(root.path.join("b.tsg"), "print(\"ROOT_B\")\n").unwrap();
+        std::fs::write(root.path.join("sub").join("b.tsg"), "print(\"SUB_B\")\n").unwrap();
+        let script_dir = TestDir::new("ilg03a-script");
+        let main = script_dir.path.join("main.tsg");
+        std::fs::write(&main, "import \"sub/a.tsg\"\nprint(\"done\")\n").unwrap();
+
+        let r = run_with_import_root(use_vm, root.as_str(), &main, &[]);
+        assert!(r.status_ok, "[vm={use_vm}] {}", r.stderr);
+        assert_eq!(r.stdout, "ROOT_B\ndone", "[vm={use_vm}]");
+    }
+}
+
+/// ILG-AT-03(c): 菱形 import の共有 module の top-level 文は、最初の `import` の位置で 1 回だけ実行する
+/// （tree / `--vm`）。
+#[test]
+fn ilg_at_03c_diamond_import_expands_shared_module_once() {
+    for use_vm in [false, true] {
+        let root = TestDir::new("ilg03c-root");
+        std::fs::write(
+            root.path.join("left.tsg"),
+            "print(\"left-start\")\nimport \"shared.tsg\"\nprint(\"left-end\")\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path.join("right.tsg"),
+            "print(\"right-start\")\nimport \"shared.tsg\"\nprint(\"right-end\")\n",
+        )
+        .unwrap();
+        std::fs::write(root.path.join("shared.tsg"), "print(\"shared\")\n").unwrap();
+        let script_dir = TestDir::new("ilg03c-script");
+        let main = script_dir.path.join("main.tsg");
+        std::fs::write(&main, "import \"left.tsg\"\nimport \"right.tsg\"\n").unwrap();
+
+        let r = run_with_import_root(use_vm, root.as_str(), &main, &[]);
+        assert!(r.status_ok, "[vm={use_vm}] {}", r.stderr);
+        assert_eq!(
+            r.stdout, "left-start\nshared\nleft-end\nright-start\nright-end",
+            "[vm={use_vm}]"
+        );
+    }
+}
+
+/// ILG-AT-04: safe profile の file/stdin の import は `TSUMUGI_SANDBOX` を読まない。import root と
+/// 関係の無いディレクトリを設定しても import は成功する（tree / `--vm`）。
+#[test]
+fn ilg_at_04_file_import_ignores_tsumugi_sandbox() {
+    for use_vm in [false, true] {
+        let root = TestDir::new("ilg04-root");
+        std::fs::write(root.path.join("lib.tsg"), "let helper = 42\n").unwrap();
+        let unrelated = TestDir::new("ilg04-unrelated");
+        let script_dir = TestDir::new("ilg04-script");
+        let main = script_dir.path.join("main.tsg");
+        std::fs::write(&main, "import \"lib.tsg\"\nprint(helper)\n").unwrap();
+
+        let r = run_with_import_root(
+            use_vm,
+            root.as_str(),
+            &main,
+            &[("TSUMUGI_SANDBOX", unrelated.as_str())],
+        );
+        assert!(r.status_ok, "[vm={use_vm}] {}", r.stderr);
+        assert_eq!(r.stdout, "42", "[vm={use_vm}]");
     }
 }

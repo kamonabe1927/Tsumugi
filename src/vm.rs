@@ -358,6 +358,38 @@ impl Vm {
         Ok(record_tokens)
     }
 
+    /// link が確かめた graph から展開した module を予算へ課金する（capability-model §10、
+    /// execution-control §5.1・§5.3）。[`Self::charge_link`] の `ModuleId` 版で、root と各 module の
+    /// 保持 source の byte 長で `charge_source`・`charge_import` を行い、imported module record を
+    /// 96 + `ModuleId` の UTF-8 byte 長で heap に課金する。token は呼び出し側（main.rs）が実行の
+    /// 寿命で持つ。
+    pub fn charge_link_graph(
+        &mut self,
+        root_source_bytes: u64,
+        expanded: &[crate::module::ExpandedModule],
+    ) -> Result<Vec<Rc<crate::value::HeapToken>>, TsumugiError> {
+        let mut record_tokens = Vec::with_capacity(expanded.len());
+        self.budget
+            .charge_source(root_source_bytes, ExecutionPhase::Link)
+            .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, 0))?;
+        for module in expanded {
+            self.budget
+                .charge_source(module.byte_len, ExecutionPhase::Link)
+                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, module.line))?;
+            self.budget
+                .charge_import(module.byte_len, ExecutionPhase::Link)
+                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, module.line))?;
+            let token = Value::new_heap_token(
+                crate::budget::heap_size::imported_module_record(module.id.as_str().len() as u64),
+                &self.budget.heap_handle(),
+                ExecutionPhase::Link,
+            )
+            .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, module.line))?;
+            record_tokens.push(token);
+        }
+        Ok(record_tokens)
+    }
+
     /// bytecode chunk 木（`chunk` を root とし、全 prototype chunk を transitive に含む）の
     /// §5.1 bytecode chunk を live heap へ課金し、トークンを返す（REV-015 PR-d）。
     ///

@@ -148,11 +148,12 @@ order      = 5
 [[slice]]
 id         = "fix-import-run-from-link-graph"
 title      = "file/stdin の run 層の import を link が resolver で確かめた source から展開し、ModuleLoader の読み直しを無くす（capability-model §10、issue #291）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-import-run-from-link-graph 実装スライス（run 層の import を link で確かめた graph から展開）" }
 acceptance = ["ILG-AT-01..05"]
 design_pr  = 303
+impl_pr    = 311
 order      = 6
 
 [[slice]]

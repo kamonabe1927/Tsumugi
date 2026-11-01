@@ -888,6 +888,10 @@ struct LinkedScriptInner {
     root: CompiledScript,
     import_graph: ImportGraph,
     script_hash: SourceHash,
+    /// link が resolver から読み、UTF-8 検証と module 単体 compile を通した各 module の source
+    /// （capability-model §10「run は link が読んだ source だけを実行する」）。run 層の import 展開の
+    /// 唯一の読み込み元で、hash の計算（§5.1）には入らない。
+    module_sources: std::collections::HashMap<ModuleId, Arc<str>>,
 }
 
 impl LinkedScript {
@@ -904,6 +908,46 @@ impl LinkedScript {
     /// linked script の byte-level hash（§5.1）。
     pub fn script_hash(&self) -> SourceHash {
         self.0.script_hash
+    }
+
+    /// CLI の VM file/stdin 経路専用: root の保持 source と link が読んだ module source から、
+    /// `import` 文を展開した program と、展開した module の記録を返す（capability-model §10、
+    /// fix-import-run-from-link-graph 実装範囲 4）。
+    ///
+    /// 展開は [`Engine::run`] と同じ関数（`crate::module::expand_from_graph`）で、展開済みの集合は
+    /// 空から始める（VM の file/stdin 実行は 1 回きり）。root の source を保持していない、または
+    /// graph と合わないときは内部 error を返す。
+    ///
+    /// # 可視性（内部 shim であり公開契約ではない）
+    ///
+    /// [`Engine::link_for_repl`] と同じく、crate の binary が lib とは別 crate として呼ぶため
+    /// `pub` にせざるを得ない CLI 内部専用の shim で、外部 embedder 向けの公開契約ではない。
+    #[doc(hidden)]
+    pub fn expand_for_cli(
+        &self,
+    ) -> Result<(Program, Vec<crate::module::ExpandedModule>), TsumugiError> {
+        let Some(source_text) = self.0.root.retained_source() else {
+            return Err(TsumugiError::internal(
+                0,
+                "実行には source の保持が必要です: retain_source=true で compile してください",
+            ));
+        };
+        let program = Parser::new(Lexer::new(source_text).tokenize())
+            .parse()
+            .map_err(|_| TsumugiError::internal(0, "保持 source の再 parse に失敗しました"))?;
+        let graph = crate::module::GraphModules::prepare(
+            &program,
+            self.0.import_graph.nodes.iter().filter_map(|node| {
+                self.0
+                    .module_sources
+                    .get(&node.module_id)
+                    .map(|text| (&node.module_id, node.source_hash, &**text))
+            }),
+        )
+        .map_err(|detail| TsumugiError::internal(0, detail))?;
+        let (linked, expanded) =
+            crate::module::expand_from_graph(&program, &graph, &std::collections::HashMap::new())?;
+        Ok((linked.unwrap_or(program), expanded))
     }
 }
 
@@ -1150,9 +1194,11 @@ impl Engine {
     /// REPL は統合前から、`--allow-import-root`（＝`module_resolver` grant）無しでも CWD 相対
     /// import を解決できていた。これは評価器内蔵の [`ModuleLoader`](crate::module::ModuleLoader)
     /// が import を解決し、固定のエラー文字列を出す従来からの **observable 挙動**である。
-    /// [`Engine::run`] は [`LinkedScript`] の `import_graph` を参照せず、`root()` の保持 source を
-    /// 再 parse して評価器の `begin_execution` に渡す（評価器が自前の loader で import を解決する）
-    /// ため、REPL では空 graph を渡しても import は従来どおり評価器側で解決される。
+    /// [`Engine::run`] は link が確かめた graph から import を展開する（capability-model §10）が、
+    /// REPL 用の [`Self::run_for_repl`] は graph を参照せず、`root()` の保持 source を再 parse して
+    /// 評価器の `begin_execution` に渡す（評価器が自前の loader で import を解決する）ため、REPL では
+    /// 空 graph を渡しても import は従来どおり評価器側で解決される。この空 graph を
+    /// [`Engine::run`] に渡すと、import は graph に無いので `InternalFailure` になる。
     ///
     /// したがってこの入口が resolver gate を迂回するのは、**REPL の従来 observable 挙動を Engine API
     /// 上で保全するため**であって、capability model へ新しい緩和を導入するものではない。file/stdin
@@ -1205,7 +1251,7 @@ impl Engine {
             return Err(LinkError::Cancelled);
         }
         // import の有無によらず空 graph を返す。実際の import 解決は run 側の評価器内蔵 loader が
-        // 行う（上記 doc 参照）。run は import_graph を参照しないので観測挙動は不変。
+        // 行う（上記 doc 参照）。run_for_repl は import_graph を参照しないので観測挙動は不変。
         Ok(self.empty_linked_script(script, script.source_hash()))
     }
 
@@ -1295,6 +1341,7 @@ impl Engine {
             root: script.clone(),
             import_graph,
             script_hash,
+            module_sources: resolution.module_sources,
         })))
     }
 
@@ -1315,6 +1362,7 @@ impl Engine {
             root: script.clone(),
             import_graph,
             script_hash,
+            module_sources: std::collections::HashMap::new(),
         }))
     }
 
@@ -1338,6 +1386,8 @@ impl Engine {
 
         // root の import を正規化して root_imports を作る（§4.3 step 2 の収集 + 正規化）。
         let mut root_imports: Vec<ModuleId> = Vec::new();
+        // link が読んだ module source（run 層の展開の読み込み元、capability-model §10）。
+        let mut module_sources: HashMap<ModuleId, Arc<str>> = HashMap::new();
         // DFS フレーム: (解決する module ID, その specifier, depth)。root import は importer=None。
         // active スタック上の循環検出のため、再帰を手続きの明示 stack で表す。
         self.resolve_module_imports(
@@ -1350,6 +1400,7 @@ impl Engine {
             &mut call_id,
             &mut resolved,
             &mut node_map,
+            &mut module_sources,
             &mut Vec::new(),
             &mut root_imports,
         )?;
@@ -1361,6 +1412,7 @@ impl Engine {
         Ok(ResolvedGraph {
             root_imports,
             nodes,
+            module_sources,
         })
     }
 
@@ -1381,6 +1433,7 @@ impl Engine {
         call_id: &mut u64,
         resolved: &mut std::collections::HashMap<ModuleId, SourceHash>,
         node_map: &mut std::collections::HashMap<ModuleId, ImportNode>,
+        module_sources: &mut std::collections::HashMap<ModuleId, Arc<str>>,
         active: &mut Vec<ModuleId>,
         out_imports: &mut Vec<ModuleId>,
     ) -> Result<(), LinkError> {
@@ -1490,6 +1543,8 @@ impl Engine {
                 })
                 .collect();
 
+            // run 層の展開に使う source を保持する（capability-model §10）。
+            module_sources.insert(module_id.clone(), Arc::from(text));
             // 解決済みに登録し、active へ push して子 import を降りる（§4.4）。
             resolved.insert(module_id.clone(), source_hash);
             active.push(module_id.clone());
@@ -1504,6 +1559,7 @@ impl Engine {
                 call_id,
                 resolved,
                 node_map,
+                module_sources,
                 active,
                 &mut child_imports,
             )?;
@@ -1528,23 +1584,15 @@ impl Engine {
         specifier: &str,
         resolver: &dyn crate::capability::ModuleResolver,
     ) -> Result<(ModuleId, String), LinkError> {
-        use crate::capability::FilesystemTarget;
-
         // malformed specifier（PathError）→ Resolve(code "invalid_import_specifier")。
-        let target = FilesystemTarget::parse(specifier)
+        // 正規形 `@mount/comp/comp/...` の組み立て（unqualified は @default/... へ正規化）は、
+        // run 層の graph 展開と同じ関数を共有する（capability-model §10）。
+        let (mount, normalized) = crate::module::normalize_import_specifier(specifier)
             .map_err(|_| LinkError::Resolve(host_error("invalid_import_specifier")))?;
-
-        // 正規形 `@mount/comp/comp/...` を組み立てる（unqualified は @default/... へ正規化）。
-        let mut normalized = String::from("@");
-        normalized.push_str(target.mount.as_str());
-        for component in target.path.components() {
-            normalized.push('/');
-            normalized.push_str(component);
-        }
 
         // mount 未登録は terminal Denied（authority 不足、§3.2 の 2 channel 分離）。resolver が
         // 知らない mount は resolve まで来ず link 層で Denied にする。
-        if !resolver.knows_mount(target.mount.as_str()) {
+        if !resolver.knows_mount(&mount) {
             return Err(LinkError::Denied(resolver_absent_denial()));
         }
 
@@ -1613,9 +1661,14 @@ impl Engine {
 }
 
 /// 解決済み import graph の中間結果（root_imports と nodes）。
+/// [`Engine::prepare_program`] の結果（再構築した root `Program`、root source の byte 長、
+/// graph から展開するときの module 群）。
+type PreparedProgram = (Program, u64, Option<crate::module::GraphModules>);
+
 struct ResolvedGraph {
     root_imports: Vec<ModuleId>,
     nodes: Vec<ImportNode>,
+    module_sources: std::collections::HashMap<ModuleId, Arc<str>>,
 }
 
 /// resolver 不足時に返す固定の [`Denial`]（設計 §4.2・§4.5）。
@@ -1925,10 +1978,12 @@ impl ExecutionContext {
         Ok(())
     }
 
-    /// 相対 import 解決・自己再 import 防止に使う script path を設定する。
+    /// 評価器内蔵の `ModuleLoader` の相対 import 解決・自己再 import 防止に使う script path を
+    /// 設定する。
     ///
-    /// Phase 1 は import なし root のみ実行するため実効はないが、CLI 同一入口（E8a）で
-    /// 使えるよう用意する。
+    /// [`Engine::run`]・[`Engine::run_audited`] の import には効かない（link が確かめた graph から
+    /// 展開するため、capability-model §10）。`ModuleLoader` を使う経路（scheduler の handle 経路）
+    /// のためと、公開 API の互換のために残す。
     pub fn set_script_path(&mut self, path: impl AsRef<std::path::Path>) {
         self.evaluator.set_base_dir(path.as_ref());
     }
@@ -2251,19 +2306,20 @@ impl Engine {
         // no-sink 経路（run_guarded）が prepare_program を catch 内で回すのと対称に、監査経路でも
         // catch_host_unwind で包み、再 parse の panic が Engine::run を貫通せず InternalFailure へ
         // 写る（＝呼び出し元が context を poison する）ようにする。
-        let prepared =
-            match catch_host_unwind(AssertUnwindSafe(|| self.prepare_program(linked, context))) {
-                Ok(result) => result,
-                Err(fault_id) => {
-                    // 再 parse 中の panic。Started 未発行なので監査 execution は無い（§8）。
-                    return AuditedOutcome::Outcome(Box::new(ExecutionOutcome::InternalFailure {
-                        fault_id,
-                        safe_message: internal_fault_message(fault_id),
-                        usage: context.evaluator.budget_usage(),
-                    }));
-                }
-            };
-        let (program, root_source_bytes) = match prepared {
+        let prepared = match catch_host_unwind(AssertUnwindSafe(|| {
+            self.prepare_program(linked, context, true)
+        })) {
+            Ok(result) => result,
+            Err(fault_id) => {
+                // 再 parse 中の panic。Started 未発行なので監査 execution は無い（§8）。
+                return AuditedOutcome::Outcome(Box::new(ExecutionOutcome::InternalFailure {
+                    fault_id,
+                    safe_message: internal_fault_message(fault_id),
+                    usage: context.evaluator.budget_usage(),
+                }));
+            }
+        };
+        let (program, root_source_bytes, graph) = match prepared {
             Ok(prepared) => prepared,
             Err(outcome) => return AuditedOutcome::Outcome(outcome),
         };
@@ -2411,6 +2467,7 @@ impl Engine {
                 context,
                 &program,
                 root_source_bytes,
+                graph.as_ref(),
                 request,
                 &mut journal,
                 &mut delivery,
@@ -2506,11 +2563,13 @@ impl Engine {
     ///
     /// 戻り値は [`AuditDrive`]: terminal まで回り切れば `Terminal(outcome)`（Terminal event は
     /// 呼び出し元が最後に deliver する）、mid-run で audit 失敗が確定すれば `Failed`。
+    #[allow(clippy::too_many_arguments)]
     fn run_audited_driver(
         &self,
         context: &mut ExecutionContext,
         program: &Program,
         root_source_bytes: u64,
+        graph: Option<&crate::module::GraphModules>,
         request: ExecutionRequest,
         journal: &mut crate::audit::AuditJournal,
         delivery: &mut AuditDelivery,
@@ -2535,9 +2594,7 @@ impl Engine {
 
         // begin_execution（E4: transactional=true）。Link 失敗は専用 terminal へ写す。
         if let Err((phase, error)) =
-            context
-                .evaluator
-                .begin_execution(program, root_source_bytes, true)
+            Self::begin_execution_for(context, program, root_source_bytes, graph)
         {
             // Link フェーズで積まれた charge/yield があれば先に flush してから terminal を返す。
             let outcome = match phase {
@@ -2617,7 +2674,10 @@ impl Engine {
         repl: bool,
     ) -> ExecutionOutcome {
         // 実行前の整合検証と Program 再構築（案 A）。失敗は precondition 由来の InternalFailure。
-        let (program, root_source_bytes) = match self.prepare_program(linked, context) {
+        // file/stdin の run は link が確かめた graph から import を展開する（capability-model §10）。
+        // REPL は従来どおり評価器内蔵の ModuleLoader を使う（`link_for_repl` の空 graph）。
+        let (program, root_source_bytes, graph) = match self.prepare_program(linked, context, !repl)
+        {
             Ok(prepared) => prepared,
             Err(outcome) => return *outcome,
         };
@@ -2629,7 +2689,14 @@ impl Engine {
             panic!("injected run-boundary panic (test only)");
         }
 
-        self.execute_program(context, &program, root_source_bytes, request, repl)
+        self.execute_program(
+            context,
+            &program,
+            root_source_bytes,
+            graph.as_ref(),
+            request,
+            repl,
+        )
     }
 
     /// 実行前の engine/context 整合検証と、保持 source からの Program 再構築（案 A）。
@@ -2637,11 +2704,17 @@ impl Engine {
     /// 成功で runnable な [`Program`] を返す。失敗は precondition 違反の
     /// [`ExecutionOutcome::InternalFailure`]（呼び出し元が context を poison する）。この経路は
     /// 監査上「開始していない execution」であり、Started を発行しない（§8）。
+    ///
+    /// `from_graph` なら、`linked` が保持する module source も再 parse し、import の展開に使う
+    /// [`crate::module::GraphModules`] を返す。graph と合わない import（正規化できない specifier・
+    /// graph に無い `ModuleId`）は内部不整合の `InternalFailure` にする（capability-model §10。
+    /// 例: `link_for_repl` の空 graph を [`Engine::run`] に渡したとき）。
     fn prepare_program(
         &self,
         linked: &LinkedScript,
         context: &ExecutionContext,
-    ) -> Result<(Program, u64), Box<ExecutionOutcome>> {
+        from_graph: bool,
+    ) -> Result<PreparedProgram, Box<ExecutionOutcome>> {
         // engine / context の整合を検証する（別 engine の context は実行しない）。
         if context.engine_id() != self.id() {
             return Err(Box::new(internal_failure(
@@ -2663,7 +2736,23 @@ impl Engine {
         };
         let root_source_bytes = source_text.len() as u64;
         match Parser::new(Lexer::new(source_text).tokenize()).parse() {
-            Ok(program) => Ok((program, root_source_bytes)),
+            Ok(program) => {
+                if !from_graph {
+                    return Ok((program, root_source_bytes, None));
+                }
+                let graph = crate::module::GraphModules::prepare(
+                    &program,
+                    linked.0.import_graph.nodes.iter().filter_map(|node| {
+                        linked
+                            .0
+                            .module_sources
+                            .get(&node.module_id)
+                            .map(|text| (&node.module_id, node.source_hash, &**text))
+                    }),
+                )
+                .map_err(|detail| Box::new(internal_failure(detail)))?;
+                Ok((program, root_source_bytes, Some(graph)))
+            }
             // compile 済みの script を再 parse して失敗するのは内部不整合（決定的なはず）。
             Err(errors) => {
                 let detail = errors
@@ -2684,6 +2773,7 @@ impl Engine {
         context: &mut ExecutionContext,
         program: &Program,
         root_source_bytes: u64,
+        graph: Option<&crate::module::GraphModules>,
         request: ExecutionRequest,
         repl: bool,
     ) -> ExecutionOutcome {
@@ -2693,7 +2783,8 @@ impl Engine {
             Ok(slice_fuel) => slice_fuel,
             Err(pre_cancel) => return *pre_cancel,
         };
-        let outcome = Self::run_transactional(context, program, root_source_bytes, slice_fuel);
+        let outcome =
+            Self::run_transactional(context, program, root_source_bytes, graph, slice_fuel);
 
         // capability 集合も host function registry も reusable context に持ち越さない（仕様第15節
         // 規則5・6）。次 request の empty set か再注入まで、ambient 互換の既定へ戻す。
@@ -2784,6 +2875,28 @@ impl Engine {
         Ok(slice_fuel)
     }
 
+    /// 評価器の execution を開始する（transactional=true）。`graph` があれば import を link が
+    /// 確かめた graph から展開し（`Engine::run`・`run_audited`）、無ければ評価器内蔵の
+    /// `ModuleLoader` を使う（REPL、capability-model §10）。
+    fn begin_execution_for(
+        context: &mut ExecutionContext,
+        program: &Program,
+        root_source_bytes: u64,
+        graph: Option<&crate::module::GraphModules>,
+    ) -> Result<(), (RunPhase, TsumugiError)> {
+        match graph {
+            Some(graph) => context.evaluator.begin_execution_from_graph(
+                program,
+                root_source_bytes,
+                true,
+                graph,
+            ),
+            None => context
+                .evaluator
+                .begin_execution(program, root_source_bytes, true),
+        }
+    }
+
     /// begin_execution → run_slice を terminal まで回す（transaction 適用、E4）。
     ///
     /// transaction は評価器側で処理する（`transactional=true`）。`Completed` は commit、
@@ -2792,14 +2905,13 @@ impl Engine {
         context: &mut ExecutionContext,
         program: &Program,
         root_source_bytes: u64,
+        graph: Option<&crate::module::GraphModules>,
         slice_fuel: u64,
     ) -> ExecutionOutcome {
         // begin_execution → run_slice を terminal まで回す（engine.rs の poll と同じ手順）。
         // E4: transaction を全面適用する（transactional=true。AUD-024 / 仕様第10節 規則5）。
         if let Err((phase, error)) =
-            context
-                .evaluator
-                .begin_execution(program, root_source_bytes, true)
+            Self::begin_execution_for(context, program, root_source_bytes, graph)
         {
             // Phase 1 の import なし root では Link 失敗は起きないが、防御的に写像する。
             // link/control-plane の LinkError terminal は Phase 2（E7）で扱う。Link フェーズでも
@@ -5058,9 +5170,9 @@ mod tests {
     use std::sync::Mutex;
 
     /// 書き込まれた bytes を蓄積する観測用 Output double（FixedClock の stdout 版）。
-    struct CapturingOutput {
-        policy_id: NonZeroU128,
-        sink: Arc<Mutex<Vec<u8>>>,
+    pub(super) struct CapturingOutput {
+        pub(super) policy_id: NonZeroU128,
+        pub(super) sink: Arc<Mutex<Vec<u8>>>,
     }
 
     impl crate::capability::Output for CapturingOutput {
@@ -6460,5 +6572,284 @@ mod c6c_tests {
         let outcome = engine.run(&linked, &mut context, run_req);
         assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
         assert_eq!(calls.load(Ordering::SeqCst), 0, "run 中 resolver call 0");
+    }
+
+    // --- fix-import-run-from-link-graph（capability-model §10）: run は link が読んだ source から展開する ---
+
+    /// retain_source=true で root を compile し、`resolver` で link する。
+    fn ilg_link(engine: &Engine, root: &str, resolver: Arc<dyn ModuleResolver>) -> LinkedScript {
+        let script = engine
+            .compile(
+                Source::new(SourceId::new("root").expect("id"), root),
+                &CompileOptions {
+                    retain_source: true,
+                },
+            )
+            .expect("compile");
+        let req = LinkRequest::new(op_id(), caps_with(resolver), budget());
+        engine.link(&script, req).expect("link")
+    }
+
+    /// in-memory resolver で link する（正規化済み ID → source）。
+    fn ilg_link_mem(engine: &Engine, root: &str, sources: &[(&str, &str)]) -> LinkedScript {
+        let (resolver, _calls) = CountingResolver::new(sources);
+        ilg_link(engine, root, Arc::new(resolver))
+    }
+
+    fn ilg_request() -> ExecutionRequest {
+        let clock: Arc<dyn crate::budget::MonotonicClock> =
+            Arc::new(crate::budget::SystemMonotonicClock::new());
+        let run_budget = BudgetConfig::standard(clock.as_ref()).expect("budget");
+        ExecutionRequest::new(run_budget, clock).expect("req")
+    }
+
+    /// context の global binding の整数値（無ければ None）。
+    fn ilg_int(context: &ExecutionContext, name: &str) -> Option<i64> {
+        match context.evaluator.env.get(name) {
+            Some(crate::value::Value::Int(n)) => Some(n),
+            _ => None,
+        }
+    }
+
+    fn ilg_completed(
+        engine: &Engine,
+        linked: &LinkedScript,
+        ctx: &mut ExecutionContext,
+    ) -> BudgetUsage {
+        match engine.run(linked, ctx, ilg_request()) {
+            ExecutionOutcome::Completed { usage } => usage,
+            other => panic!("期待: Completed, 実際: {other:?}"),
+        }
+    }
+
+    /// ILG-AT-02(a): on-disk に無い module を返す in-memory resolver で link した script を run すると、
+    /// root が import した名前を使えて Completed になり、run の間の resolver call は 0。
+    #[test]
+    fn ilg_at_02a_run_uses_in_memory_module_without_resolver_calls() {
+        let engine = Engine::builder().build().unwrap();
+        let (resolver, calls) = CountingResolver::new(&[("@default/a.tsg", "let a = 5\n")]);
+        let linked = ilg_link(
+            &engine,
+            "import \"a.tsg\"\nlet y = a + 1\n",
+            Arc::new(resolver),
+        );
+        let after_link = calls.load(Ordering::SeqCst);
+        assert_eq!(after_link, 1);
+        let mut ctx = ExecutionContext::new(&engine);
+        ilg_completed(&engine, &linked, &mut ctx);
+        assert_eq!(ilg_int(&ctx, "y"), Some(6));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            after_link,
+            "run 中 resolver call 0"
+        );
+    }
+
+    /// ILG-AT-02(b): FilesystemModuleResolver で link した後、run の前にファイルを書き換えても
+    /// （削除しても）、run は link 時の内容を実行する。
+    #[test]
+    fn ilg_at_02b_run_executes_link_time_content_after_rewrite_or_delete() {
+        use crate::capability::{
+            FilesystemModuleResolver, MountName, OsDirectoryHandle, SymlinkPolicy,
+        };
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        for delete in [false, true] {
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("tsumugi-ilg02b-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("tempdir");
+            std::fs::write(dir.join("a.tsg"), "let a = 1\n").expect("write");
+            let handle = OsDirectoryHandle::new(dir.clone(), pid(5), SymlinkPolicy::DenyAll);
+            let resolver = FilesystemModuleResolver::new(
+                pid(5),
+                [(MountName::new("default").expect("mount"), Arc::new(handle))],
+            )
+            .expect("resolver");
+            let engine = Engine::builder().build().unwrap();
+            let linked = ilg_link(&engine, "import \"a.tsg\"\nlet y = a\n", Arc::new(resolver));
+            if delete {
+                std::fs::remove_file(dir.join("a.tsg")).expect("delete");
+            } else {
+                std::fs::write(dir.join("a.tsg"), "let a = 999\n").expect("rewrite");
+            }
+            let mut ctx = ExecutionContext::new(&engine);
+            ilg_completed(&engine, &linked, &mut ctx);
+            assert_eq!(ilg_int(&ctx, "y"), Some(1), "delete={delete}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// ILG-AT-03(d): 同じ context で同じ module を import する root を 2 回 run すると、2 回目は展開しない。
+    /// 1 回目が RuntimeError で終わった場合は 2 回目に再び展開する。
+    #[test]
+    fn ilg_at_03d_reuse_skips_expanded_and_retries_after_runtime_error() {
+        let engine = Engine::builder().build().unwrap();
+        let mut ctx = ExecutionContext::new(&engine);
+        ilg_completed(
+            &engine,
+            &ilg_link_mem(&engine, "let hits = 0\n", &[]),
+            &mut ctx,
+        );
+
+        let a = [("@default/a.tsg", "hits = hits + 1\n")];
+        let linked = ilg_link_mem(&engine, "import \"a.tsg\"\n", &a);
+        ilg_completed(&engine, &linked, &mut ctx);
+        ilg_completed(&engine, &linked, &mut ctx);
+        assert_eq!(ilg_int(&ctx, "hits"), Some(1), "2 回目は展開しない");
+
+        let b = [("@default/b.tsg", "hits = hits + 10\n")];
+        let failing = ilg_link_mem(&engine, "import \"b.tsg\"\nlet boom = undefined_name\n", &b);
+        match engine.run(&failing, &mut ctx, ilg_request()) {
+            ExecutionOutcome::RuntimeError { error, .. } => assert_eq!(error.code, ErrorKind::Name),
+            other => panic!("期待: RuntimeError, 実際: {other:?}"),
+        }
+        assert_eq!(ilg_int(&ctx, "hits"), Some(1), "失敗した run は rollback");
+        let retry = ilg_link_mem(&engine, "import \"b.tsg\"\n", &b);
+        ilg_completed(&engine, &retry, &mut ctx);
+        assert_eq!(ilg_int(&ctx, "hits"), Some(11), "失敗後は再び展開する");
+    }
+
+    const ILG_MISMATCH_PREFIX: &str =
+        "import に失敗しました: 同じモジュールが別の内容で既に展開されています: ";
+
+    /// stdout を capture する request で run し、outcome と書き込まれた stdout を返す。
+    fn ilg_run_captured(
+        engine: &Engine,
+        linked: &LinkedScript,
+        ctx: &mut ExecutionContext,
+    ) -> (ExecutionOutcome, String) {
+        let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let caps = CapabilitySet::builder()
+            .stdout(Arc::new(super::tests::CapturingOutput {
+                policy_id: pid(11),
+                sink: Arc::clone(&sink),
+            }))
+            .expect("grant stdout")
+            .build();
+        let outcome = engine.run(linked, ctx, ilg_request().with_capabilities(caps));
+        let out = String::from_utf8(sink.lock().unwrap().clone()).expect("utf8");
+        (outcome, out)
+    }
+
+    /// ILG-AT-03(e) の 2 回目の run が import error で終わり、root と module のどの文も実行しない
+    /// （capture した stdout が空）ことを確かめる。
+    fn ilg_assert_mismatch(
+        engine: &Engine,
+        linked: &LinkedScript,
+        ctx: &mut ExecutionContext,
+        module_id: &str,
+        line: u32,
+    ) {
+        let (outcome, out) = ilg_run_captured(engine, linked, ctx);
+        match outcome {
+            ExecutionOutcome::RuntimeError { error, .. } => {
+                assert_eq!(error.code, ErrorKind::Import);
+                assert_eq!(
+                    error.safe_message,
+                    format!("{ILG_MISMATCH_PREFIX}{module_id}")
+                );
+                assert_eq!(error.line, Some(line));
+            }
+            other => panic!("期待: RuntimeError, 実際: {other:?}"),
+        }
+        assert_eq!(
+            out, "",
+            "root と module のどの文も実行しない（print が出ない）"
+        );
+        assert!(!ctx.is_poisoned());
+    }
+
+    /// ILG-AT-03(e): 同じ ModuleId が別の内容になる 2 つの LinkedScript を同じ context で順に run すると、
+    /// 2 回目は Link フェーズの import error で 1 文も実行しない。context は poison しない。
+    #[test]
+    fn ilg_at_03e_hash_mismatch_fails_in_link_phase_without_poison() {
+        let engine = Engine::builder().build().unwrap();
+        let mut ctx = ExecutionContext::new(&engine);
+        let root = "print(\"root\")\nimport \"a.tsg\"\n";
+        let first = ilg_link_mem(&engine, root, &[("@default/a.tsg", "print(\"a1\")\n")]);
+        let second = ilg_link_mem(&engine, root, &[("@default/a.tsg", "print(\"a2\")\n")]);
+        let (outcome, out) = ilg_run_captured(&engine, &first, &mut ctx);
+        assert!(
+            matches!(outcome, ExecutionOutcome::Completed { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(out, "root\na1\n");
+
+        ilg_assert_mismatch(&engine, &second, &mut ctx, "@default/a.tsg", 2);
+
+        // 同じ graph はその後も同じ context で run できる（a.tsg は展開済みなので再展開しない）。
+        let (outcome, out) = ilg_run_captured(&engine, &first, &mut ctx);
+        assert!(
+            matches!(outcome, ExecutionOutcome::Completed { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(out, "root\n");
+
+        // 推移: a.tsg は同じ内容、その下の b.tsg だけが違う。
+        let mut ctx = ExecutionContext::new(&engine);
+        let a = "print(\"a\")\nimport \"b.tsg\"\n";
+        let first = ilg_link_mem(
+            &engine,
+            root,
+            &[("@default/a.tsg", a), ("@default/b.tsg", "print(\"b1\")\n")],
+        );
+        let second = ilg_link_mem(
+            &engine,
+            root,
+            &[("@default/a.tsg", a), ("@default/b.tsg", "print(\"b2\")\n")],
+        );
+        let (outcome, out) = ilg_run_captured(&engine, &first, &mut ctx);
+        assert!(
+            matches!(outcome, ExecutionOutcome::Completed { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(out, "root\na\nb1\n");
+        // line は a.tsg の中の `import "b.tsg"` の行。
+        ilg_assert_mismatch(&engine, &second, &mut ctx, "@default/b.tsg", 2);
+    }
+
+    /// ILG-AT-05: source/import の課金は root と保持 source の byte 長どおりで、imported module record の
+    /// heap 課金は 96 + ModuleId の byte 長になる。
+    #[test]
+    fn ilg_at_05_graph_expansion_charges_source_import_and_record() {
+        let engine = Engine::builder().build().unwrap();
+        let root = "import \"a.tsg\"\nimport \"b.tsg\"\n";
+        let (a, b) = ("let a1 = 1\n", "let b1 = 22\n");
+        let linked = ilg_link_mem(
+            &engine,
+            root,
+            &[("@default/a.tsg", a), ("@default/b.tsg", b)],
+        );
+        let mut ctx = ExecutionContext::new(&engine);
+        let usage = ilg_completed(&engine, &linked, &mut ctx);
+        assert_eq!(usage.committed.source_count, 3);
+        assert_eq!(
+            usage.committed.source_bytes,
+            (root.len() + a.len() + b.len()) as u64
+        );
+        assert_eq!(usage.committed.import_count, 2);
+        assert_eq!(usage.committed.import_bytes, (a.len() + b.len()) as u64);
+
+        // 同じ長さの specifier で ModuleId の長さだけが違う 2 つの graph（`@d/...` は qualified で
+        // そのまま、unqualified は `@default/...` になる）。live heap の差は record 1 件分の ID 長の差。
+        let heap_of = |root: &str, id: &str| {
+            let (mut resolver, _) = CountingResolver::new(&[(id, "let m = 1\n")]);
+            resolver.mounts.push("d".to_string());
+            let linked = ilg_link(&engine, root, Arc::new(resolver));
+            let mut ctx = ExecutionContext::new(&engine);
+            ilg_completed(&engine, &linked, &mut ctx).live_heap_bytes
+        };
+        let short = heap_of("import \"@d/abcdefgh.tsg\"\n", "@d/abcdefgh.tsg");
+        let long = heap_of("import \"abcdefghijk.tsg\"\n", "@default/abcdefghijk.tsg");
+        assert_eq!(
+            long - short,
+            ("@default/abcdefghijk.tsg".len() - "@d/abcdefgh.tsg".len()) as u64
+        );
+        assert_eq!(
+            crate::budget::heap_size::imported_module_record(0),
+            96,
+            "record の固定部は 96"
+        );
     }
 }

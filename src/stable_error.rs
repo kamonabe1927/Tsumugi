@@ -208,6 +208,9 @@ pub mod message_id {
 
         // StackOverflow の 3 つ目のテンプレート（値のネスト深度、semantic-decisions §21）
         OVERFLOW_VALUE_DEPTH = 41 => "overflow.value_depth";
+
+        // Import の 4 つ目のテンプレート（同じ ModuleId の別内容、capability-model §10）
+        IMPORT_HASH_MISMATCH = 42 => "import.hash_mismatch";
     }
 }
 
@@ -433,6 +436,14 @@ mod tests {
                 TsumugiError::call_depth_limit(1, 128),
                 ErrorKind::StackOverflow,
                 "overflow.call_depth",
+            ),
+            (
+                crate::module::hash_mismatch_error(
+                    1,
+                    &crate::embedding::ModuleId::new("@default/a.tsg").expect("id"),
+                ),
+                ErrorKind::Import,
+                "import.hash_mismatch",
             ),
         ];
         for (err, kind, expected_id) in cases {

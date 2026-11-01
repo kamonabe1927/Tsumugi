@@ -35,6 +35,7 @@ handle 経路を §3 の `ExecutionRequest` と組み込みAPI仕様 §8 の `Ex
 | `Engine::create_execution`（`src/engine.rs`）に `link_options: LinkOptions` 引数が無い（`LinkOptions` 型も無い）。`Engine::start` は `&LinkedScript` でなく `&CompiledScript`（`src/engine.rs` の `CompiledScript`）を取り、Link を初回 poll で行う。`create_execution` との違いは開始 phase（Created / Linked）だけである | §9.1 | Slice 3 PR-a |
 | `PollSlice.max_fuel`（`src/engine.rs`）は `NonZeroU64`（16 以上）でなく `u64` で、0 や 16 未満を型で排除しない（field は `pub` で、構築時の検査を通らない）。既定 10,000 は目標どおり | §9.1 | Slice 3 PR-a |
 | `PollResult::Terminal` の `outcome` は [組み込みAPI仕様](embedding-api.md) §8 の `ExecutionOutcome` でなく、`src/engine.rs` の別の `ExecutionOutcome`（crate root では `ExecutionOutcome`）で、variant は `Completed` / `RuntimeError` / `LinkError` / `Cancelled` / `DeadlineExceeded` の 5 つだけである（予算超過は `RuntimeError` に含まれ、`Denied` / `Exited` / `HostError` / `BudgetExceeded` などが無い。variant は `usage` を持たず、最終 usage は `PollResult::Terminal.usage` で観測する）。scheduler の `Engine` が監査 sink を持たない点は [決定性・実行時監査仕様](determinism-and-audit.md) の逸脱一覧に B-1 としてある | §9.1 | Slice 3 PR-a |
+| imported module record（§5.1）の heap 課金は、評価器内蔵 `ModuleLoader` を使う経路では `ModuleId` の UTF-8 byte 長でなく canonical path（host path）の byte 長で数える。該当するのは tree REPL（`Engine::run_for_repl` → `Evaluator::begin_execution`）・VM REPL（`src/main.rs` の `Vm::charge_link(&[LoadedModule])`）と、scheduler の handle 経路（`src/engine.rs` の初回 poll の `begin_execution`）である。file/stdin の `Engine::run`・`run_audited` と VM file/stdin は `ModuleId` の byte 長で数える（fix-import-run-from-link-graph） | §5.1 | REV-015 PR-d |
 
 ## 未実装範囲（目標仕様 §1〜§13 のうち未着手・延期中）
 
