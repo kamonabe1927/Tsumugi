@@ -2630,7 +2630,7 @@ loop:drift #302 の D-21 から作ったスライス（文書と実装のずれ�
   - `src/limits.rs` 以外のコメント・コード、[言語仕様](language-spec.md)・[次期意味論・実装決定](semantic-decisions.md) の本文。逸脱一覧の行（§5.1・§17.5）は評価順のずれそのものを記録しているので、このスライスでは消さない。
 - **想定の変更規模:** `src/` はコメントだけで 10〜20 行程度（`src/limits.rs` の doc comment）。コードとテストの変更は無い。触る仕組みは「`src/limits.rs` の doc comment」1 つ。受入基準は 2 項目。§14.1（[開発ループ手順書](loop-runbook.md)）に収まる。
 - **受入基準:**
-  - **LCD-AT-01（current と target を分ける）:** `MAX_USER_CALL_DEPTH` の doc comment が、current（step と深度の検査が callee の評価より前。言語仕様「ユーザー定義関数の呼び出し順序」）と target（callee 先行。次の `LanguageRevision` で切り替え、[次期意味論・実装決定](semantic-decisions.md) §5.1・§17.5.2）を見出しか前置きで区別して書き、current の記述が tree（`src/eval.rs` の `begin_user_call` の位置）と VM の実装に合う。確かめ方: レビューで doc comment と実装・言語仕様を照合する。`cargo doc --no-deps` が警告なしで通る。
+  - **LCD-AT-01（current と target を分ける）:** `MAX_USER_CALL_DEPTH` の doc comment が、current（step と深度の検査が callee の評価より前。言語仕様「ユーザー定義関数の呼び出し順序」）と target（callee 先行。次の `LanguageRevision` で切り替え、[次期意味論・実装決定](semantic-decisions.md) §5.1・§17.5.2）を見出しか前置きで区別して書き、current の記述が tree（`src/eval.rs` の `begin_user_call` の位置）と VM の実装に合う。確かめ方: レビューで doc comment と実装・言語仕様を照合する。`cargo doc --no-deps --document-private-items` で `src/limits.rs` を指す警告が出ない（ほかの警告の件数は main から増えない。`MAX_USER_CALL_DEPTH` は `pub(crate)` なので `--document-private-items` が要る）。
   - **LCD-AT-02（挙動は変えない）:** `src/` の差分がコメント行だけで、既存のテストが期待値の変更なしで通る。確かめ方: 差分の確認と `cargo test`。
 
 ## 15. 境界受入テスト
