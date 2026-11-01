@@ -2,7 +2,7 @@
 
 バージョン: 0.21
 
-最終更新: 2026-10-31
+最終更新: 2026-11-01
 
 この番号は言語仕様のrevisionであり、Cargo package / REPLの実装バージョン `0.1.0` とは独立して管理する。
 
@@ -27,8 +27,7 @@
 
 両engine共通の仕様違反（[Capability Model仕様](capability-model.md) の目標との差）:
 
-- ファイル・標準入力から実行するスクリプトの import は、link 時に resolver が import root の下で確かめたファイルと、実行時に読むファイルが別の経路で決まる。実行時は評価器内蔵の module loader が import 元スクリプトのディレクトリを基準に読み直すため、確かめたものと別のファイルが実行されることがあり、入れ子の import は import root で検査されない。逆に、import root の下にあっても、import 元スクリプトのディレクトリから同じ相対パスで見つからないモジュールは読めず、`import` エラー（`import に失敗しました: モジュールを読み込めません: {path}`）で 1 文も実行せずに終了コード 1 で終わる（issue #291 で修正予定）
-- import の実行時の読み込み（ファイル・標準入力・REPL）は、profile にかかわらず `TSUMUGI_SANDBOX` を読み、許可範囲外のパスをサンドボックス違反にする。目標は「safe profile では `TSUMUGI_SANDBOX` を読まない」である（同 §14.3・§14.4）。上の項目と同じく、実行時の import が module loader を経由していることによる
+- REPL の import の実行時の読み込みは、profile にかかわらず `TSUMUGI_SANDBOX` を読み、許可範囲外のパスをサンドボックス違反にする。目標は「safe profile では `TSUMUGI_SANDBOX` を読まない」である（同 §14.3・§14.4）。REPL の import が評価器内蔵の module loader を経由していることによる。ファイル・標準入力から実行するスクリプトの import は、link 時に resolver が import root の下で確かめた内容だけを実行し、`TSUMUGI_SANDBOX` を読まない
 - `--profile legacy` で `TSUMUGI_SANDBOX` の値が区切り文字（カンマ）と空白だけ（`,`・` , ` など）のとき、CLI は未設定と同じに扱い、ファイルシステム全体を警告なしで許可する。目標は「許可するパスが 0 個の設定として、ファイル操作をすべてサンドボックス違反エラーにし、警告を 1 件出す」である（「ファイルI/Oサンドボックス」、同 §14.3。issue #291 で修正予定）
 
 本書の文法どおり、複数行lambdaの終端`end`は必須である。

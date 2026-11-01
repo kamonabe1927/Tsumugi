@@ -818,11 +818,10 @@ fn run_repl_vm(frozen: CapabilitySet, budget_env: &LegacyBudgetEnv) {
 /// resolver 未 grant + import あり なら terminal `Denied`（exit 1、actionable 診断）になる。
 /// import 0 件の script は resolver 不問で gate を通過する。
 ///
-/// gate 通過後の実際の import 展開と script 本体実行は依然 `Compiler` + `Vm` の alpha 経路で、
-/// run 層の import 解決は tree file/stdin と同じく評価器内蔵 [`ModuleLoader`] が担う（`@NAME/...`
-/// は run 層では未配線でリテラル相対扱い）。VM backend adapter 本体（run 経路の Engine 統合）は
-/// E9 残。これは tree file/stdin が「link gate は Engine、run 解決は ambient loader」で共存して
-/// いるのと対称。
+/// link の結果（[`tsumugi::LinkedScript`]）は捨てずに持ち、run 層の import は tree の
+/// `Engine::run` と同じ関数で、link が resolver で読んだ source だけから展開する（capability-model
+/// §10、fix-import-run-from-link-graph）。script 本体の実行は `Compiler` + `Vm` の alpha 経路で、
+/// VM backend adapter 本体（run 経路の Engine 統合）は E9 残。
 fn execute_vm_with_path(
     source: &str,
     path: &str,
@@ -833,7 +832,7 @@ fn execute_vm_with_path(
     // --- link 層 capability gate（tree file/stdin と対称）---
     // VM backend adapter は作らず、gate 専用に TreeWalk engine を build して compile→link を
     // 通す。gate は import の有無で分岐しない（import 0 件は空 graph で必ず通過）。gate 通過後は
-    // 従来の VM 実行経路（ModuleLoader + Compiler + Vm）をそのまま使う。
+    // link の graph から展開した program を Compiler + Vm で実行する。
     let engine = EmbeddingEngine::builder()
         .build()
         .expect("既定 backend の Engine build は失敗しない");
@@ -855,40 +854,28 @@ fn execute_vm_with_path(
     let operation_id = ExecutionId::new(std::num::NonZeroU128::new(1).expect("1 は非ゼロ"));
     let link_request = LinkRequest::new(operation_id, frozen.clone(), budget)
         .with_cancellation(cancellation.clone());
-    // gate 通過の確認だけに使い、LinkedScript は破棄する（run 層は従来どおり ModuleLoader で
-    // 解決するため import_graph は使わない。tree file/stdin と同じ）。
-    if let Err(error) = engine.link(&script, link_request) {
-        print_link_error(&error);
-        std::process::exit(1);
-    }
-
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize();
-
-    let mut parser = Parser::new(tokens);
-    let program = parser.parse()?;
-
-    // import は実行前に解決する（AUD-030）
-    let mut loader = ModuleLoader::new();
-    loader.set_base_dir(std::path::Path::new(path));
-    let (linked, loaded) = loader.link(&program).map_err(|e| vec![e])?;
-    let linked_program = linked.as_ref().unwrap_or(&program);
+    // run 層は link が resolver で確かめた source だけを実行する（capability-model §10）。
+    // LinkedScript を捨てずに持ち、tree の Engine::run と同じ展開関数で import を展開する。
+    let linked = match engine.link(&script, link_request) {
+        Ok(linked) => linked,
+        Err(error) => {
+            print_link_error(&error);
+            std::process::exit(1);
+        }
+    };
+    let (linked_program, expanded) = linked.expand_for_cli().map_err(|e| vec![e])?;
 
     let compiler = Compiler::new();
-    let chunk = compiler.compile(linked_program).map_err(|e| vec![e])?;
+    let chunk = compiler.compile(&linked_program).map_err(|e| vec![e])?;
     let mut vm = Vm::with_budget(chunk, budget_env.vm_budget());
     // C9/C10: VM 経路へ frozen set を注入する（Vm::set_capabilities）。
     vm.set_capabilities(frozen);
     vm.set_script_args(script_args);
-    // source/import 予算を Link フェーズで課金する（REV-015 Slice 2）。
-    // imported module record token（REV-015 PR-d）は loader へ登録し、実行のあいだ
-    // 生かしておく（loader は関数終了で drop され live heap も release される）。
-    let record_tokens = vm
-        .charge_link(source.len() as u64, &loaded)
+    // source/import 予算を Link フェーズで課金する（REV-015 Slice 2）。imported module record
+    // token（REV-015 PR-d）はこの実行のあいだ生かしておく（関数終了で drop され release される）。
+    let _record_tokens = vm
+        .charge_link_graph(source.len() as u64, &expanded)
         .map_err(|e| vec![e])?;
-    for (path, token) in record_tokens {
-        loader.register_record_token(path, token);
-    }
     match vm.run() {
         Ok(()) => Ok(0),
         Err(error) => {

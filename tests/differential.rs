@@ -1009,7 +1009,7 @@ fn cap_at_17_source_count_charge_parity() {
 // import graph を tree と VM の CLI subprocess で実行し、観測挙動が一致することを固定する:
 //   (a) import root 無し → 両 engine とも exit≠0 かつ stderr に `--allow-import-root` の Denied 診断。
 //   (b) import root 指定 → 両 engine とも exit=0 かつ stdout 一致（import した値が使える）。
-// `@NAME/...` の両 engine exit 1 は `cli_safe_profile.rs::at_syntax_import_fails_in_both_engines`
+// `@NAME/...` の両 engine 成功は `cli_safe_profile.rs::at_syntax_import_runs_in_both_engines`
 // が既にカバーしているため重複させない。
 
 /// 同一 script を tree/VM の CLI subprocess で実行し `Output` を返す。
@@ -1221,4 +1221,98 @@ fn f1_fuel_parity_calls_and_callbacks() {
     for (label, source) in cases {
         assert_fuel_parity(label, source);
     }
+}
+
+// =============================================================================
+// ILG-AT-05: link が確かめた graph から展開する新しい 2 経路の source/import 会計が tree/VM で一致する
+// （capability-model §10、fix-import-run-from-link-graph）
+// =============================================================================
+
+/// tree は `Engine::link` → `Engine::run`、VM は同じ `LinkedScript` を `expand_for_cli` で展開して
+/// `Compiler` に渡し、`Vm::charge_link_graph` で課金して `Vm::run` する（main.rs の
+/// `execute_vm_with_path` と同じ組み立て）。source/import の 4 軸が一致することを照合する。
+#[test]
+fn ilg_at_05_graph_expansion_charge_parity() {
+    use tsumugi::embedding::{Engine, ExecutionContext, ExecutionOutcome, ExecutionRequest};
+    use tsumugi::{
+        CompileOptions, ExecutionId, FilesystemModuleResolver, LinkRequest, MonotonicClock,
+        MountName, OsDirectoryHandle, Source, SourceId, SymlinkPolicy, SystemMonotonicClock,
+    };
+
+    let dir = ImportTestDir::new("ILG-AT-05: graph expansion parity");
+    std::fs::write(dir.path.join("a.tsg"), "let a1 = 1\n").expect("a.tsg");
+    std::fs::write(dir.path.join("b.tsg"), "let b1 = 22\n").expect("b.tsg");
+    let root = "import \"a.tsg\"\nimport \"b.tsg\"\nlet z = a1 + b1\n";
+
+    let pid = NonZeroU128::new(7).expect("non-zero");
+    let handle = OsDirectoryHandle::new(dir.path.clone(), pid, SymlinkPolicy::DenyAll);
+    let resolver = FilesystemModuleResolver::new(
+        pid,
+        [(MountName::new("default").expect("mount"), Arc::new(handle))],
+    )
+    .expect("resolver");
+    let caps = CapabilitySet::builder()
+        .module_resolver(Arc::new(resolver))
+        .expect("grant resolver")
+        .build();
+
+    let engine = Engine::builder().build().expect("engine");
+    let script = engine
+        .compile(
+            Source::new(SourceId::new("main").expect("id"), root),
+            &CompileOptions {
+                retain_source: true,
+            },
+        )
+        .expect("compile");
+    let clock: Arc<dyn MonotonicClock> = Arc::new(SystemMonotonicClock::new());
+    let link_budget = BudgetConfig::standard(clock.as_ref()).expect("budget");
+    let linked = engine
+        .link(
+            &script,
+            LinkRequest::new(
+                ExecutionId::new(NonZeroU128::new(1).expect("non-zero")),
+                caps,
+                link_budget,
+            ),
+        )
+        .expect("link");
+
+    // tree arm: Engine::run（graph から展開）。
+    let mut context = ExecutionContext::new(&engine);
+    let run_budget = BudgetConfig::standard(clock.as_ref()).expect("budget");
+    let request = ExecutionRequest::new(run_budget, Arc::clone(&clock)).expect("request");
+    let tree = match engine.run(&linked, &mut context, request) {
+        ExecutionOutcome::Completed { usage } => usage,
+        other => panic!("tree 実行は成功するはず: {other:?}"),
+    };
+
+    // VM arm: 同じ LinkedScript を CLI 内部 shim で展開し、ModuleId 版の入口で課金する。
+    let (program, expanded) = linked.expand_for_cli().expect("expand");
+    let chunk = Compiler::new()
+        .compile(&program)
+        .expect("linked program の compile に失敗");
+    let mut vm = Vm::new(chunk);
+    let _tokens = vm
+        .charge_link_graph(root.len() as u64, &expanded)
+        .expect("VM arm の charge は成功するはず");
+    vm.run().expect("VM 実行は成功するはず");
+    let vm_usage = vm.budget_usage();
+
+    let a_len = "let a1 = 1\n".len() as u64;
+    let b_len = "let b1 = 22\n".len() as u64;
+    for (label, usage) in [("tree", &tree), ("vm", &vm_usage)] {
+        assert_eq!(usage.committed.source_count, 3, "{label}");
+        assert_eq!(
+            usage.committed.source_bytes,
+            root.len() as u64 + a_len + b_len,
+            "{label}"
+        );
+        assert_eq!(usage.committed.import_count, 2, "{label}");
+        assert_eq!(usage.committed.import_bytes, a_len + b_len, "{label}");
+    }
+    assert_eq!(tree.committed.source_count, vm_usage.committed.source_count);
+    assert_eq!(tree.committed.source_bytes, vm_usage.committed.source_bytes);
+    assert_eq!(tree.committed.import_count, vm_usage.committed.import_count);
+    assert_eq!(tree.committed.import_bytes, vm_usage.committed.import_bytes);
 }
