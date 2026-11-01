@@ -92,6 +92,14 @@ pub enum OpCode {
     /// builtin名とuser bindingのruntime fallback選択に使用する。
     JumpIfGlobalDefined(String, usize),
 
+    /// builtin 名の呼び出しの経路選択（引数の後）。operand: (引数の数, 飛び先)
+    ///
+    /// stack の `[印, arg0, ..., argN-1]` の印の位置（トップから `引数の数 + 1` 番目）が
+    /// `Null` なら、その印を取り除いて飛び先へ jump する（builtin 経路）。`Null` でなければ
+    /// user 経路の callee なので何もしない。compiler は builtin 経路の前処理で印の `Null` を
+    /// 置き、user 経路は `ValidateCall` を通った関数を置くため、2 経路は区別できる。
+    JumpIfBuiltinMark(usize, usize),
+
     /// 実行時globalが定義済みであることだけを検査する（値は積まない）。
     /// 破壊的更新の対象bindingを、他の被演算子の評価前に検証するために使う。
     RequireGlobal(String),

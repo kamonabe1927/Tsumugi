@@ -124,7 +124,8 @@ impl Chunk {
             | OpCode::JumpIfFalse(addr)
             | OpCode::JumpIfFalseKeep(addr)
             | OpCode::JumpIfTrueKeep(addr)
-            | OpCode::JumpIfGlobalDefined(_, addr) => {
+            | OpCode::JumpIfGlobalDefined(_, addr)
+            | OpCode::JumpIfBuiltinMark(_, addr) => {
                 *addr = target;
                 Ok(())
             }
