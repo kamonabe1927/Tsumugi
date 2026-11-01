@@ -105,6 +105,18 @@ depends_on = ["R-1a"]
 # 未着手（roadmap.md「現在地」「Phase 6 残」から分解。order は暫定）
 # ════════════════════════════════════════════════════════════════
 
+# issue #293（kamonabe、仕分け「受け入れ」）から作った不具合の fix。order は loop-runbook §8 の「不具合の報告」の既定
+# （今ある ready より前の空いている値）。parent は push の in-place 化（Slice 6 VM charge parity）を含む REV-015。
+# 言語仕様「コンテキスト依存組み込み関数の呼び出し順序」の snapshot 意味論へ実装を合わせる（仕様は変えない）。
+[[slice]]
+id         = "fix-push-snapshot-writeback"
+title      = "push を第 1 引数の snapshot へ追加して同じ binding へ書き戻す。変更が無ければ in-place の delta 課金のまま（言語仕様「コンテキスト依存組み込み関数の呼び出し順序」、issue #293）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-push-snapshot-writeback 実装スライス（`push` を第 1 引数の snapshot へ追加して書き戻す）" }
+acceptance = ["PSW-AT-01..05"]
+order      = 2
+
 # issue #292（kamonabe、仕分け「受け入れ」）から作った不具合の fix 2 本。order は loop-runbook §8 の「不具合の報告」の既定
 # （今ある ready より前の空いている値）。parent は VM conformance（determinism Slice 6）を含む Phase 5 残。
 # 1 本目は determinism-and-audit §4.8（この設計 PR で追加）と §2.1 を VM の builtin 名の呼び出しで満たす。
