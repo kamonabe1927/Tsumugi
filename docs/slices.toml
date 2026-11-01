@@ -115,6 +115,7 @@ status     = "ready"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-push-snapshot-writeback 実装スライス（`push` を第 1 引数の snapshot へ追加して書き戻す）" }
 acceptance = ["PSW-AT-01..05"]
+design_pr  = 314
 order      = 2
 
 # issue #292（kamonabe、仕分け「受け入れ」）から作った不具合の fix 2 本。order は loop-runbook §8 の「不具合の報告」の既定
