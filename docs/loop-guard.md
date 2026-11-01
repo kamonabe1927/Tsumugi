@@ -38,7 +38,7 @@
 
 | 区分 | 対象 | 変えてよいとき |
 |---|---|---|
-| `guard` | この文書、`CLAUDE.md`、Kiro の入口、`.github/` 配下（CI・凍結リスト・凍結ガード）、`.claude/settings*`、`.claude/skills/manifesto-gate/`、マージの条件を機械化した `.claude/skills/loop-advance/scripts/` | kamonabe が PR に `frozen-ok` ラベルを付けたときだけ |
+| `guard` | この文書、`CLAUDE.md`、`.github/` 配下（CI・凍結リスト・凍結ガード）、`.claude/settings*`、`.claude/skills/manifesto-gate/`、マージの条件を機械化した `.claude/skills/loop-advance/scripts/` | kamonabe が PR に `frozen-ok` ラベルを付けたときだけ |
 | `manifesto` | `docs/manifesto.md` | kamonabe が立てた、`manifesto-change` ラベル（kamonabe が付けたもの）のある開いた issue を、PR 本文で `Closes #<番号>` と参照しているとき（マージで issue が閉じるので、許可は 1 回限りになる）。または `frozen-ok` があるとき |
 
 - ループは、`guard` 区分のファイルを変える PR を自分から出さない。改善したいことがあれば、朝のまとめ（§9）の「要確認」に書く。

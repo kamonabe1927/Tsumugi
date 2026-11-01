@@ -9,5 +9,4 @@ guard      .github/**
 guard      .claude/skills/manifesto-gate/**
 guard      .claude/skills/loop-advance/scripts/**
 guard      .claude/settings*
-guard      .kiro/steering/agent-entry.md
 manifesto  docs/manifesto.md
