@@ -1,6 +1,6 @@
 # Tsumugi — ロードマップ
 
-最終更新: 2026-11-01（fix-import-run-from-link-graph を done にした）
+最終更新: 2026-11-01（loop:drift #302 の D-19〜D-21 を直し、fix-limits-call-order-doc を ready で足した。fix-import-run-from-link-graph を done にした）
 
 > このロードマップは「進捗だけ」を追う。機能の詳細・採用/不採用の理由は各設計正本に置く
 > （ドキュメントの役割分担は [ドキュメント運用ガイド](documentation-guide.md) を参照）。
@@ -64,19 +64,19 @@
 | REV-008 | 全 stable execution へ transaction を適用（REPL は AUD-024 で完了） | 🟡 | [組み込みAPI仕様](embedding-api.md)・[実行予算・協調実行仕様](execution-control.md) |
 | REV-010 | 32-bit target の `i64 as usize` wrap を `try_from`/checked へ | ⬜ | [実行予算・協調実行仕様](execution-control.md) |
 | REV-011 | language revision・engine 差・status を機械可読な単一正本から生成 | ⬜ | — |
-| REV-012 | call 評価順の status / doc drift 解消（意味論正本は第5節＝AUD-017） | 🟡 | [次期意味論・実装決定](semantic-decisions.md) §17.5 |
+| REV-012 | call 評価順の status / doc drift 解消（意味論正本は第5節＝AUD-017）。`depth-counting`（128 user frame の統一）: 済み。`callee-precedence`（callee 先行への precedence 変更）: 未着手。`src/limits.rs` の doc の整理は fix-limits-call-order-doc | 🟡 | [次期意味論・実装決定](semantic-decisions.md) §17.5 |
 | REV-014 | sandbox/env/limits/stdio/clock を `EngineConfig`/`ExecutionRequest` へ移す | ⬜ | [Capability Model仕様](capability-model.md)・[組み込みAPI仕様](embedding-api.md) |
 | REV-016 | script からの Rc cycle による回収不能 heap（baseline 課金・clear・tenant 分離） | ⬜ | [設計](design.md) |
 | REV-017 | HumanDisplay/CanonicalRepr/TotalOrder の分離による sort/list_dir 全順序化（設計確定・実装済み、revision 0.21、REV-001 と連動） | ✅ | [次期意味論・実装決定](semantic-decisions.md) §17.8 |
 | REV-019 | `now()` の epoch 前/clock error と `u64 as i64` を clock capability + checked で扱う | ⬜ | [Capability Model仕様](capability-model.md)・[実行予算・協調実行仕様](execution-control.md) |
-| REV-022 | safe profile で denial と OS 失敗を区別（EOF/I-O error を Null/false へ畳まない） | ⬜ | [Capability Model仕様](capability-model.md)・[組み込みAPI仕様](embedding-api.md) |
+| REV-022 | safe profile で denial と OS 失敗を区別（EOF/I-O error を Null/false へ畳まない）。outcome の型の形の差は組み込みAPI仕様の逸脱一覧（§8） | ✅ | [Capability Model仕様](capability-model.md)・[組み込みAPI仕様](embedding-api.md) |
 | REV-024 | MSRV 固定・action pin・release/fuzz/stress gate の段階導入 | 🟡 | [検証・リリース・運用設計](verification-release-operations.md) |
 | REV-025 | parse diagnostic 件数の上限 | ⬜ | [次期意味論・実装決定](semantic-decisions.md) |
 | AUD-018 | CLI script 引数を `ExecutionRequest.arguments` snapshot へ（profile/options は E8b。profile/options 配線は C9/C10/E7/E11 で統合済み、migration warning は descope 済み、EMB-AT-10/11 は profile 経由 subprocess で固定済み——E8b 完了） | ✅ | [次期意味論・実装決定](semantic-decisions.md) §6・[組み込みAPI仕様](embedding-api.md) 第12・14〜16節 |
 | AUD-020 | sandbox の TOCTOU/oracle/dangling symlink を path-handle で受入試験化 | 🟡 | [脅威モデル](threat-model.md) TM-002〜004・[Capability Model仕様](capability-model.md) §8・CAP-AT-10〜14 |
 | AUD-021 | language-spec / LANG_GUIDE / design の drift 解消 | 🟡 | [言語仕様](language-spec.md)・[設計](design.md) |
 | AUD-022 | REPL/differential/limit/defensive に加え fuzz・stress・failure injection gate | 🟡 | [検証・リリース・運用設計](verification-release-operations.md) §4〜6・17節 |
-| AUD-036 | lossy 数値変換（Float→Int・file_size・exit は完了、`Exited` の `usage` field が残り） | 🟡 | [次期意味論・実装決定](semantic-decisions.md) §10 |
+| AUD-036 | lossy 数値変換（Float→Int・file_size・exit。`exit` の `Exited { code, usage }` 化は C7 で完了） | ✅ | [次期意味論・実装決定](semantic-decisions.md) §10 |
 | AUD-045 | MSRV 1.97・stable/MSRV CI・install/release・artifact・署名/SBOM/OCI・運用 gate | 🟡 | [検証・リリース・運用設計](verification-release-operations.md) §3〜10・17〜18節 |
 | AUD-048 | 動的評価ごとの per-instance `FunctionId` による関数等価性 | ✅ | [次期意味論・実装決定](semantic-decisions.md) §12・[決定性・実行時監査仕様](determinism-and-audit.md) §4.7 |
 | Phase 5 残 | deterministic shared helpers（NaN canonicalization `0x7ff8_0000_0000_0000`・Float format）・DeterminismRulesRevision/ModuleId 正規化・StableError（`src/stable_error.rs`、tree 射影）は完了。Slice 1 の deterministic primitive は一通り揃った。残りは Slice 2〜6（HostBoundary/FakeHost・VM parity・audit normalize・record/replay 等） | 🟡 | [決定性・実行時監査仕様](determinism-and-audit.md) 第14節 Slice 1〜6 |

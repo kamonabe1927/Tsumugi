@@ -13,7 +13,7 @@ PM は spec も実装も自分で書かない。各役を Agent ツールで**�
 
 ## 1. 準備（文書を読む前に）
 
-1. 手順書 §2 のとおり kanade と Tsumugi を clone する。開始時刻を控える
+1. 手順書 §2 のとおり Tsumugi を clone する。開始時刻を控える
 2. `gh api user --jq .login` が `kamonabe1927-stack` であることを確かめる（違えば手順書 §2 のとおり報告して終了）
 3. `python3 .claude/skills/loop-advance/scripts/state.py` を実行する
    - `halt` が空でなければ、何も書き込まずに終了する（loop-guard §8）
