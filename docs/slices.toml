@@ -118,6 +118,7 @@ parent     = "Phase 5 残"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "fix-vm-builtin-call-lowering 実装スライス（builtin 名の呼び出しの lowering を panic せず線形にする）" }
 acceptance = ["VBC-AT-01..05"]
+design_pr  = 313
 order      = 3
 
 [[slice]]
