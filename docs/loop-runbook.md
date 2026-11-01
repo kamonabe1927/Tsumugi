@@ -27,14 +27,13 @@
 定時実行はクラウドで動く。毎回次を再現してから作業する。
 
 ```bash
-git clone https://github.com/kamonabe1927/kanade develop
-git clone https://github.com/kamonabe1927/Tsumugi develop/tsumugi
+git clone https://github.com/kamonabe1927/Tsumugi tsumugi
 ```
 
 - GitHub の GraphQL API は使えないため、`gh pr` 系のコマンドは使わない。PR・コメント・ラベル・マージは REST API（`gh api repos/kamonabe1927/Tsumugi/...`）で行う。
 - `gh api user --jq .login` が `kamonabe1927-stack` であることを確かめる。違えば GitHub に何も書き込まず、`#tsumugi-dev` にどのアカウントだったかを報告して終了する。
 - 状態は [`state.py`](../.claude/skills/loop-advance/scripts/state.py) でまとめて集める（`python3 .claude/skills/loop-advance/scripts/state.py`）。`halt` が空でなければ、何もせずに終了する。
-- 規則として読むのは、`develop/CLAUDE.md` と kanade の steering、tsumugi の `CLAUDE.md`・loop-guard・documentation-guide・`slices.toml`、この文書の自分の役に要る節である。kanade の steering とこの文書が食い違うときは、この文書（と loop-guard）を tsumugi 固有の運用として優先する。
+- 規則として読むのは、tsumugi の `CLAUDE.md`・loop-guard・documentation-guide・`slices.toml`、この文書の自分の役に要る節である。規則はこのリポジトリで完結しており、ワークスペース共通のルール（kanade）は clone も参照もしない。
 
 ## 3. 役とモデル
 

@@ -530,7 +530,6 @@ fn markdown_files() -> Vec<PathBuf> {
     }
     walk(&root.join("docs"), &mut out);
     walk(&root.join(".github"), &mut out);
-    walk(&root.join(".kiro"), &mut out);
     walk(&root.join(".claude"), &mut out);
     out.sort();
     out
