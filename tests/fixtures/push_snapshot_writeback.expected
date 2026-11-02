@@ -1,0 +1,23 @@
+[1, 2]
+[1, 2]
+[10, 11]
+[20, 21]
+[1, 2]
+[1, 2, 3]
+[1, 2]
+[1, 2, 3]
+[1, 2]
+[1, 2, 3]
+side-effect
+non-list: push の第 1 引数は List である必要があります: Int
+builtin_type
+90
+[1]
+[1, 2]
+undefined: 未定義の変数または関数: undefined_name
+name
+113
+failed: ゼロ除算
+zero_division
+124
+[4, 4]

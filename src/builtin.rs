@@ -363,43 +363,48 @@ impl Evaluator {
         Err(self.record_exit(code, line))
     }
 
-    /// `push` の代入先 binding の cell を解決する（第 2 引数の評価より前。未定義名のエラーはここ）。
+    /// `push` の代入先 binding の cell を解決し、その時点の値を snapshot として読む
+    /// （第 2 引数の評価より前。未定義名のエラーはここ）。snapshot は値の clone（`Rc` の複製）。
     pub(super) fn push_target_cell(
         &self,
         target: &Expr,
         line: usize,
-    ) -> Result<crate::value::SharedValue, TsumugiError> {
+    ) -> Result<(crate::value::SharedValue, Value), TsumugiError> {
         let Expr::Ident(var_name) = target else {
             unreachable!("push target was validated before argument evaluation")
         };
-        self.env
+        let cell = self
+            .env
             .get_cell(var_name)
-            .ok_or_else(|| TsumugiError::undefined_name(line, var_name))
+            .ok_or_else(|| TsumugiError::undefined_name(line, var_name))?;
+        let snapshot = cell.borrow().clone();
+        Ok((cell, snapshot))
     }
 
-    /// 解決済みの cell へ評価済みの値を push する（型・上限の検査 → journal → delta 課金付き push）。
+    /// 評価済みの snapshot と値を push して cell へ書き戻す（型・上限の検査 → journal → 書き戻し）。
     pub(super) fn apply_push(
         &mut self,
         cell: &crate::value::SharedValue,
+        snapshot: Value,
         value: Value,
         line: usize,
     ) -> Result<Value, TsumugiError> {
-        // 型・上限を検査する（値は借用せず長さだけ見る）。
-        {
-            let target = cell.borrow();
-            let Value::List(v) = &*target else {
-                return Err(TsumugiError::builtin_arg_type(
-                    line, "push", 1, "List", &target,
-                ));
-            };
-            self.check_collection(v.len().saturating_add(1), line)?;
-        }
+        // 型・上限は評価済みの snapshot で検査する。
+        let Value::List(v) = &snapshot else {
+            return Err(TsumugiError::builtin_arg_type(
+                line, "push", 1, "List", &snapshot,
+            ));
+        };
+        self.check_collection(v.len().saturating_add(1), line)?;
+        value.check_element_depth(line)?;
         // 書き戻し前に元値を記録する（AUD-024）。
         self.env
             .journal_cell(cell)
             .map_err(|stop| self.control_stop_to_error(stop, line))?;
-        // tracked backing へ delta 課金付きで push する（REV-015 案A）。
-        self.budget_list_push(cell, value, line)?;
+        // 変更が無ければ in-place の delta 課金、あれば snapshot へ追加して書き戻す。
+        cell.borrow_mut()
+            .list_push_snapshot_writeback(snapshot, value, &mut self.budget, ExecutionPhase::Run)
+            .map_err(|stop| crate::budget::control_stop_to_error(stop, 0, line))?;
         Ok(Value::Null)
     }
 
@@ -503,10 +508,10 @@ impl Evaluator {
     ) -> Result<Option<Value>, TsumugiError> {
         match name {
             "push" => {
-                let cell = self.push_target_cell(&args[0], line)?;
-                // 第2引数を評価してから、同じbindingへin-placeで push する。
+                let (cell, snapshot) = self.push_target_cell(&args[0], line)?;
+                // 第1引数を snapshot として読んでから第2引数を評価し、同じbindingへ書き戻す。
                 let value = self.eval_expr(&args[1], line)?;
-                self.apply_push(&cell, value, line).map(Some)
+                self.apply_push(&cell, snapshot, value, line).map(Some)
             }
             "pop" => {
                 let Expr::Ident(var_name) = &args[0] else {

@@ -450,6 +450,7 @@ fixture_tests!(
         numeric_strict_comparison,
         numeric_utils,
         overflow_edge,
+        push_snapshot_writeback,
         runtime_global_import,
         runtime_global_name_resolution,
         scope_isolation,
@@ -1470,6 +1471,41 @@ fn invalid_call_repl_recovers_without_argument_effects() {
             !stderr.contains("panicked at"),
             "{mode}でhost panic: {stderr}"
         );
+    }
+}
+
+/// PSW-AT-04（fix-push-snapshot-writeback、REPL）: 同じ入力の中の再代入を伴う `push` が両 backend で
+/// snapshot を書き戻し、エラーで終わった入力の後は binding が入力の前の値に戻る（AUD-024）。
+#[test]
+fn psw_at_04_repl_push_snapshot_writeback_and_rollback() {
+    let source = concat!(
+        "let xs = [1]\n",
+        "fn g()\n",
+        "    xs = [7, 8]\n",
+        "    return 2\n",
+        "end\n",
+        "push(xs, g())\n",
+        "print(xs)\n",
+        "fn h()\n",
+        "    xs = [0]\n",
+        "    let boom = 1 / 0\n",
+        "    return 1\n",
+        "end\n",
+        "push(xs, h())\n",
+        "print(xs)\n",
+    );
+
+    for use_vm in [false, true] {
+        let output = run_repl_process(source, use_vm, &[]);
+        let (stdout, stderr) = output_text(&output);
+        let mode = if use_vm { "VM" } else { "tree" };
+        assert!(output.status.success(), "{mode} REPLが異常終了: {stderr}");
+        assert_eq!(
+            repl_visible_lines(&stdout, use_vm),
+            ["[1, 2]", "[1, 2]"],
+            "{mode}: snapshot の書き戻しまたは rollback が不正: {stdout}"
+        );
+        assert!(stderr.contains("ゼロ除算"), "{mode}: {stderr}");
     }
 }
 

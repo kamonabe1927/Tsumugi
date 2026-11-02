@@ -329,6 +329,8 @@ struct ExprFrame {
     parts: Vec<String>,
     /// `push`: 解決済みの代入先 cell（e3）。
     cell: Option<SharedValue>,
+    /// `push` の第 1 引数を第 2 引数の評価より前に読んだ値。
+    snapshot: Option<Value>,
     /// 値の受け渡し先（親の式 frame の operand stack、または根なら文の受け渡し先）。
     dest: CallDest,
 }
@@ -1076,21 +1078,6 @@ impl Evaluator {
         self.budget
             .check_collection_elements(size as u64, ExecutionPhase::Run)
             .map_err(|stop| self.control_stop_to_error(stop, line))
-    }
-
-    /// cell が保持する `Value::List` へ tracked backing 上で 1 要素 push する
-    /// （delta 課金、REV-015 案A）。型・上限は呼び出し側で検査済み。
-    fn budget_list_push(
-        &mut self,
-        cell: &crate::value::SharedValue,
-        value: Value,
-        line: usize,
-    ) -> Result<(), TsumugiError> {
-        value.check_element_depth(line)?;
-        let mut target = cell.borrow_mut();
-        target
-            .list_push_tracked(value, &mut self.budget, ExecutionPhase::Run)
-            .map_err(|stop| crate::budget::control_stop_to_error(stop, 0, line))
     }
 
     /// cell が保持する `Value::List` の末尾を tracked backing 上で除く（delta release）。
@@ -2838,6 +2825,7 @@ impl Evaluator {
                 target: None,
                 parts: Vec::new(),
                 cell: None,
+                snapshot: None,
                 dest,
             })),
             scope_base: self.env.scope_depth(),
@@ -3137,8 +3125,10 @@ impl Evaluator {
                     if name == "env" {
                         crate::builtin_core::check_arity_count(name, args.len(), 1, line)?;
                     } else if name == "push" {
-                        let cell = self.push_target_cell(&args[0], line)?;
-                        self.expr_frame_mut().cell = Some(cell);
+                        let (cell, snapshot) = self.push_target_cell(&args[0], line)?;
+                        let frame = self.expr_frame_mut();
+                        frame.cell = Some(cell);
+                        frame.snapshot = Some(snapshot);
                     }
                 }
                 CallTarget::Host => self.count_step(line)?,
@@ -3187,8 +3177,10 @@ impl Evaluator {
                 "env" => self.apply_env(operands.pop().expect("env key"), line)?,
                 "exit" => self.apply_exit(operands.pop(), line)?,
                 "push" => {
-                    let cell = self.expr_frame_mut().cell.take().expect("push target");
-                    self.apply_push(&cell, operands.pop().expect("push value"), line)?
+                    let frame = self.expr_frame_mut();
+                    let cell = frame.cell.take().expect("push target");
+                    let snapshot = frame.snapshot.take().expect("push snapshot");
+                    self.apply_push(&cell, snapshot, operands.pop().expect("push value"), line)?
                 }
                 _ => self
                     .apply_pure_core_builtin(name, operands, line)?

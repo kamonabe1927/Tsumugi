@@ -111,11 +111,12 @@ depends_on = ["R-1a"]
 [[slice]]
 id         = "fix-push-snapshot-writeback"
 title      = "push を第 1 引数の snapshot へ追加して同じ binding へ書き戻す。変更が無ければ in-place の delta 課金のまま（言語仕様「コンテキスト依存組み込み関数の呼び出し順序」、issue #293）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-push-snapshot-writeback 実装スライス（`push` を第 1 引数の snapshot へ追加して書き戻す）" }
 acceptance = ["PSW-AT-01..05"]
 design_pr  = 314
+impl_pr    = 321
 order      = 2
 
 # loop:drift #318 の D-29（判断済み Q1=A）と D-31（機械的）から作った fix 1 本と、D-27（機械的）から作った fix 1 本。

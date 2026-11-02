@@ -1729,7 +1729,9 @@ impl Vm {
             }
             OpCode::ListPushBinding(target) => {
                 let value = self.pop(line)?;
-                self.list_push_binding(&target, value, line)?;
+                let snapshot = self.pop(line)?;
+                self.list_push_binding(&target, snapshot, value, line)?;
+                self.stack.push(Value::Null);
             }
             OpCode::ToIterList => {
                 let value = self.pop(line)?;
@@ -2078,49 +2080,44 @@ impl Vm {
     fn list_push_binding(
         &mut self,
         target: &MutationTarget,
+        snapshot: Value,
         value: Value,
         line: usize,
     ) -> Result<(), TsumugiError> {
+        // 型・上限は第2引数の評価後に、評価前に読んだ snapshot で検査する（tree と同じ順序）。
+        let Value::List(v) = &snapshot else {
+            return Err(TsumugiError::builtin_arg_type(
+                line, "push", 1, "List", &snapshot,
+            ));
+        };
+        self.check_collection(v.len().saturating_add(1), line)?;
+        value.check_element_depth(line)?;
         match self.resolve_binding_storage(target, line)? {
             BindingStorage::Cell(cell) => {
-                // cell は self とは別の Rc なので、cell の借用と &mut self.budget は両立する。
-                {
-                    let borrowed = cell.borrow();
-                    let Value::List(v) = &*borrowed else {
-                        return Err(TsumugiError::builtin_arg_type(
-                            line, "push", 1, "List", &borrowed,
-                        ));
-                    };
-                    self.check_collection(v.len().saturating_add(1), line)?;
-                }
-                value.check_element_depth(line)?;
                 self.checkpoint_cell(&cell);
                 cell.borrow_mut()
-                    .list_push_tracked(value, &mut self.budget, ExecutionPhase::Run)
+                    .list_push_snapshot_writeback(
+                        snapshot,
+                        value,
+                        &mut self.budget,
+                        ExecutionPhase::Run,
+                    )
                     .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
             }
             BindingStorage::Stack(stack_index) => {
                 if stack_index >= self.stack.len() {
                     return Err(internal_error(line, "push の対象slotが不正です"));
                 }
-                match &self.stack[stack_index] {
-                    Value::List(v) => {
-                        let candidate = v.len().saturating_add(1);
-                        self.check_collection(candidate, line)?;
-                    }
-                    other => {
-                        return Err(TsumugiError::builtin_arg_type(
-                            line, "push", 1, "List", other,
-                        ));
-                    }
-                }
                 self.checkpoint_stack_slot(stack_index);
-                // self.stack と self.budget を同時可変借用できないため、slot を一旦
-                // 取り出して in-place push し、書き戻す。slot を take するので backing の
-                // Rc は一意所有のまま（strong_count 1）で、tree と同じ in-place 経路を通る。
-                value.check_element_depth(line)?;
+                // self.stack と self.budget を同時可変借用できないため、slot を一旦取り出して
+                // 書き戻し、戻す。
                 let mut slot = std::mem::replace(&mut self.stack[stack_index], Value::Null);
-                let result = slot.list_push_tracked(value, &mut self.budget, ExecutionPhase::Run);
+                let result = slot.list_push_snapshot_writeback(
+                    snapshot,
+                    value,
+                    &mut self.budget,
+                    ExecutionPhase::Run,
+                );
                 self.stack[stack_index] = slot;
                 result.map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
             }

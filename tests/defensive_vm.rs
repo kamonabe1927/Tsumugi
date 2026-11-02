@@ -353,3 +353,29 @@ fn misplaced_builtin_mark_returns_structured_error() {
         .expect_err("callee でない値の Call が成功しました");
     assert_eq!(error.error_type(), "type", "{}", error.message());
 }
+
+/// PSW-AT-05（fix-push-snapshot-writeback）: snapshot の無い手組みの `ListPushBinding` は、
+/// operand stack が足りなくても host panic せず `internal` error で終わる。
+#[test]
+fn psw_at_05_list_push_binding_without_snapshot_returns_error() {
+    use tsumugi::opcode::MutationTarget;
+
+    // stack が空。
+    let mut chunk = Chunk::new();
+    chunk.emit(
+        OpCode::ListPushBinding(MutationTarget::Global("xs".into())),
+        1,
+    );
+    chunk.emit(OpCode::Return, 1);
+    run_expecting_internal_error("stack が空の ListPushBinding", chunk);
+
+    // value だけで snapshot が無い（stack が 1 つ足りない）。
+    let mut chunk = Chunk::new();
+    chunk.emit_constant(Value::Int(1), 1);
+    chunk.emit(
+        OpCode::ListPushBinding(MutationTarget::Global("xs".into())),
+        1,
+    );
+    chunk.emit(OpCode::Return, 1);
+    run_expecting_internal_error("snapshot の無い ListPushBinding", chunk);
+}

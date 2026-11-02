@@ -1,0 +1,134 @@
+# push は第 1 引数を第 2 引数の評価より前に読み、その snapshot へ追加して書き戻す
+# （PSW-AT-01 / 02 / 03、issue #293）
+
+# --- PSW-AT-01: 再代入しても snapshot を書き戻す ---
+# global
+let xs = [1]
+fn reassign_global()
+    xs = [7, 8]
+    return 2
+end
+push(xs, reassign_global())
+print(xs)
+
+# 関数の local（closure が同じ binding を capture して再代入する）
+fn local_case()
+    let ys = [1]
+    fn inner()
+        ys = [7, 8]
+        return 2
+    end
+    push(ys, inner())
+    return ys
+end
+print(local_case())
+
+# for の本体の中
+for i in [10, 20]
+    let zs = [i]
+    fn bump()
+        zs = [0, 0, 0]
+        return i + 1
+    end
+    push(zs, bump())
+    print(zs)
+end
+
+# capture された binding そのものへの push（closure の内側から）
+fn make()
+    let ws = [1]
+    fn swap()
+        ws = [9]
+        return 2
+    end
+    fn run()
+        push(ws, swap())
+        return ws
+    end
+    return run
+end
+print(make()())
+
+# --- PSW-AT-02: 第 2 引数の評価中の変更も捨てる ---
+let a = [1, 2]
+let alias = a
+fn mutate_push()
+    push(a, 9)
+    return 3
+end
+push(a, mutate_push())
+print(a)
+print(alias)
+
+let b = [1, 2]
+let alias_b = b
+fn mutate_index()
+    b[0] = 5
+    return 3
+end
+push(b, mutate_index())
+print(b)
+print(alias_b)
+
+let c = [1, 2]
+fn mutate_pop()
+    pop(c)
+    return 3
+end
+push(c, mutate_pop())
+print(c)
+
+# --- PSW-AT-03: 検査は評価済みの snapshot で ---
+# snapshot が List でなければ、第 2 引数で List へ再代入してもエラー（副作用は起きる）
+let n = 5
+fn to_list()
+    n = [1]
+    print("side-effect")
+    return 2
+end
+try
+    push(n, to_list())
+catch e
+    print("non-list: " + e)
+    print(e["type"])
+    print(e["line"])
+end
+print(n)
+
+# snapshot が List なら、第 2 引数で 5 へ再代入してもエラーにならない
+let m = [1]
+fn to_int()
+    m = 5
+    return 2
+end
+push(m, to_int())
+print(m)
+
+# 未定義の binding は第 2 引数の副作用より前にエラー
+fn noisy()
+    print("must-not-run")
+    return 1
+end
+try
+    push(undefined_name, noisy())
+catch e
+    print("undefined: " + e)
+    print(e["type"])
+    print(e["line"])
+end
+
+# 第 2 引数の評価がエラーで終わったら書き戻さない
+let q = [1]
+fn fail_after_change()
+    q = [4, 4]
+    let boom = 1 / 0
+    return 1
+end
+try
+    push(q, fail_after_change())
+catch e
+    print("failed: " + e)
+    print(e["type"])
+    print(e["line"])
+end
+print(q)
