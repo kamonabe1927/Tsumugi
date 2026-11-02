@@ -119,6 +119,23 @@ design_pr  = 314
 impl_pr    = 321
 order      = 2
 
+# issue #294（kamonabe、不具合の報告）から作った fix 1 本。`default-features = false` で bin が build できず、CI も検査していない。
+# 見積もり: src/ は src/lib.rs の属性 5 行程度、Cargo.toml +5〜8 行、integration test 1 ファイル +40〜80 行、触る仕組みは package の構成 1 つ、受入基準 3。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にしたいが、0〜7 に空きが無い。order に非負の規則は無いが、
+# tests/slices_contract.rs の TOML の読み取りは数字で始まる整数しか読まないため、負の値（-1 など）は読めない値として失敗する。
+# order = 8 のまま進め、マージ後に PM が付け直しだけの状態整理 PR で今ある ready より前に移す（C1=A。判断役が選択（PR #322））。
+# §8 の「付け直しの状態整理 PR を先に出す」からの外れで、理由は verification-release-operations の小節に書いた。
+# parent は CI gate の段階導入（verification-release-operations）の REV-024。
+[[slice]]
+id         = "fix-no-default-features-build"
+title      = "default-features = false で library が warning なしに build でき、bin tsumugi は required-features で作らないようにし、cargo test で検査する（semantic-decisions §17.7.9、issue #294）"
+status     = "ready"
+parent     = "REV-024"
+spec       = { doc = "docs/verification-release-operations.md", section = "fix-no-default-features-build 実装スライス（`default-features = false` の構成で build でき、`cargo test` で検査する）" }
+acceptance = ["NDF-AT-01..03"]
+design_pr  = 322
+order      = 8
+
 # loop:drift #318 の D-29（判断済み Q1=A）と D-31（機械的）から作った fix 1 本と、D-27（機械的）から作った fix 1 本。
 # order は loop-runbook §12.3・§8 の「不具合の報告」の既定（今ある ready より前の空いている値。空きが 1 と 0 だけなので 0・1）。
 # fix-cli-vm-experimental-warning は CLI の --vm の warning と --help の文言（embedding-api §12・capability-model §14）。

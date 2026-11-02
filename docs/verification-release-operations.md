@@ -1,6 +1,6 @@
 # Tsumugi — 検証・リリース・運用設計
 
-最終更新: 2026-10-07
+最終更新: 2026-11-02
 設計ステータス: **実装仕様確定・部分実装**（検証ゲートの一部〔MSRV gate・all-targets Clippy、下記 VRO-AT-01/02 相当〕を実装済み。release workflow・fuzz/stress・coverage gate・drift 検査・artifact 署名・OCI image・Kubernetes manifest・運用 SLO は未実装。詳細は本文 1 節を参照）
 
 ## 1. 目的と適用範囲
@@ -913,6 +913,8 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features --locked
 cargo test -j 1 -- --test-threads=1
+cargo check --lib --no-default-features
+cargo build --no-default-features --bins
 cargo build --release --locked
 cargo run -- examples/hello.tsg
 cargo run -- --vm examples/hello.tsg
@@ -1080,6 +1082,55 @@ kubeconform -strict -summary -kubernetes-version 1.30.0 \
 - 旧SemVerへのbinary/OCI/Kubernetes rollback drillを完了する。
 - release記録の全fieldを追跡できる。
 - `ReleasePublished`後にartifact/tag/image bytesを変更できない。
+
+### fix-no-default-features-build 実装スライス（`default-features = false` の構成で build でき、`cargo test` で検査する）
+
+issue #294 を受け入れて足した。`Cargo.toml` の「安定利用者は `default-features = false` で封印できる」という約束（REV-018）に対し、
+その構成では bin `tsumugi` が build できず、CI も `--all-features` の構成しか試さない（[次期意味論・実装決定](semantic-decisions.md) の
+逸脱一覧の該当行）。目標は同書 §17.7.9。本節の §16 の Slice 1〜7 とは別の、不具合を直す 1 本である。
+bin の扱い（Q1=A）・検査の置き場所（Q2=A）・dead code の warning の扱い（Q3=A）は判断役が選択（PR #322）した。
+選んだ内容と理由は同書 §17.7.9 の決定記録にある。
+`order` は 8 のまま進め、マージ後に PM が付け直しだけの状態整理 PR を出して、このスライスを今ある `ready`（0・1・2・5・7）より前に移す
+（C1=A。判断役が選択（PR #322））。これは [開発ループ手順書](loop-runbook.md) §8 の「不具合の報告 → 今ある `ready` より前。空きが無ければ
+付け直しの状態整理 PR を先に出す」からの外れである。理由: §8 の目的（不具合を先にやる）は付け直しで果たせ、同時に開ける `loop:design` は
+1 本までなので、先に付け直しの PR を出すにはこの PR を止めて 1 往復増やすしかなく、得られるのは文言どおりの順序だけである（原則 8）。
+`slices_contract` が `order` の重複なしを検査するので、付け直しの前後で状態を確かめられる（原則 9）。採らなかった B（この PR を止め、先に
+付け直しの PR をマージしてから `order` を直す）は、§8 の文言どおりだが設計 PR が 1 往復増え、A に無い利点が無い。
+
+- **実装範囲**:
+  1. `Cargo.toml` に bin `tsumugi` の `[[bin]]`（`name = "tsumugi"`、`path = "src/main.rs"`、`required-features = ["unstable-bytecode"]`）を足す。
+     `default-run = "tsumugi"` と `[features]` の既定（`default = ["unstable-bytecode"]`）は変えない。`[features]` の上のコメントに、
+     無効にした構成では bin `tsumugi` を作らないことを一文足す。
+  2. `src/lib.rs` の `#[cfg(not(feature = "unstable-bytecode"))] pub(crate) mod …;` の宣言（`chunk` / `compiler` / `opcode` / `verifier` / `vm`）に、
+     無効時に限って `dead_code` を許可する属性を付け、`unstable-bytecode` を無効にした library の build で warning を出さないようにする。
+     有効時の宣言と module の中身は変えない。
+  3. integration test（例: `tests/no_default_features_build.rs`）を足す。`env!("CARGO")` の cargo を、`CARGO_TARGET_TMPDIR` の下の専用の
+     target directory と `--manifest-path`（`CARGO_MANIFEST_DIR` の `Cargo.toml`）、`--locked` で呼び、
+     (a) `cargo check --lib --no-default-features`、(b) `cargo build --no-default-features --bins` を実行して、どちらも成功することを確かめる。
+     warning を error にするため、子の cargo には `RUSTFLAGS=-D warnings` を明示して渡し、親から継承した `CARGO_ENCODED_RUSTFLAGS` は
+     渡さない（coverage の job などの rustflags に左右されないようにする）。失敗したときは子の stderr を assert の message に含める。
+- **範囲外**:
+  - `.github/workflows/ci.yml` の変更（凍結ファイル。[開発ループの守り](loop-guard.md) §3.1）。検査は CI が走らせる `cargo test` の中で行う。
+  - `unstable-bytecode` を無効にした構成での `cargo test`・`cargo bench`・`cargo clippy`（CLI の subprocess test・VM の内部テスト・bench は
+    feature を前提にする）。
+  - CLI を unstable な module に依存しない形に作り直すこと（semantic-decisions §17.7.9。E9 のとき改めて扱う）。
+  - 既定の構成（feature 有効）の CLI・library の挙動。
+- **観測される変化**: `cargo build --no-default-features` が成功し、bin `tsumugi` は作られない（`gen_builtins_doc` は作られる）。
+  `cargo run --no-default-features` は cargo の「requires the features: `unstable-bytecode`」で止まる。既定の構成の build・CLI・
+  `cargo test --all-features` の結果は変わらない。`cargo test` に子の cargo の build が 1 回分（crate 1 つ、外部依存なし）加わる。
+- **受入基準（fix-no-default-features-build）**:
+  - **NDF-AT-01**（library）: `unstable-bytecode` を無効にした library の check（`cargo check --lib --no-default-features`、`RUSTFLAGS=-D warnings`）が成功する。
+    確かめ方: 実装範囲 3 の (a)。
+  - **NDF-AT-02**（bin）: `cargo build --no-default-features --bins` が成功する。bin `tsumugi` に `required-features = ["unstable-bytecode"]` が付いている。
+    確かめ方: 実装範囲 3 の (b)。加えて、実装 PR で `[[bin]]` の `required-features` を一時的に外すと (b) が E0603 で失敗することを手元で
+    確かめ、その結果を PR 本文に書く（検査が実際に壊れを拾うことの確認）。
+  - **NDF-AT-03**（既定の構成）: 既定の構成で bin `tsumugi` が今までどおり作られ、`cargo test --all-features` の既存の test（CLI の subprocess
+    test を含む）がすべて通る。`cargo run -- examples/hello.tsg` と `cargo run -- --vm examples/hello.tsg` の stdout が変わらない。
+    確かめ方: `cargo test` 全体と、2 つの `cargo run` の stdout を実装 PR の本文に貼る。
+- **想定の変更規模**: 本体（`#[cfg(test)]` を除く `src/`）は `src/lib.rs` の属性 5 行程度。`Cargo.toml` は +5〜8 行。テストは新しい
+  integration test 1 ファイルで +40〜80 行。触る仕組みは package の構成（feature と target）の 1 つ、受入基準は 3 項目で、
+  [開発ループ手順書](loop-runbook.md) §14.1 に収まる。done にする実装 PR で、[次期意味論・実装決定](semantic-decisions.md) の逸脱一覧の
+  `default-features = false` の行を削除する（本書は逸脱一覧をまだ持たない）。
 
 ## 17. 最終受入基準
 

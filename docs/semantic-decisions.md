@@ -1,6 +1,6 @@
 # Tsumugi — 次期意味論・実装決定
 
-最終更新: 2026-11-01
+最終更新: 2026-11-02
 
 設計ステータス: **次期仕様確定（本文）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -16,13 +16,15 @@ Q2=A。当時の[開発ループ手順書](loop-runbook.md) §7.5）。理由: �
 （§4〜§12・§17・§20 を実装と release ビルドの実行〔tree・`--vm`〕で照合）と、2026-11-01 に PR #309 で §5・§10・§14.3・
 §17.5・§20 を実装と照合して確かめた差だけである。照合していない節（§3・§13〜§16・§17.7・§17.8 ほか）の逸脱と、本文の
 節ごとに残る「ステータス」注記（§13・§14.1・§14.2 など）は、まだ表へ移していない。§10（AUD-036）・§20（`format_time` の
-`%z` / `%Z`）は照合の結果、逸脱が無かった。
+`%z` / `%Z`）は照合の結果、逸脱が無かった。§17.7.9（issue #294 で足した節）の行は、2026-11-02 に main で `cargo build --no-default-features`
+と `cargo check --lib --no-default-features` を実行して確かめた。§17.7 のほかの小節はまだ照合していない。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱と未実装範囲）
 
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
 | user call の評価順が目標と違う。目標（§5.1・§17.5.2）は「動的 callee を先に一度だけ評価・分類し、user callable の場合だけ step と深度を検査する」（callee 先行）だが、実装は現行の [言語仕様](language-spec.md)「ユーザー定義関数の呼び出し順序」のとおり「step と深度を検査してから callee を評価する」。tree（`src/eval.rs` の user call の準備で `begin_user_call` が callee の評価より前）と VM で同じで、深度 128 の内側で `[print("x"), g][1](…)` を呼ぶと、両 backend とも `x` を出さずに `overflow` になる。深度の境界値（128 user frame、§5.1）は両 backend で目標どおり。callee 先行への切り替えは `LanguageRevision` を上げる破壊的変更で、まだスライスが無い（ロードマップの REV-012 の `callee-precedence`） | §5.1・§17.5 | —（本ガイド導入前からの実装） |
+| `default-features = false`（`unstable-bytecode` を無効）の構成で package を build できない。目標（§17.7.9）は library が warning なしで build でき、bin `tsumugi` は `required-features` で無効時に作られないことだが、`src/main.rs` が `tsumugi::compiler::Compiler` と `tsumugi::vm::Vm` を import し、無効時はこれらが `pub(crate)` になるため `cargo build --no-default-features` が bin `tsumugi` の E0603（module is private）で失敗する。library だけ（`cargo check --lib --no-default-features`）は通るが、`compiler` / `verifier` / `vm` の dead code の warning が 18 件出る（2026-11-02 に main `ddc0767` で確かめた）。CI は `--all-features` の構成しか試さない。直すスライスは `fix-no-default-features-build`（[検証・リリース・運用設計](verification-release-operations.md) §16） | §17.7.9 | —（REV-018 の封印の時点からの実装） |
 | process-global の `OnceLock` が残る。目標（§14.3）は process-global な `OnceLock` を廃止し `FilesystemCapability` を実行 request へ注入することだが、`src/sandbox.rs` の `SANDBOX_PATHS`（`TSUMUGI_SANDBOX` を一度だけ読む `OnceLock`）が残り、評価器内蔵の `ModuleLoader`（`src/module.rs`）が import のファイルを読むときに `sandbox::check_path` で検査する。fs builtin は capability handle 経由に移っており（C10）、`OnceLock` を読まない。`ModuleLoader` を使うのは REPL と scheduler の handle 経路の import だけで（file/stdin の run 層は `fix-import-run-from-link-graph` で link の graph から展開するようになり `OnceLock` を読まない）、scheduler の handle 経路の差は [Capability Model仕様](capability-model.md) の逸脱一覧（§10）にある | §14.3 | —（本ガイド導入前からの実装。fs builtin の移行は C10） |
 
 ## 1. 本書の位置づけ
@@ -2083,6 +2085,43 @@ watchdog の上限は `total_fuel × 2 + 16` とする。正規 compiler 出力�
 - verifier を通していない chunk が防御的に実行されても host が panic せず有限停止する（停止性は verifier に依存しない）。
 - 正規 compiler 出力の観測挙動（step 到達点を除く）が変わらず、tree / VM で kind・message・line が一致する。
 - §17.2（REV-004）builder 封印・§17.3（REV-005）capture 記述子と同一 build へ統合し、旧 API・旧フォールバックを併存させない。
+
+#### 17.7.9 feature を無効にした package の構成（issue #294）
+
+`Cargo.toml` は「安定利用者は `default-features = false` で raw bytecode module を封印できる」と約束する（REV-018）。この約束が成り立つために、
+`unstable-bytecode` を無効にした構成（`default-features = false`）について次を MUST とする。
+
+- **library**: `tsumugi` の library は `unstable-bytecode` を無効にしても build でき、warning を出さない（`-D warnings` で通る）。
+  無効時に crate 内部限定（`pub(crate)`）になる module（`chunk` / `compiler` / `opcode` / `verifier` / `vm`）のうち、安定 surface
+  （`Engine` 系）から使われない item が dead code の warning になる場合は、無効時の module 宣言に限って `dead_code` を許可して抑える。
+  有効時（既定）の lint は変えない。
+- **CLI（bin `tsumugi`）**: `unstable-bytecode` を必要とする target として宣言し（`Cargo.toml` の `[[bin]]` に
+  `required-features = ["unstable-bytecode"]`）、無効にした構成では作らない。CLI は同じ package の内部利用者として `compiler` / `vm` を
+  直接使う（`--vm`）。VM が埋め込み API の run 経路に入れば（[組み込みAPI仕様](embedding-api.md) の E9）、CLI を unstable から外す
+  選択はそのとき改めて取れる。その他の bin（`gen_builtins_doc`）は無効にした構成でも build できる。
+- **機械チェック**: 上の 2 つは、CI で走る `cargo test` の integration test が、別の target directory で
+  `cargo check --lib --no-default-features` と `cargo build --no-default-features --bins` を実行して確かめる。
+  `.github/workflows/ci.yml` は凍結ファイル（[開発ループの守り](loop-guard.md) §3.1）なので、CI の job は変えずに `cargo test` の中で検査する。
+- 範囲外: `unstable-bytecode` を無効にした構成での `cargo test`・bench（CLI の subprocess test と VM の内部テストは feature を前提にする）。
+
+決定記録（判断役が選択（PR #322）。Q1=A、Q2=A、Q3=A）:
+
+- **Q1=A（bin `tsumugi` は `required-features` で無効の構成では作らない）**: §17.7.1・§17.7.4（REV-018 と共通の封印）と `Cargo.toml` の `[features]` のコメントは、
+  安定 surface を `Engine` 系だけとし、raw bytecode 経路は feature の下でだけ出し、同じ package の CLI はそれを使うと既に決めている。
+  A はこの位置付けを `[[bin]]` の宣言 1 つで表すだけで本体を変えない（原則 8、既存の決定との一貫性）。CLI を unstable から外す判断は
+  E9 で改めて取れる。採らなかった B（CLI が `compiler` / `vm` に依存しない形へ作り直す）は、無効の構成で `--vm` が消えるなど CLI の面が
+  feature で変わり、不具合 1 件の修正としては範囲が広く（原則 8）、E9（VM backend adapter）の設計を先取りする。
+- **Q2=A（検査は `cargo test` の integration test で行う）**: [開発ループの守り](loop-guard.md) §4.1 の 1 段目は機械チェックをテストとして
+  書くと定めており、`tests/slices_contract.rs` と同じ置き方である。凍結ファイルに触れずに CI の 3 OS・MSRV・coverage の各 job で毎回検査
+  される（原則 9、優先順位「再現可能な検証」）。`cargo test` に crate 1 つ分の build が加わる代償は、検査が無い状態を続けるより小さい。
+  採らなかった B（`.github/workflows/ci.yml` に step を足す）は guard 区分の凍結ファイルの変更で、ループは PR を出せず、kamonabe の
+  `frozen-ok` までこの構成の検査が無い（kamonabe が ci.yml の step を望むなら `判断:` で上書きできる）。C（検査しない）は、今回の不具合が
+  まさに検査の無いことで見逃されたもので、「再現可能な検証」に反しうる。
+- **Q3=A（無効時の module 宣言に限って `dead_code` を許可し、`-D warnings` で検査する）**: 有効時の lint を変えず、無効の構成でも
+  warning 0 を保つことで、CONTRIBUTING・CI の `-D warnings` と同じ基準を無効の構成にも当てられる。変更は属性 5 行程度（原則 8・9）。
+  採らなかった B（無効時は `compiler` / `verifier` / `vm` を compile しない）は、`chunk` / `opcode` を含む module 間の依存の切り分けが要り
+  範囲が広い（原則 8）。使われない code を `pub(crate)` のまま残しても安定 surface は変わらない。C（warning を許容する）は、無効の構成で
+  warning が増えても検査が気づけず、検査の意味が弱まる（原則 9）。
 
 ### 17.8 HumanDisplay / CanonicalRepr / TotalOrder の分離と全順序 sort（REV-017）
 
