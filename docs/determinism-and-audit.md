@@ -1165,7 +1165,7 @@ B-2 はこの byte 会計を tree engine の監査付き poll driver へ入れ�
 > 本体へ差し替える最小縦切り（R-1a）の slice 定義である。仕様（本章 §9）が正本であり、以下は R-1 で
 > 実装した範囲と意図的に延期する逸脱の記録である。実装は本定義とは別 PR（実装 PR #238）で行った。
 > 公開型 `AuditPayload`/`AuditField` 差し替えは破壊的変更だが alpha として受容し、`language_revision`
-> の bump は行わない（根拠は [ロードマップ](roadmap.md) 明記）。残る strict CBOR・record/replay・VM
+> の bump は行わない（受容の記録は [組み込みAPI仕様](embedding-api.md) §13.1。当初は roadmap 明記を根拠にしていた。loop:drift #318 の D-22 で判断役が選択（issue #318））。残る strict CBOR・record/replay・VM
 > audit triple 対応・sink 必須化・body allow-list Reveal（R-1b）は未実装。
 
 A-1 が残していた redaction プレースホルダ（host-call lifecycle 3 event〔§7.2/§8〕の payload を
@@ -1323,7 +1323,7 @@ canonical label の `HmacSha256`・Deny で `Omitted{class:Path}`（raw path/lab
   `AuditPayloadField` は crate root（`src/lib.rs`）で `pub use` 公開されている。R-1 は簡略
   `AuditPayloadField` を撤去し `AuditPayload.fields` を §9.1 の `BTreeMap<String, AuditField>` へ
   差し替えるため、これらの型に依存する外部コードは壊れる。B-1（`YieldReason::AuditBackpressure` 追加）と
-  同じく、alpha（後方互換無保証）につき roadmap 明記を条件に**破壊的変更を受容**する。CBOR tag 表・
+  同じく、alpha（後方互換無保証）につき [組み込みAPI仕様](embedding-api.md) §13.1 への記録を条件に**破壊的変更を受容**する（当初は roadmap 明記を条件にしていた。判断役が選択（issue #318）、D-22）。CBOR tag 表・
   charge table・script 観測値は不変なので `language_revision` bump は無い（既存 tag 1/2/3 の payload 中身が
   簡略型から §9.1 ツリーへ変わるだけ。`AuditField` の tag 0/1/2 は §9.2 で予約済み）。
 
@@ -1489,7 +1489,7 @@ canonical label の `HmacSha256`・Deny で `Omitted{class:Path}`（raw path/lab
     達成できる。推測復元に耐える秘匿性は公開 API（key 注入経路）の設計を伴うため sink 必須化と同じスライスに
     まとめる方が設計が一貫する（「相関除去」という当初表現は 3 周目で不正確と認め、下記のとおり言い直した）。
   - **公開 API の破壊的変更に触れていない**: `AuditPayload`/`AuditPayloadField` は `src/lib.rs` で公開
-    export 済み。**対応**: 差し替えが破壊的変更であること、B-1 と同じく alpha として roadmap 明記の上
+    export 済み。**対応**: 差し替えが破壊的変更であること、B-1 と同じく alpha として記録の上（記録は [組み込みAPI仕様](embedding-api.md) §13.1。当初は roadmap 明記。判断役が選択（issue #318））
     受容し `language_revision` bump は無いことを明記。
   - **invalid-path 時の HMAC 対象が未定義**: **対応**: canonical label が無い場合は Path field を
     `Omitted{class:Path}` にし HMAC しない、を確定規則として追加（raw path は leak させない）。
