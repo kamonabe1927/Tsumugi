@@ -201,8 +201,6 @@ pub enum OpCode {
     /// 除外した。
     PopUpdate,
 
-    /// `push(var, value)` の in-place 更新用の内部命令（source から到達不能）。
-    ///
     /// `push(var, value)` の書き戻し用の内部命令（source から到達不能）。
     ///
     /// stack は `[..., snapshot, value]`。snapshot は第2引数の評価より前に積んだ第1引数の値。
