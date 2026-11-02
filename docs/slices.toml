@@ -131,6 +131,7 @@ parent     = "Phase 5 残"
 spec_slice = "E9"
 spec       = { doc = "docs/embedding-api.md", section = "fix-cli-vm-experimental-warning 実装スライス（CLI の `--vm` の warning と `--help` の文言を spec に合わせる）" }
 acceptance = ["CVW-AT-01..03"]
+design_pr  = 319
 order      = 0
 
 [[slice]]
@@ -140,6 +141,7 @@ status     = "ready"
 parent     = "AUD-022"
 spec       = { doc = "docs/threat-model.md", section = "fix-depth-boundary-tests 実装スライス（AST 深度と import 深度の境界テストを足す）" }
 acceptance = ["DBT-AT-01..02"]
+design_pr  = 319
 order      = 1
 
 # issue #292（kamonabe、仕分け「受け入れ」）から作った不具合の fix 2 本。order は loop-runbook §8 の「不具合の報告」の既定
