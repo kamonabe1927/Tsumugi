@@ -1,7 +1,26 @@
 # Tsumugi — 脅威モデル
 
-最終更新: 2026-08-31
-設計ステータス: **実装仕様確定・未実装**
+最終更新: 2026-11-02
+設計ステータス: **実装仕様確定・実装進行中**
+
+本文書の §1〜§13 は **到達目標の確定仕様**であり、現在の実装状態ではない。現在の実装が目標からどう逸脱しているかは、下の
+**逸脱一覧** が唯一の正本である（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。表は現在の逸脱と
+未実装範囲だけを持ち、解消した行は削除する。実装スライスの進捗の正本は [`slices.toml`](slices.toml)。
+
+逸脱一覧は loop:drift #318 の D-24 で新設した。冒頭の状態を「実装仕様確定・未実装」のままにせず、逸脱一覧を作ること（Q1=A）は
+判断役が選択（issue #318）した。理由: spec の実装状態は各 spec の逸脱一覧だけが持ち、移行中の spec も輪番で事実を確かめたものから
+寄せる（ドキュメント運用ガイド「逸脱一覧の持ち方」）。状態の行を消すだけの案（B）は、未実装範囲の正本が無くなるので選ばなかった。
+載せたのは 2026-11-02 の整合点検の輪番（§3・§7.1・§7.2・TM-002・TM-004・TM-016・TM-AT-01/04/15/16 を実装と release ビルドの
+tree・`--vm` で照合）と、その点検で見つかったずれ（D-26・D-27・D-29）を確かめた分だけである。照合していない節
+（TM-003・TM-010〜014・TM-017・TM-020〜023、Phase 3/6/7 の受入試験、§9・§12・§13）の逸脱は、まだ表へ移していない。
+
+## 逸脱一覧（目標仕様に対する現在の逸脱）
+
+| 逸脱内容 | 対象の節(§) | 発生スライス |
+|---|---|---|
+| REPL と scheduler handle の経路の import は link 済み graph を経ず、評価器内蔵 `ModuleLoader` が実行中にファイルを読む。`module_resolver` の grant を要さない（REPL に `import "lib/m.tsg"` を流すと tree・`--vm` とも module が実行される。同じ内容を file で走らせると terminal `Denied`）。TM-024 の対策と TM-AT-24 は file/stdin の `Engine::run` 経路について定める（§10）。REPL を範囲外とする決定と scheduler handle の差は [Capability Model仕様](capability-model.md) の逸脱一覧（§10）にある | §10 TM-024、§11 TM-AT-24 | E7・exec-control Slice 3 PR-a |
+| CLI の `--vm` は experimental VM を選んだことを stderr にも `--help` にも示さない（§7 の保証 6）。差の詳細と直すスライスは [組み込みAPI仕様](embedding-api.md) の逸脱一覧（§12）にある | §7 | E9 |
+| TM-AT-07 の AST 深度 256/257 と import 深度 128/129 の境界を固定するテストが無い（AST 深度は `src/limits.rs` の `MAX_AST_DEPTH`、import 深度は `MAX_IMPORT_DEPTH`。import は `MAX_IMPORT_DEPTH + 5` の chain だけを `src/embedding.rs` の unit test が確かめる）。挙動自体は tree・VM とも構造化 error。直すのは fix-depth-boundary-tests（§14） | §11 TM-AT-07 | — |
 
 ## 1. 目的と適用範囲
 
@@ -20,7 +39,7 @@
 - [組み込みAPI仕様](embedding-api.md): Phase 1/2のEngine、compile/link、source identity、terminal channelの先行契約
 - [Capability Model仕様](capability-model.md): Phase 2の外部効果認可、path-handle、adapter、deny-by-defaultの先行契約
 - [言語仕様](language-spec.md): 次期revision統合前の現行観測意味論の正本
-- [ロードマップ](roadmap.md): 実装状態と順序の正本
+- [ロードマップ](roadmap.md): Phase と項目（REV/AUD など）の状態の正本。実装スライスの状態と着手順は [`slices.toml`](slices.toml)、各 spec の実装状態は各 spec の逸脱一覧が正本
 
 新規6文書で矛盾した場合は上記の領域別正本を優先する。embedding/capabilityの先行bootstrapが後続最終契約と異なる場合は後続へ統合し、同じbuildへ旧型・旧状態・旧event・旧transactionを併存させない。security boundaryとhost/Tsumugi/OS責任は本文書を優先するが、catch可否やAPI名を本文書だけで上書きしない。ロードマップの完了表示は各正本の受入基準を緩和しない。
 
@@ -139,7 +158,7 @@ Phase 0〜2の受入完了時、次を保証する。
 | TM-002 | `..`、absolute path、separator差、case alias、Windows ADS（`:`）でfilesystem rootを脱出する | normalized relative pathのみ受理し、root-bound handle adapter内で認可とopenを一体化。component内`:`はlexical拒否（`ColonInComponent`） | OS/filesystem固有alias。secure adapter未対応platform（非Unix・非Windows）は拒否。Windowsのjunction / mount pointはfail-closed拒否で安全策とする | 2 | TM-AT-02, CAP-AT-10 |
 | TM-003 | check/use間のsymlink差替え、dangling final symlink、Windows junction/reparseで許可外へcreate/writeする | path文字列のcanonicalize→I/Oを廃止。directory/file handleに束縛し、symlink policyをadapterが原子的に強制。Windowsのreparse(junction/mount point)はsecure handleでroot拘束し、stdが確定できないreparse種別は拒否する | malicious filesystem、契約違反adapter。TOCTOU反復raceはAUD-020 / CAP-AT-11 stress（本slice対象外） | 2/OS | TM-AT-03, CAP-AT-11 |
 | TM-004 | canonicalize、metadata、import error差で許可外pathの存在をoracle化する | capability/grant/rootの拒否をresolver/OS操作前に同一のsanitized denialとして生成し、script操作ではcanonical error、link/control-planeでは`Denied`へ写像する。許可外pathをcanonicalizeしない | 許可済みroot内の存在情報は操作仕様上観測可能 | 2 | TM-AT-04 |
-| TM-005 | loop、callback、host call連打でCPUを占有する | fuel hookを全評価・callback経路へ置き、host call costを事前課金 | Phase 2時点のstepは包括的でない。hard CPU limitはOS責任 | 3/OS | TM-AT-05 |
+| TM-005 | loop、callback、host call連打でCPUを占有する | fuel hookを全評価・callback経路へ置き、host call costを事前課金 | host callback・adapter内部のCPU消費はfuelの外（事前課金するcostだけを数える）。fuelのcharge pointが§4.1課金表に揃うまでの差は[実行予算・協調実行仕様](execution-control.md)の逸脱一覧にある。hard CPU limitはOS責任 | 3/OS | TM-AT-05 |
 | TM-006 | 巨大文字列、総collection、input/host resultでOOMまたはallocator abortを起こす | 入出力・host resultのbyte上限、将来の総heap budget、上限超過前の拒否 | Rust allocation failureは同一process回復不能の場合がある | 3/OS | TM-AT-06 |
 | TM-007 | 深いAST/call/import/値またはnative callbackでstackを枯渇させる | 既存AST/call/import深度検査、List/Dictの値のネスト深度検査（上限256、値を作る時点で拒否）、tree実行thread要件、host callbackの再入禁止 | OS stack overflowはabortし得る。closureのcaptureの連鎖（関数値の深度は0と数える）の破棄はstackを枯渇させ得る（`fix-closure-capture-chain-stack`で別に扱う）。host functionの戻り値の値の深度は検査しない。別processが最終防御 | 0/1/OS | TM-AT-07 |
 | TM-008 | `input()`、filesystem、resolver、host function、外部serviceが無期限blockする | Phase 3でcallbackへdeadline/cancellationを渡し、adapterに有限timeoutを要求する | 同期v1は実行中syscallをpreemptできない | 3/OS | TM-AT-08 |
@@ -153,12 +172,12 @@ Phase 0〜2の受入完了時、次を保証する。
 | TM-016 | scriptが`try/catch`でcontrol-plane failureを捕捉して無制限再開する、またはcatch可能なcapability/host errorから権限を得る | script操作中のcanonical capability/host errorはcatch可能だが対象adapter/OS/callbackを呼ばない。budget、deadline、cancel、valid `exit`、panic、audit/record/replay failureとlink/control-planeの`Denied` / `HostError`はcatch不可terminalにする | host functionがpolicy errorを通常値として返す誤実装 | 1/2/3/6 | TM-AT-16 |
 | TM-017 | backend差を使い認可・評価順・error・副作用順を変える | treeを規範、VMはexperimental、全security testをbackend pairで実行し差があればVM拒否 | tree自身のbug | 1/5/7 | TM-AT-17 |
 | TM-018 | stdout、file、host function resultを大量生成してmemory/disk/logを枯渇させる | capability単位byte予算、N超過は書込み前拒否、auditは値を省略 | filesystem自体のquota、partial OS write | 3/OS | TM-AT-18 |
-| TM-019 | import graphを循環・大量・巨大化し、実行前にresourceを消費する | resolver capability、opaque module ID、既存depth制限、source/import byte・module数予算 | Phase 2時点では総source budget未実装 | 2/3 | TM-AT-19 |
+| TM-019 | import graphを循環・大量・巨大化し、実行前にresourceを消費する | resolver capability、opaque module ID、既存depth制限、source/import byte・module数予算 | budget上限までのresolver呼出しとsource読込みのcostはhostが負う。resolver callbackの無期限blockはTM-008 | 2/3 | TM-AT-19 |
 | TM-020 | context再利用で前実行のcapability、args、env、import、secretが次実行へ漏れる | contextは言語stateだけ保持。request/capability/inputはhandle所有でterminal時破棄。engine/revision一致検査 | scriptが前実行で明示的にglobalへ保存した通常Value | 1/2 | TM-AT-20 |
 | TM-021 | 実行中にgrant/revokeされ、check後にauthorityが変わる | start時freeze。grant/revoke APIなし。取消はtokenで実行全体をcancelし、新しいsetで再実行 | adapter内部の外部ACL変更 | 2 | TM-AT-21 |
 | TM-022 | builtin名一覧のdriftによりVMだけruntime fallbackし、認可を迂回する | core builtinとhost callableを単一catalogからparser/compiler/tree/VMへ導出 | generator自体のbug | 2/5 | TM-AT-22 |
 | TM-023 | error messageのpath・存在・host内部情報からsecretを得る | public error codeとsafe messageを分離、causeはhost側診断のみ、Deniedは対象情報を含めない | timing side channelは完全には除去しない | 1/2 | TM-AT-23 |
-| TM-024 | root sourceは制限外、importだけ制限内等、load経路差でpolicyを迂回する | root sourceはhostが明示供給、全importはlink時にresolver capabilityだけを使う。runtime import禁止 | hostがrootを不安全に読む責任 | 1/2 | TM-AT-24 |
+| TM-024 | root sourceは制限外、importだけ制限内等、load経路差でpolicyを迂回する | root sourceはhostが明示供給、全importはlink時にresolver capabilityだけを使う。runtime import禁止。対象はfile/stdinの`Engine::run`経路で、REPLは範囲外（[Capability Model仕様](capability-model.md) §10） | hostがrootを不安全に読む責任。REPLの対話的importはresolver gateを通らない | 1/2 | TM-AT-24 |
 
 ## 11. Phase別受入試験
 
@@ -166,7 +185,7 @@ Phase 0〜2の受入完了時、次を保証する。
 
 - 本文書のactor、asset、trust boundary、保証/非保証、責任分界、全脅威IDがrelease documentationから参照できる。
 - 各TM-IDにAttack、Mitigation、Residual risk、Phase、受入IDが1件以上あり、孤立IDがない。
-- **TM-AT-07:** 既存のAST深度256/257、import深度128/129、call depth試験に加え、値のネスト深度256/257（List・Dictのリテラル、`push`、index代入、`map`の結果。`tests/value_nesting_depth_limit.rs` の VND-AT-01・VND-AT-02）が、host abortではなく構造化errorになることを確認する。境界差は[AUD-017](roadmap.md)で追跡する。
+- **TM-AT-07:** AST深度256/257、import深度128/129、call depth、値のネスト深度256/257（List・Dictのリテラル、`push`、index代入、`map`の結果。`tests/value_nesting_depth_limit.rs` の VND-AT-01・VND-AT-02）の各境界が、host abortではなく構造化errorになり、tree・VMで同じ境界になることを確認する。
 - **TM-AT-12（host部分）:** dependency lock、review、OS隔離がTsumugi保証外のhost責任として明記される。
 
 ### Phase 1
@@ -176,7 +195,7 @@ Phase 0〜2の受入完了時、次を保証する。
 - **TM-AT-17:** security関連golden testをtree/VMで比較し、差が1件でもあるVMをstable backendとして公開しない。
 - **TM-AT-20（context部分）:** 同じcontextで2実行し、前回requestのargsが次回へ現れず、scriptがglobalへ明示保存した通常Valueだけが残る。
 - **TM-AT-23（error部分）:** public `HostError`と`ExecutionError`のDebug/Displayにfake secretが含まれない。
-- **TM-AT-24:** compile後・start前に全importがresolver経由でlinkされ、execution中のresolver呼出しは0回。
+- **TM-AT-24:** file/stdinの`Engine::run`経路で、compile後・start前に全importがresolver経由でlinkされ、execution中のresolver呼出しは0回。
 
 ### Phase 2
 
@@ -219,3 +238,47 @@ Phase 0〜2の受入完了時、次を保証する。
 ## 13. 変更管理
 
 脅威の削除、保証の緩和、script catch可否、security boundary、責任分界の変更はsecurity-relevant breaking changeである。変更時はthreat IDを再利用せず、新IDを追加し、影響するAPI/capability/受入試験と言語revisionを同一変更で更新する。
+
+## 14. 実装slice
+
+各スライス小節は実装時点の記録である。現在の逸脱・未実装範囲は冒頭の逸脱一覧を見る。
+
+### TM-024 の範囲の決定記録（loop:drift #318 の D-26）
+
+TM-024 の対策と TM-AT-24 は file/stdin の `Engine::run` 経路について定め、REPL・scheduler handle の `ModuleLoader` の経路は逸脱一覧に
+載せて残余リスクを見えるようにする（Q1=A）。判断役が選択（issue #318）。理由: [Capability Model仕様](capability-model.md) は
+REPL を範囲外と決めており（issue #291 の Q1=A）、[言語仕様](language-spec.md) の記述とも一貫する。既知の迂回を記録して後から
+検証できる状態を保つのはマニフェスト原則 9 に合う。REPL の import も link 済み graph に限る案（B）は言語挙動の設計変更で、
+capability-model の既存の決定と衝突し、ずれの修正で決めてよい範囲を超えるので選ばなかった（閉ざしてはいない）。
+
+### TM-005・TM-019 の残余リスクの決定記録（loop:drift #318 の D-30）
+
+TM-005・TM-019 の残余リスクから「Phase 2 時点」の文を消し、実装済みの source/import budget を前提にした今の残余リスクに書き直した
+（Q1=A）。判断役が選択（issue #318）。理由: 本文は目標と残余リスクを書き、時点つきの状態を持たない（ドキュメント運用ガイド
+「状態の正本は粒度ごとに 1 箇所だけ」）。過去の記述は git 履歴が持つ。「Phase 3 以降は実装済み」と注記して残す案（B）は、本文に
+状態を書くことになるので選ばなかった。
+
+### fix-depth-boundary-tests 実装スライス（AST 深度と import 深度の境界テストを足す）
+
+loop:drift #318 の D-27 を直す。TM-AT-07 は AST 深度 256/257 と import 深度 128/129 の境界が構造化 error になることを求めるが、
+境界そのものを固定するテストが無い（逸脱一覧の該当行）。call depth と値のネスト深度の境界テストは既にある
+（`tests/integration.rs` の call depth の test、`tests/value_nesting_depth_limit.rs`）。D-28 の参照切れ（AUD-017）は本文の修正で
+解消した。
+
+- **実装範囲**: テストだけを足す。`src/` の本体は変えない。
+  1. AST 深度: 入れ子の深さがちょうど `MAX_AST_DEPTH`（256）の source が compile でき、257 の source が構造化された compile error
+     （`ネストが深すぎます (上限: 256)` 系の文言）になることを、式の入れ子と文（block）の入れ子のそれぞれで確かめる。
+  2. import 深度: 深さがちょうど `MAX_IMPORT_DEPTH`（128）の import の chain が link でき、129 の chain が `DepthExceeded { limit: 128 }`
+     の link error になることを確かめる。
+  3. 1・2 を tree と VM の両方で走らせ、同じ境界で同じ種類の error になることを確かめる。
+  4. 深さの数え方は既存の検査（`src/parser.rs`・`src/ast.rs`・`src/embedding.rs` の import 深度の検査）のとおりとする。テストで境界が
+     TM-AT-07 の 256/257・128/129 とずれると分かったら、上限や数え方を推測で変えずに止まって報告する（spec に無い判断になるため）。
+- **範囲外**: 上限値の変更、error の文言の変更、call depth と値のネスト深度のテスト（既にある）。
+- **観測される変化**: なし（テストだけ）。
+- **受入基準（fix-depth-boundary-tests）**:
+  - **DBT-AT-01**（AST 深度）: 実装範囲 1 の 256 は成功、257 は構造化 compile error（panic・abort でない）。tree と `--vm` の両方。
+    確かめ方: `tests/` の integration test。
+  - **DBT-AT-02**（import 深度）: 実装範囲 2 の 128 は link 成功、129 は `DepthExceeded { limit: 128 }`。tree と VM の両方の経路。
+    確かめ方: 一時ディレクトリに chain を書き出し、`module_resolver` を grant した Engine API（または CLI の `--allow-import-root`）で走らせる test。
+- **想定の変更規模**: `src/` の本体は 0 行。テストは +60〜120 行程度。受入基準は 2 項目で、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
+  done にする実装 PR で、逸脱一覧の「TM-AT-07 の AST 深度 256/257 と import 深度 128/129 の境界を固定するテストが無い」行を削除する。

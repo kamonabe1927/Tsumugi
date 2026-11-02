@@ -118,6 +118,30 @@ acceptance = ["PSW-AT-01..05"]
 design_pr  = 314
 order      = 2
 
+# loop:drift #318 の D-29（判断済み Q1=A）と D-31（機械的）から作った fix 1 本と、D-27（機械的）から作った fix 1 本。
+# order は loop-runbook §12.3・§8 の「不具合の報告」の既定（今ある ready より前の空いている値。空きが 1 と 0 だけなので 0・1）。
+# fix-cli-vm-experimental-warning は CLI の --vm の warning と --help の文言（embedding-api §12・capability-model §14）。
+# parent は VM の experimental 扱い（conformance、E9）を含む Phase 5 残。
+# fix-depth-boundary-tests は threat-model の TM-AT-07 の境界テストを足すだけ（src/ の本体は変えない）。parent は limit の検証 gate の AUD-022。
+[[slice]]
+id         = "fix-cli-vm-experimental-warning"
+title      = "CLI の --vm で experimental の warning を stderr に出し、--help の --vm と --allow-import-root の文言を spec に合わせる（embedding-api §12・capability-model §14、loop:drift #318 D-29・D-31）"
+status     = "ready"
+parent     = "Phase 5 残"
+spec_slice = "E9"
+spec       = { doc = "docs/embedding-api.md", section = "fix-cli-vm-experimental-warning 実装スライス（CLI の `--vm` の warning と `--help` の文言を spec に合わせる）" }
+acceptance = ["CVW-AT-01..03"]
+order      = 0
+
+[[slice]]
+id         = "fix-depth-boundary-tests"
+title      = "AST 深度 256/257 と import 深度 128/129 の境界テストを tree・VM の両方に足す（threat-model TM-AT-07、loop:drift #318 D-27）"
+status     = "ready"
+parent     = "AUD-022"
+spec       = { doc = "docs/threat-model.md", section = "fix-depth-boundary-tests 実装スライス（AST 深度と import 深度の境界テストを足す）" }
+acceptance = ["DBT-AT-01..02"]
+order      = 1
+
 # issue #292（kamonabe、仕分け「受け入れ」）から作った不具合の fix 2 本。order は loop-runbook §8 の「不具合の報告」の既定
 # （今ある ready より前の空いている値）。parent は VM conformance（determinism Slice 6）を含む Phase 5 残。
 # 1 本目は determinism-and-audit §4.8（この設計 PR で追加）と §2.1 を VM の builtin 名の呼び出しで満たす。

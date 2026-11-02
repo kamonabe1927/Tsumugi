@@ -24,6 +24,7 @@ issue #263 Q2=A）。理由: spec が実装の正本であり、adapter の cont
 | host function の呼び出し境界が目標と違う。実装（`src/host_function.rs`）に `HostCallContext` と `charge_external` は無く、`HostFunction::call(&self, arguments)` は context を取らない。`HostCallError` は `Host { category: String }` の 1 variant だけで（`#[non_exhaustive]`、derive は `Debug`）、`Control(ControlStop)` が無い | §11.1 | C8 |
 | scheduler の handle 経路（`src/engine.rs` の `Engine::compile` / `create_execution` / `start`）は `Engine::link` と resolver を経ない。初回 poll の `Evaluator::begin_execution` で評価器内蔵 `ModuleLoader` が `ExecutionContext::set_script_path` のディレクトリ（未設定なら CWD）を基準にファイルを読み、import に `module_resolver` の grant を要さない（`TSUMUGI_SANDBOX` の検査だけを受ける）。`&LinkedScript` を取らない差は [実行予算・協調実行仕様](execution-control.md) の逸脱一覧（§9.1）にある | §10 | exec-control Slice 3 PR-a |
 | legacy profile で `TSUMUGI_SANDBOX` が区切り文字と空白だけの値（`,`・` , ` など）のとき、CLI（`src/cli_capability.rs` の `build_legacy_sandbox_fs`）は host root が 0 個なのを未設定と同じに扱い、unrestricted filesystem を security warning なしで grant する。同じ値を `src/sandbox.rs` は空の許可リスト（全部拒否）と解釈する。issue #291 の再現 2 | §14.3 | C9/C10 |
+| CLI の `--allow-import-root` の説明が §14 の挙動と合わない。§14 は C6-c で filesystem `ModuleResolver` を safe profile へ grant すると定め、実際に `--allow-import-root default=.` で import した module が実行されるが、`--help`（`src/cli_capability.rs` の `USAGE`）は「（値検証のみ）」、`build_safe_capabilities` の doc comment は「値検証のみで set には寄与しない」、`src/capability.rs` のテストのコメントは「module_resolver を grant しない」と書く。挙動の差ではなく文言の差。直すのは [組み込みAPI仕様](embedding-api.md) §14 の fix-cli-vm-experimental-warning（loop:drift #318 の D-31） | §14 | C6-c |
 
 ## 1. 目的と規範範囲
 
