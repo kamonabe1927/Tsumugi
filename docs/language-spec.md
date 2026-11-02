@@ -27,6 +27,10 @@
 
 両engine差: 現在なし。
 
+両engine共通の仕様違反（本書の規範との差）:
+
+- `push`は第2引数を評価した後のbindingの現在値へ値を追加する。第2引数の評価中に同じbindingが再代入・変更されると、先に読み取ったsnapshotではなく変更後の値を基にしたListを書き戻す（例: `let xs = [1]`の後、`xs = [7, 8]`として`2`を返す関数`g`で`push(xs, g())`とすると`[7, 8, 2]`になる。規範どおりなら`[1, 2]`）。規範は「コンテキスト依存組み込み関数の呼び出し順序」にある（issue #293、[実行予算・協調実行仕様](execution-control.md) §14「fix-push-snapshot-writeback 実装スライス」で修正予定）
+
 両engine共通の仕様違反（[Capability Model仕様](capability-model.md) の目標との差）:
 
 - REPL の import の実行時の読み込みは、profile にかかわらず `TSUMUGI_SANDBOX` を読み、許可範囲外のパスをサンドボックス違反にする。目標は「safe profile では `TSUMUGI_SANDBOX` を読まない」である（同 §14.3・§14.4）。REPL の import が評価器内蔵の module loader を経由していることによる。ファイル・標準入力から実行するスクリプトの import は、link 時に resolver が import root の下で確かめた内容だけを実行し、`TSUMUGI_SANDBOX` を読まない
