@@ -641,20 +641,27 @@ loop:drift #318 の D-29 と D-31 を直す。2 件とも CLI の利用者に見
   - library の `Backend::VmExperimental`・`allow_experimental_backend` の挙動。
   - VM の conformance そのもの（E9 の残り）。
 - **観測される変化**: `--vm` を付けた実行で stderr の先頭に 1 の warning が 1 行増える。`--help` の 2 行が変わる。
-  それ以外の stdout・stderr・exit code は変えない。
+  warning の 1 行を除いた stdout・stderr と exit code は変えない（`--vm` の stderr を空や固定文字列で照合する既存の test は、
+  CVW-AT-03 のとおり warning の 1 行を除いて同じ確認を保つように直す）。
 - **受入基準（fix-cli-vm-experimental-warning）**:
   - **CVW-AT-01**（warning）: `tsumugi --vm <file>`・`tsumugi --vm -`（stdin）・`tsumugi --vm`（REPL、入力は空）のそれぞれで、
     stderr に `WARN_VM_EXPERIMENTAL` がちょうど 1 行出て、stdout と exit code は warning の無い場合と同じ。`--vm` を付けない
     実行では出ない。`tsumugi --vm --help`・`tsumugi --vm --unknown` では出ない。
     確かめ方: subprocess test（`tests/` の CLI の test）で stdout・stderr・exit code を照合する。
-  - **CVW-AT-02**（help の文言）: `USAGE` の `--vm` と `--allow-import-root` の行が実装範囲 2・3 の文言になり、既存の help の
-    golden test を新しい文言で通す。`USAGE` に「値検証のみ」が残らない。
-    確かめ方: 既存の help の golden test の期待値を更新して通す。
-  - **CVW-AT-03**（既存の tree / VM 比較）: tree と `--vm` の stderr を比べる既存の test は、`WARN_VM_EXPERIMENTAL` の 1 行を
-    除いた残りで比べるように直し、比較の対象を減らさずに通す。
-    確かめ方: `cargo test` 全体。
+  - **CVW-AT-02**（help の文言）: `USAGE` の `--vm` と `--allow-import-root` の行が実装範囲 2・3 の文言になり、その
+    文言で `--help` の stdout に出る。`USAGE` に「値検証のみ」が残らない。
+    確かめ方: `USAGE` の文言を照合する既存の test は無いので、`--help` の stdout を照合する test を足す（`tests/` の CLI の
+    subprocess test、または `src/cli_capability.rs` の unit test で `USAGE` の 2 行を照合する）。
+  - **CVW-AT-03**（既存の stderr の確認）: `--vm` を付けた実行の stderr を照合する既存の test 全般（tree と `--vm` の stderr の比較、
+    stderr が空であることの確認、固定文字列との完全一致を含む。例: `tests/integration.rs` の `for use_vm` の REPL の
+    `stderr.is_empty()`（:1500-1516 付近）、VM REPL の `stderr.is_empty()`（:1622 付近）、`use_vm` での stderr の完全一致
+    （:3580-3594 付近））は、どれも `WARN_VM_EXPERIMENTAL` の 1 行を除いた残りに対して、今と同じ確認（空・完全一致・比較）を保つように
+    直す。確認を緩めたり対象から外したりしない。
+    確かめ方: `cargo test` 全体。直した test の一覧を実装 PR の本文に書く。
 - **想定の変更規模**: 本体（`#[cfg(test)]` を除く `src/`）は `src/cli_capability.rs` と CLI の入口（`src/main.rs`）で +10〜25 行・
-  −3〜5 行程度。テストは +40〜90 行程度。受入基準は 3 項目で、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
+  −3〜5 行程度。テストは、新しい test（CVW-AT-01・02）が +50〜100 行、`--vm` の stderr を照合する既存の test の書き換え
+  （CVW-AT-03。`tests/integration.rs` の数か所〜十数か所。warning の行を除く共通の helper を 1 つ置いて各所から使う）が +20〜40 行・
+  −10〜30 行程度。受入基準は 3 項目で、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
   done にする実装 PR で、本書の逸脱一覧の「CLI の `--vm` は experimental VM を選んだことを知らせない」行と、
   [Capability Model仕様](capability-model.md) の逸脱一覧の `--allow-import-root` の文言の行を削除する。
 
