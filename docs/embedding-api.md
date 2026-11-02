@@ -29,6 +29,7 @@
 | 公開 `ExecutionOutcome`（`src/embedding.rs` の `ExecutionOutcome`、crate root では `EmbeddingOutcome`）は `Completed` / `Exited` / `RuntimeError` / `BudgetExceeded` / `DeadlineExceeded` / `Cancelled` / `InternalFailure` の 7 variant だけで、目標の 13 variant のうち `Denied` / `LinkError` / `HostError` / `AuditFailure` / `RecordFailure` / `ReplayMismatch` が無い。link 時の拒否と resolver の host 失敗は `Engine::link` の `Result<_, LinkError>`（`LinkError::Denied` / `LinkError::Resolve(HostError)` ほか）で返し、監査失敗は監査付き経路だけの別型 `AuditedOutcome::AuditFailed` で返す。`RecordFailure` / `ReplayMismatch` は record/replay が未実装のため無い（同じ差を [決定性・実行時監査仕様](determinism-and-audit.md) の逸脱一覧が §7.2 の `TerminalOutcome` との対応として持つ） | §8 | E1・E5・E7・E11 |
 | `ExecutionOutcome` の field の形が目標と違う。目標の `Completed { value: Value, usage }` に対し、実装（`src/embedding.rs` の `ExecutionOutcome::Completed`）は `Completed { usage }` で `value` が無い。目標の `BudgetExceeded { failure: BudgetExceeded, usage }` に対し、実装は `BudgetExceeded { error: ExecutionError, usage }` で、超過した resource は `ExecutionError::code` の `ErrorKind` で表す（構造化の `BudgetExceeded` 型は `src/budget.rs` にあるが outcome には載せない）。目標の `DeadlineExceeded { deadline: MonotonicInstant, usage }` に対し、実装は `DeadlineExceeded { usage }` で `deadline` が無い | §8 | E5（`Completed`）、E11（`BudgetExceeded`・`DeadlineExceeded`） |
 | `StartError`（`src/scheduler.rs` の `StartError`、`src/lib.rs` で crate root に公開）は `Backpressure { active, queued, limit }` / `Config(ConfigError)` / `ConcurrentRunRequiresPolling` の 3 variant だけで、目標の `EngineMismatch` / `RevisionMismatch` / `ContextBusy` / `ContextPoisoned` / `InvalidRequest` / `AuditUnavailable` / `InternalFailure` が無く、目標に無い `Config(ConfigError)` を持つ。`ConcurrentRunRequiresPolling` は variant だけで、検出は配線していない | §9 | exec-control Slice 5 |
+| CLI の `--vm` は experimental VM を選んだことを知らせない。§12 の目標は「`--vm` は experimental VM を選択し warning を要求する」だが、`tsumugi --vm a.tsu` は stderr に何も出さず、`--help`（`src/cli_capability.rs` の `USAGE`）も「バイトコード VM で実行する」とだけ書く。library 側は `Backend::VmExperimental`・`allow_experimental_backend` で明示している。直すのは fix-cli-vm-experimental-warning（§14） | §12 | E9 |
 
 ## 1. 目的と規範範囲
 
@@ -574,6 +575,23 @@ tsumugi [OPTIONS] [SCRIPT [ARGS...]]
 
 compatibility shimもprocess exitやambient accessを復活させず、script操作中のcapability/host errorをcatch可能とするcanonical契約と、link/control-planeのterminal契約を変更してはならない。
 
+### 13.1 alpha 期間に受容した公開 API の破壊的変更
+
+alpha（後方互換無保証）の間に、crate root（`src/lib.rs`）の公開型を変える破壊的変更を受容したときは、この表に 1 行で記録する。
+受容の条件は「この表に記録すること」であり、ロードマップには書かない（ロードマップは今後の予定だけを持ち、完了の履歴を持たない。
+[ドキュメント運用ガイド](documentation-guide.md)「ロードマップと spec の責務分離」）。設計の理由は各行の「設計の記録」の節が持つ。
+CHANGELOG は置いていないので、公開 API の変更の記録は公開 API の正本であるこの仕様にまとめる。
+
+| 変更 | 壊れるもの | `language_revision` | 設計の記録 |
+|---|---|---|---|
+| `YieldReason::AuditBackpressure` と `AuditFailure::BackpressureDeadline` の追加（B-1） | 公開 enum を網羅的に `match` する外部コード | bump なし（既存 tag 5/6・既存 `AuditYieldReason::AuditBackpressure`） | [決定性・実行時監査仕様](determinism-and-audit.md) の A-1 実装スライスの「`AuditBackpressure`-yield 配線（§10/§10.2、B-1、実装済み）」の項 |
+| 簡略 `AuditPayloadField` の撤去と `AuditPayload.fields` の §9.1 の `BTreeMap<String, AuditField>` への差し替え（R-1a） | `AuditPayload`・`AuditPayloadField` に依存する外部コード | bump なし（CBOR tag 表・charge table・script 観測値は不変） | [決定性・実行時監査仕様](determinism-and-audit.md) の R-1 実装スライス |
+
+この節は loop:drift #318 の D-22 で足した。受容の記録を roadmap でなく spec に置くこと（Q1=A）は判断役が選択（issue #318）した。
+理由: ロードマップは「完了の履歴」を持たないと運用ガイドが定めており、破壊的変更を受容した設計判断はマニフェスト原則 9（動機・保証・
+トレードオフの文書化）のとおり spec が持つ。置き場所に CHANGELOG でなくこの節を選んだのは設計役で、CHANGELOG が無く、
+公開 API の移行（本章）と同じ文書にあれば利用者が 1 か所で読めるためである。
+
 ## 14. 実装slice
 
 | Slice | Phase | 内容 | 完了条件 |
@@ -594,6 +612,59 @@ compatibility shimもprocess exitやambient accessを復活させず、script操
 | E13 | 6 | canonical audit sink/event/usage完全性 | 8 event、fail-closed、`BudgetUsage` test |
 
 E1→E2→E3→E4→E5→E6→E8a、次にE7→E8b。E11以降をPhase 1/2完了条件へ前倒ししない。
+
+### fix-cli-vm-experimental-warning 実装スライス（CLI の `--vm` の warning と `--help` の文言を spec に合わせる）
+
+loop:drift #318 の D-29 と D-31 を直す。2 件とも CLI の利用者に見える文言（stderr と `--help`）が spec と食い違う件で、
+触るのは `src/cli_capability.rs` と CLI の入口だけなので 1 本にした。
+
+- D-29: §12 と [脅威モデル](threat-model.md) §7 の保証 6（VM は conformance 完了まで experimental として明示される）に対し、
+  `--vm` は warning を出さない（逸脱一覧の該当行）。warning を出す fix を足すこと（Q1=A）は判断役が選択（issue #318）した。
+  理由: 本文（§12・threat-model §7 の保証 6・TM-017）が目標で、library 側はすでに `Backend::VmExperimental` で明示している。
+  CLI では warning を要求しないと spec を改める案（B）は、規範でない backend を選んだことを CLI 利用者に知らせない状態を目標に
+  することになり、マニフェスト原則 9（根拠のない主張をしない）に反しうるので選ばなかった。
+- D-31: `--allow-import-root` の `--help`「（値検証のみ）」、`build_safe_capabilities` の doc comment（「値検証のみで set には寄与しない」）、
+  `src/capability.rs` のテストのコメント（「module_resolver を grant しない」）が、[Capability Model仕様](capability-model.md) §14
+  （C6-c で filesystem `ModuleResolver` を safe profile へ grant する）と実際の挙動に合わない（capability-model の逸脱一覧の該当行）。
+
+- **実装範囲**:
+  1. CLI が `--vm` を受けて VM で実行するとき（file・stdin・REPL のどれでも）、script の開始前に stderr へ次の warning を 1 行だけ出す。
+     文言は定数 `WARN_VM_EXPERIMENTAL` として `src/cli_capability.rs` に置く。
+     `警告: --vm は experimental な VM backend を選びます。規範の backend は tree-walk です`
+     usage error・`--help`・`--version` で終わるときは出さない。exit code・stdout は変えない。
+  2. `USAGE` の `--vm` の行を `--vm                        experimental なバイトコード VM で実行する` にする。
+  3. `USAGE` の `--allow-import-root` の行を `--allow-import-root NAME=PATH  import root を mount し module_resolver を許可する` にする
+     （列の揃えは既存の行に合わせる）。
+  4. `build_safe_capabilities` の doc comment と `src/capability.rs` のテストのコメントを、C6-c の挙動（`--allow-import-root` が
+     `module_resolver` を grant する）に合わせて書き直す。コードの挙動は変えない。
+- **範囲外**:
+  - library の `Backend::VmExperimental`・`allow_experimental_backend` の挙動。
+  - VM の conformance そのもの（E9 の残り）。
+- **観測される変化**: `--vm` を付けた実行で stderr の先頭に 1 の warning が 1 行増える。`--help` の 2 行が変わる。
+  warning の 1 行を除いた stdout・stderr と exit code は変えない（`--vm` の stderr を空や固定文字列で照合する既存の test は、
+  CVW-AT-03 のとおり warning の 1 行を除いて同じ確認を保つように直す）。
+- **受入基準（fix-cli-vm-experimental-warning）**:
+  - **CVW-AT-01**（warning）: `tsumugi --vm <file>`・`tsumugi --vm -`（stdin）・`tsumugi --vm`（REPL、入力は空）のそれぞれで、
+    stderr に `WARN_VM_EXPERIMENTAL` がちょうど 1 行出て、stdout と exit code は warning の無い場合と同じ。`--vm` を付けない
+    実行では出ない。`tsumugi --vm --help`・`tsumugi --vm --unknown` では出ない。
+    確かめ方: subprocess test（`tests/` の CLI の test）で stdout・stderr・exit code を照合する。
+  - **CVW-AT-02**（help の文言）: `USAGE` の `--vm` と `--allow-import-root` の行が実装範囲 2・3 の文言になり、その
+    文言で `--help` の stdout に出る。`USAGE` に「値検証のみ」が残らない。
+    確かめ方: `USAGE` の文言を照合する既存の test は無いので、`--help` の stdout を照合する test を足す（`tests/` の CLI の
+    subprocess test、または `src/cli_capability.rs` の unit test で `USAGE` の 2 行を照合する）。
+  - **CVW-AT-03**（既存の stderr の確認）: `--vm` を付けた実行の stderr を照合する既存の test 全般（tree と `--vm` の stderr の比較、
+    stderr が空であることの確認、固定文字列との完全一致を含む。例: `tests/integration.rs` の `for use_vm` の REPL の
+    `stderr.is_empty()`（:1500-1516 付近）、VM REPL の `stderr.is_empty()`（:1622 付近）、`use_vm` での stderr の完全一致
+    （:3580-3594 付近））は、どれも `WARN_VM_EXPERIMENTAL` の 1 行を除いた残りに対して、今と同じ確認（空・完全一致・比較）を保つように
+    直す。確認を緩めたり対象から外したりしない。
+    確かめ方: `cargo test` 全体。直した test の一覧を実装 PR の本文に書く。
+- **想定の変更規模**: 本体（`#[cfg(test)]` を除く `src/`）は `src/cli_capability.rs` と CLI の入口（`src/main.rs`）で +10〜25 行・
+  −3〜5 行程度。テストは、新しい test（CVW-AT-01・02）が +50〜100 行、`--vm` の stderr を照合する既存の test の書き換え
+  （CVW-AT-03。`tests/integration.rs` の数か所〜十数か所。warning の行を除く共通の helper を 1 つ置いて各所から使う）が +20〜40 行・
+  −10〜30 行程度。受入基準は 3 項目で、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
+  done にする実装 PR で、本書の逸脱一覧の「CLI の `--vm` は experimental VM を選んだことを知らせない」行と、
+  [Capability Model仕様](capability-model.md) の逸脱一覧の `--allow-import-root` の文言の行と、[脅威モデル](threat-model.md) の逸脱一覧の
+  「CLI の `--vm` は experimental VM を選んだことを stderr にも `--help` にも示さない」行を削除する。
 
 ## 15. 受入基準
 
