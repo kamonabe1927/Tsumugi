@@ -130,6 +130,7 @@ status     = "ready"
 parent     = "REV-024"
 spec       = { doc = "docs/verification-release-operations.md", section = "fix-no-default-features-build 実装スライス（`default-features = false` の構成で build でき、`cargo test` で検査する）" }
 acceptance = ["NDF-AT-01..03"]
+design_pr  = 322
 order      = 8
 
 # loop:drift #318 の D-29（判断済み Q1=A）と D-31（機械的）から作った fix 1 本と、D-27（機械的）から作った fix 1 本。
