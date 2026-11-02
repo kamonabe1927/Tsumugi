@@ -1174,6 +1174,33 @@ impl Value {
         Ok(())
     }
 
+    /// `push` の書き戻し（issue #293）。`self` は binding の現在値、`snapshot` は第 2 引数の
+    /// 評価より前に読んだ第 1 引数の値。`snapshot` が List でなければ何もしない（呼び出し側が
+    /// 型を検査済み）。
+    ///
+    /// 現在値の backing が `snapshot` と同じ（評価中に再代入も変更も無かった）なら、`snapshot`
+    /// を drop して一意所有へ戻してから in-place の delta 課金で追加する。違えば `snapshot` へ
+    /// 追加した List を binding へ書き戻す（評価中の再代入・変更は捨てる）。
+    pub fn list_push_snapshot_writeback(
+        &mut self,
+        snapshot: Value,
+        item: Value,
+        budget: &mut crate::budget::BudgetLedger,
+        phase: ExecutionPhase,
+    ) -> Result<(), ControlStop> {
+        let same =
+            matches!((&*self, &snapshot), (Value::List(a), Value::List(b)) if Rc::ptr_eq(a, b));
+        if same {
+            drop(snapshot);
+            self.list_push_tracked(item, budget, phase)
+        } else {
+            let mut snapshot = snapshot;
+            snapshot.list_push_tracked(item, budget, phase)?;
+            *self = snapshot;
+            Ok(())
+        }
+    }
+
     /// `self`（`Value::List`）末尾要素を除去する（delta 課金）。空なら何もしない。
     pub fn list_pop_tracked(
         &mut self,

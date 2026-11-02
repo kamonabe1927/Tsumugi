@@ -2874,4 +2874,43 @@ print(s)
             "builtin の引数の中の関数本体で yield している: {pairs}"
         );
     }
+
+    /// PSW-AT-01 / PSW-AT-04（fix-push-snapshot-writeback、式 frame 経路）: 第 2 引数の関数の本体で
+    /// 全境界で yield しても、`push` は snapshot へ追加して書き戻し、同期経路と一致する。
+    #[test]
+    fn psw_at_04_push_snapshot_writeback_spans_yields() {
+        let text = "\
+let xs = [1]
+fn g()
+  let i = 0
+  while i < 3
+    i = i + 1
+  end
+  xs = [7, 8]
+  push(xs, 5)
+  return 2
+end
+push(xs, g())
+print(xs)
+fn f()
+  let ys = [1]
+  fn inner()
+    let i = 0
+    while i < 2
+      i = i + 1
+    end
+    ys = [9]
+    return 2
+  end
+  push(ys, inner())
+  return ys
+end
+print(f())
+";
+        let yields = assert_matches_sync(text);
+        assert!(yields > 0, "強制 yield が起きていない");
+        let (outcome, stdout) = run_plain(text, true);
+        assert!(matches!(outcome, EmbeddingOutcome::Completed { .. }));
+        assert_eq!(stdout, "[1, 2]\n[1, 2]\n");
+    }
 }

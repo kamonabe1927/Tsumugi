@@ -419,4 +419,7 @@ const TREE_EXPECTED: (u64, u64, u64) = (242, 25204, 25204);
 // fix-vm-builtin-call-lowering で、builtin 名の呼び出しの引数の bytecode を 2 経路で共有したため、
 // VM の bytecode_chunk の課金（64 + 16 × 命令数 + 32 × 定数数）が 640 byte 減った。fuel と tree の値、
 // bytecode 以外の heap は変わらない。
-const VM_EXPECTED: (u64, u64, u64) = (242, 23620, 23620);
+// fix-push-snapshot-writeback で、push の builtin 経路の第 1 引数の位置を、定数 `Null`（命令 1 + 定数 1）
+// から binding の snapshot の読み取り（命令 1）へ置き換えたため、push の呼び出し箇所 1 つにつき定数 1 つぶん
+// （32 byte）減った（この script の push は 1 箇所）。実行時の課金は変わらない。
+const VM_EXPECTED: (u64, u64, u64) = (242, 23588, 23588);
