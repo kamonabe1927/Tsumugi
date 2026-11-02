@@ -243,6 +243,25 @@ fn fixture_has_import(name: &str) -> bool {
     )
 }
 
+/// `--vm` が stderr の先頭に出す experimental の警告（`src/cli_capability.rs` の `WARN_VM_EXPERIMENTAL`、
+/// fix-cli-vm-experimental-warning、CVW-AT-03）。
+const WARN_VM_EXPERIMENTAL: &str =
+    "警告: --vm は experimental な VM backend を選びます。規範の backend は tree-walk です";
+
+/// stderr を文字列にし、`WARN_VM_EXPERIMENTAL` の 1 行を除く。残りに対して、各 test は今までと同じ
+/// 確認（空・完全一致・tree との比較）を行う。警告の有無そのものは `tests/cli_vm_warning.rs` が確かめる。
+fn stderr_without_vm_warning(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw).replace("\r\n", "\n");
+    let mut removed = false;
+    text.split_inclusive('\n')
+        .filter(|line| {
+            let hit = !removed && line.trim_end_matches('\n') == WARN_VM_EXPERIMENTAL;
+            removed |= hit;
+            !hit
+        })
+        .collect()
+}
+
 /// fixture を1つ実行して stdout / stderr / 終了コードを検証する
 fn run_fixture(name: &str, kind: FixtureKind, use_vm: bool) {
     let mode = if use_vm { "VM" } else { "tree-walk" };
@@ -281,7 +300,7 @@ fn run_fixture(name: &str, kind: FixtureKind, use_vm: bool) {
     let output = wait_with_timeout(child, fixture_timeout(name), &context);
 
     let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
-    let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+    let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
     assert!(
         !stderr.contains("panicked at"),
         "{context}: host panicが発生しました\n--- stderr ---\n{stderr}"
@@ -613,7 +632,7 @@ fn stack_overflow_reports_depth_limit_with_trace() {
         let script = fixtures_dir().join("error_stack_overflow.tsg");
         let output = run_script_process(&script, use_vm, &[], &context);
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
-        let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+        let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
         let lines: Vec<&str> = stderr.lines().collect();
 
         assert!(
@@ -670,7 +689,7 @@ fn user_call_depth_boundary_is_identical_across_engines() {
             let context = format!("call-depth [{mode}] n={target}");
             let output = run_script_process(&script, use_vm, &[], &context);
             let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
-            let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+            let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
 
             if should_succeed {
                 assert!(
@@ -724,7 +743,7 @@ fn user_call_depth_limit_applies_to_all_call_forms() {
             let context = format!("call-form [{mode}] {label}");
             let output = run_script_process(&script, use_vm, &[], &context);
             let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
-            let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+            let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
 
             assert!(
                 !output.status.success(),
@@ -762,7 +781,7 @@ fn cli_default_budget_is_finite_in_both_engines() {
         let context = format!("cli option-b heavy [vm={use_vm}]");
         let output = run_script_process(&script, use_vm, &[], &context);
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
-        let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+        let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
 
         assert!(
             !output.status.success(),
@@ -816,7 +835,7 @@ fn legacy_budget_env_applies_to_all_cli_paths_with_one_warning() {
                     .expect("stdin への書き込みに失敗");
             }
             let output = child.wait_with_output().expect("tsumugi の終了待ちに失敗");
-            let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+            let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
 
             assert!(!output.status.success(), "{context}: 停止していません");
             let lines: Vec<&str> = stderr.lines().collect();
@@ -841,7 +860,7 @@ fn unparsable_legacy_budget_env_is_ignored_without_warning() {
     for use_vm in [false, true] {
         let context = format!("invalid legacy budget env [vm={use_vm}]");
         let output = run_script_process(&script, use_vm, &[("TSUMUGI_MAX_STEPS", "abc")], &context);
-        let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+        let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
         assert!(
             stderr.lines().count() == 1
                 && stderr.ends_with("ステップ上限に達しました (上限: 1000000)"),
@@ -860,7 +879,7 @@ fn cli_default_budget_allows_light_import_less_script_tree() {
     let context = "cli option-b light [tree-walk]";
     let output = run_script_process(&script, false, &[], context);
     let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
-    let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+    let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
 
     assert!(
         output.status.success(),
@@ -924,7 +943,7 @@ fn import_outside_sandbox_is_blocked_in_both_engines() {
             .unwrap_or_else(|e| panic!("{context}: 起動失敗: {e}"));
         let output = wait_with_timeout(child, DEFAULT_TIMEOUT, &context);
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
-        let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+        let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
 
         assert!(
             !output.status.success(),
@@ -1318,7 +1337,7 @@ fn run_windows_protected_env_keys(use_vm: bool) {
 
         let output = cmd.output().expect("tsumugi バイナリの実行に失敗");
         let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
-        let stderr = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
+        let stderr = stderr_without_vm_warning(&output.stderr);
         let mode = if use_vm { "VM" } else { "tree-walk" };
         let allow_mode = if allow_all {
             "allow-list=*"
@@ -1867,7 +1886,7 @@ fn repl_visible_lines(stdout: &str, use_vm: bool) -> Vec<&str> {
 fn output_text(output: &std::process::Output) -> (String, String) {
     (
         String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
-        String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n"),
+        stderr_without_vm_warning(&output.stderr),
     )
 }
 
@@ -2825,7 +2844,7 @@ fn print_reports_closed_output_without_host_panic() {
         }
 
         let output = wait_with_timeout(child, DEFAULT_TIMEOUT, &format!("{mode} closed output"));
-        let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+        let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
 
         assert!(
             !stderr.contains("panicked at"),
@@ -2860,7 +2879,7 @@ fn rejects_non_utf8_argument_without_host_panic() {
         .unwrap_or_else(|error| panic!("起動に失敗: {error}"));
 
     let output = wait_with_timeout(child, DEFAULT_TIMEOUT, "non-utf8 argv");
-    let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+    let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
 
     assert!(
         !stderr.contains("panicked at"),
@@ -3227,7 +3246,7 @@ fn run_file_with_args(dir: &TestDir, source: &str, script_args: &[&str]) -> (Str
         assert!(
             output.status.success(),
             "{mode}: 実行に失敗しました: {}",
-            normalize(&String::from_utf8_lossy(&output.stderr))
+            normalize(&stderr_without_vm_warning(&output.stderr))
         );
         outputs.push(normalize(&String::from_utf8_lossy(&output.stdout)));
     }
@@ -3306,7 +3325,7 @@ fn dash_reads_source_from_stdin_with_args() {
         assert!(
             output.status.success(),
             "{mode}: stdin script の実行に失敗: {}",
-            normalize(&String::from_utf8_lossy(&output.stderr))
+            normalize(&stderr_without_vm_warning(&output.stderr))
         );
         outputs.push(normalize(&String::from_utf8_lossy(&output.stdout)));
     }
@@ -3455,7 +3474,7 @@ fn file_run_default_heap_limit_does_not_change_observable_output() {
         cmd.arg(path.to_str().unwrap());
         let output = cmd.output().expect("tsumugi バイナリの実行に失敗");
         let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
-        let stderr = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
+        let stderr = stderr_without_vm_warning(&output.stderr);
 
         assert!(output.status.success(), "{mode}が異常終了: {stderr}");
         assert_eq!(normalize(&stdout), "50\n2", "{mode}の出力が不正: {stdout}");
@@ -3492,7 +3511,7 @@ fn heap_release_recovers_across_reassignment_in_both_engines() {
             .env("TSUMUGI_MAX_LIVE_HEAP_BYTES", "60000");
         let output = cmd.output().expect("tsumugi バイナリの実行に失敗");
         let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
-        let stderr = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
+        let stderr = stderr_without_vm_warning(&output.stderr);
         assert!(
             output.status.success(),
             "{mode}: reassign ループが heap 上限で失敗した（release が効いていない疑い）: {stderr}"
@@ -3528,7 +3547,7 @@ fn heap_accumulation_trips_limit_in_both_engines() {
             .env("TSUMUGI_MAX_LIVE_HEAP_BYTES", "50000");
         let output = cmd.output().expect("tsumugi バイナリの実行に失敗");
         let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
-        let stderr = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
+        let stderr = stderr_without_vm_warning(&output.stderr);
         // 累積で上限を超えるため "done" は出ず、heap 診断が出る。
         assert!(
             !normalize(&stdout).contains("done"),
@@ -3619,7 +3638,7 @@ fn f1_default_fuel_limit_matches_in_both_engines() {
             let context = format!("{label} [vm={use_vm}]");
             let output = run_script_process(&script, use_vm, &[], &context);
             let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
-            let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+            let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
             match expected {
                 Ok(out) => {
                     assert!(output.status.success(), "{context}: 失敗しました: {stderr}");
@@ -3689,7 +3708,7 @@ fn f1_fuel_limit_is_not_catchable_in_both_engines() {
         let context = format!("uncatchable [vm={use_vm}]");
         let output = run_script_process(&script, use_vm, &[], &context);
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
-        let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+        let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
         assert!(!output.status.success(), "{context}: 正常終了しました");
         assert_eq!(
             stdout, "",

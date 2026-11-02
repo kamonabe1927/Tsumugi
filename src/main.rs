@@ -6,8 +6,8 @@ use std::io::{self, Read, Write};
 use std::sync::Arc;
 
 use cli_capability::{
-    Backend, CliInvocation, CliOutcome, Profile, Source, USAGE, build_legacy_capabilities,
-    build_safe_capabilities, parse_cli,
+    Backend, CliInvocation, CliOutcome, Profile, Source, USAGE, WARN_VM_EXPERIMENTAL,
+    build_legacy_capabilities, build_safe_capabilities, parse_cli,
 };
 use tsumugi::{
     BudgetConfig, CancellationToken, CapabilitySet, CompileErrors, EmbeddingContext,
@@ -97,6 +97,12 @@ fn run() {
     // profile / options から frozen capability set を構築する（§3/§4）。構築 error（legacy の
     // secure handle 不能・root 選択曖昧など）は usage error 相当で exit 1。
     let frozen = build_capabilities(&invocation);
+
+    // `--vm` は experimental な VM backend を選ぶ。script の開始前に stderr へ 1 行だけ知らせる
+    // （embedding-api §12）。usage error / --help / --version はここへ来る前に終わる。
+    if invocation.backend == Backend::Vm {
+        eprintln!("{}", WARN_VM_EXPERIMENTAL);
+    }
 
     // legacy budget 環境変数（execution-control §13）は起動時に 1 回だけ読み、全経路で共有する。
     let budget_env = LegacyBudgetEnv::read();
