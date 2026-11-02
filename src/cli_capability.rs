@@ -98,12 +98,17 @@ impl std::fmt::Display for CliUsageError {
     }
 }
 
+/// `--vm` で experimental な VM backend を選んだとき、script の開始前に stderr へ 1 行出す警告
+/// （embedding-api §12、fix-cli-vm-experimental-warning）。
+pub const WARN_VM_EXPERIMENTAL: &str =
+    "警告: --vm は experimental な VM backend を選びます。規範の backend は tree-walk です";
+
 /// `--help` / usage error 末尾に出す usage 文字列（§7.1、golden）。
 pub const USAGE: &str = "\
 使い方: tsumugi [オプション] [スクリプト [引数...]]
 
 オプション:
-  --vm                        バイトコード VM で実行する
+  --vm                        experimental なバイトコード VM で実行する
   --profile safe|legacy       capability profile を選ぶ（既定: safe）
   --allow-env KEY             環境変数 KEY を公開する（複数指定可）
   --allow-clock               now() を許可する
@@ -112,7 +117,7 @@ pub const USAGE: &str = "\
   --deny-stdout               print の標準出力を拒否する
   --fs-root NAME=PATH         ファイルシステム root を mount する（--fs-op と対にする）
   --fs-op NAME=OP[,OP...]     mount NAME に操作を許可する（read|write|create|delete|metadata|list）
-  --allow-import-root NAME=PATH  import root を宣言する（値検証のみ）
+  --allow-import-root NAME=PATH  import root を mount し module_resolver を許可する
   --help                      この使い方を表示する
   --version                   バージョンを表示する
   --                          以降をオプションとして解釈しない";
@@ -441,7 +446,8 @@ fn policy_seed(tag: &[u8], parts: &[&[u8]]) -> Vec<u8> {
 /// safe profile の frozen [`CapabilitySet`] を構築する（§3）。
 ///
 /// empty から始め、option に応じて stdout（既定）/ clock / stdin / exit / env snapshot /
-/// filesystem root を grant する。`--allow-import-root` は値検証のみで set には寄与しない。
+/// filesystem root / `module_resolver` を grant する。`--allow-import-root` は filesystem
+/// `ModuleResolver` を grant する（C6-c、下記）。
 pub fn build_safe_capabilities(
     opts: &CliCapabilityOptions,
 ) -> Result<CapabilitySet, CliUsageError> {

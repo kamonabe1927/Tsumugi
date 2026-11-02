@@ -55,10 +55,29 @@ struct Observed {
     success: bool,
 }
 
+/// `--vm` が stderr の先頭に出す experimental の警告（`src/cli_capability.rs` の `WARN_VM_EXPERIMENTAL`、
+/// fix-cli-vm-experimental-warning、CVW-AT-03）。
+const WARN_VM_EXPERIMENTAL: &str =
+    "警告: --vm は experimental な VM backend を選びます。規範の backend は tree-walk です";
+
+/// stderr を文字列にし、`WARN_VM_EXPERIMENTAL` の 1 行を除く。残りに対して、各 test は今までと同じ
+/// 確認（空・完全一致・tree との比較）を行う。警告の有無そのものは `tests/cli_vm_warning.rs` が確かめる。
+fn stderr_without_vm_warning(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw).replace("\r\n", "\n");
+    let mut removed = false;
+    text.split_inclusive('\n')
+        .filter(|line| {
+            let hit = !removed && line.trim_end_matches('\n') == WARN_VM_EXPERIMENTAL;
+            removed |= hit;
+            !hit
+        })
+        .collect()
+}
+
 fn finish(output: std::process::Output) -> Observed {
     Observed {
         stdout: String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
-        stderr: String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n"),
+        stderr: stderr_without_vm_warning(&output.stderr),
         success: output.status.success(),
     }
 }

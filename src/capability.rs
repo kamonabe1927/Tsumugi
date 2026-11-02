@@ -2839,16 +2839,15 @@ mod tests {
 
     #[test]
     fn import_root_value_check_does_not_change_set_id() {
-        // `--allow-import-root` は値検証のみで module_resolver を grant しない（finding 1）。
-        // したがって import root の有無で CapabilitySetId は変わらない——これを、resolver を
-        // 足さない 2 つの等価 set が同一 ID になることで固定する（CLI builder は resolver を
-        // 一切配線しないため、構成差は生じない）。
+        // この test は builder 単体の性質を固定する: resolver を足さない 2 つの等価 set は
+        // 同一 ID になる。CLI の `--allow-import-root` は C6-c で filesystem `ModuleResolver` を
+        // grant する（capability-model §14）ので、実際の CLI では import root の有無で set は変わる。
         let pid_stdout = derive_policy_id(b"stdout");
         let without_import = CapabilitySet::builder()
             .stdout(Arc::new(FakeOutput(pid_stdout)))
             .expect("stdout")
             .build();
-        // import root を「宣言しても」CLI は set へ何も足さないので、同じ構成 = 同じ ID。
+        // resolver を足さない構成は、同じ構成なら同じ ID になる。
         let with_import_declared = CapabilitySet::builder()
             .stdout(Arc::new(FakeOutput(pid_stdout)))
             .expect("stdout")
@@ -2856,7 +2855,7 @@ mod tests {
         assert_eq!(
             without_import.id(),
             with_import_declared.id(),
-            "import root 宣言は CapabilitySetId に寄与しない"
+            "resolver を足さない同一構成は同じ CapabilitySetId になる"
         );
         assert!(!without_import.contains(CapabilityKind::ModuleResolver));
     }

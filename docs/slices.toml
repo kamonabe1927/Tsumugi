@@ -144,12 +144,13 @@ order      = 8
 [[slice]]
 id         = "fix-cli-vm-experimental-warning"
 title      = "CLI の --vm で experimental の warning を stderr に出し、--help の --vm と --allow-import-root の文言を spec に合わせる（embedding-api §12・capability-model §14、loop:drift #318 D-29・D-31）"
-status     = "ready"
+status     = "done"
 parent     = "Phase 5 残"
 spec_slice = "E9"
 spec       = { doc = "docs/embedding-api.md", section = "fix-cli-vm-experimental-warning 実装スライス（CLI の `--vm` の warning と `--help` の文言を spec に合わせる）" }
 acceptance = ["CVW-AT-01..03"]
 design_pr  = 320
+impl_pr    = 323
 order      = 0
 
 [[slice]]
