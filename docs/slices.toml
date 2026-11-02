@@ -156,11 +156,12 @@ order      = 0
 [[slice]]
 id         = "fix-depth-boundary-tests"
 title      = "AST 深度 256/257 と import 深度 128/129 の境界テストを tree・VM の両方に足す（threat-model TM-AT-07、loop:drift #318 D-27）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-022"
 spec       = { doc = "docs/threat-model.md", section = "fix-depth-boundary-tests 実装スライス（AST 深度と import 深度の境界テストを足す）" }
 acceptance = ["DBT-AT-01..02"]
 design_pr  = 320
+impl_pr    = 325
 order      = 1
 
 # issue #292（kamonabe、仕分け「受け入れ」）から作った不具合の fix 2 本。order は loop-runbook §8 の「不具合の報告」の既定
