@@ -2106,7 +2106,7 @@ watchdog の上限は `total_fuel × 2 + 16` とする。正規 compiler 出力�
 
 決定記録（判断役が選択（PR #322）。Q1=A、Q2=A、Q3=A）:
 
-- **Q1=A（bin `tsumugi` は `required-features` で無効の構成では作らない）**: §17.7（REV-018）と `Cargo.toml` の `[features]` のコメントは、
+- **Q1=A（bin `tsumugi` は `required-features` で無効の構成では作らない）**: §17.7.1・§17.7.4（REV-018 と共通の封印）と `Cargo.toml` の `[features]` のコメントは、
   安定 surface を `Engine` 系だけとし、raw bytecode 経路は feature の下でだけ出し、同じ package の CLI はそれを使うと既に決めている。
   A はこの位置付けを `[[bin]]` の宣言 1 つで表すだけで本体を変えない（原則 8、既存の決定との一貫性）。CLI を unstable から外す判断は
   E9 で改めて取れる。採らなかった B（CLI が `compiler` / `vm` に依存しない形へ作り直す）は、無効の構成で `--vm` が消えるなど CLI の面が
