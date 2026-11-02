@@ -584,7 +584,7 @@ CHANGELOG は置いていないので、公開 API の変更の記録は公開 A
 
 | 変更 | 壊れるもの | `language_revision` | 設計の記録 |
 |---|---|---|---|
-| `YieldReason::AuditBackpressure` と `AuditFailure::BackpressureDeadline` の追加（B-1） | 公開 enum を網羅的に `match` する外部コード | bump なし（既存 tag 5/6・既存 `AuditYieldReason::AuditBackpressure`） | [決定性・実行時監査仕様](determinism-and-audit.md) の B-1 実装スライス |
+| `YieldReason::AuditBackpressure` と `AuditFailure::BackpressureDeadline` の追加（B-1） | 公開 enum を網羅的に `match` する外部コード | bump なし（既存 tag 5/6・既存 `AuditYieldReason::AuditBackpressure`） | [決定性・実行時監査仕様](determinism-and-audit.md) の A-1 実装スライスの「`AuditBackpressure`-yield 配線（§10/§10.2、B-1、実装済み）」の項 |
 | 簡略 `AuditPayloadField` の撤去と `AuditPayload.fields` の §9.1 の `BTreeMap<String, AuditField>` への差し替え（R-1a） | `AuditPayload`・`AuditPayloadField` に依存する外部コード | bump なし（CBOR tag 表・charge table・script 観測値は不変） | [決定性・実行時監査仕様](determinism-and-audit.md) の R-1 実装スライス |
 
 この節は loop:drift #318 の D-22 で足した。受容の記録を roadmap でなく spec に置くこと（Q1=A）は判断役が選択（issue #318）した。
@@ -663,7 +663,8 @@ loop:drift #318 の D-29 と D-31 を直す。2 件とも CLI の利用者に見
   （CVW-AT-03。`tests/integration.rs` の数か所〜十数か所。warning の行を除く共通の helper を 1 つ置いて各所から使う）が +20〜40 行・
   −10〜30 行程度。受入基準は 3 項目で、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
   done にする実装 PR で、本書の逸脱一覧の「CLI の `--vm` は experimental VM を選んだことを知らせない」行と、
-  [Capability Model仕様](capability-model.md) の逸脱一覧の `--allow-import-root` の文言の行を削除する。
+  [Capability Model仕様](capability-model.md) の逸脱一覧の `--allow-import-root` の文言の行と、[脅威モデル](threat-model.md) の逸脱一覧の
+  「CLI の `--vm` は experimental VM を選んだことを stderr にも `--help` にも示さない」行を削除する。
 
 ## 15. 受入基準
 
