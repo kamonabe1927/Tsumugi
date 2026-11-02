@@ -79,6 +79,16 @@ fn cvw_at_01_vm_repl_warns_once() {
     let vm = run(&["--vm"], None);
     assert_eq!(warn_lines(&vm), 1, "stderr: {}", text(&vm.stderr));
     assert_eq!(vm.status.code(), Some(0));
+    assert_eq!(stderr_rest(&vm), "", "warning を除いた stderr は空");
+    // banner と prompt は tree と違う（`[VM mode]`・`tsumugi:vm> `）ので、VM の期待値と照合する。
+    assert_eq!(
+        text(&vm.stdout),
+        format!(
+            "Tsumugi v{} [VM mode] — 終了するには Ctrl+D\ntsumugi:vm> \n",
+            env!("CARGO_PKG_VERSION")
+        ),
+        "warning の有無で stdout は変わらない"
+    );
     let tree = run(&[], None);
     assert_eq!(warn_lines(&tree), 0);
 }
