@@ -355,8 +355,7 @@ fn misplaced_builtin_mark_returns_structured_error() {
 }
 
 /// PSW-AT-05（fix-push-snapshot-writeback）: snapshot の無い手組みの `ListPushBinding` は、
-/// operand stack が足りなくても、snapshot が List でなくても host panic せず internal / 型エラーで
-/// 終わる。
+/// operand stack が足りなくても host panic せず `internal` error で終わる。
 #[test]
 fn psw_at_05_list_push_binding_without_snapshot_returns_error() {
     use tsumugi::opcode::MutationTarget;

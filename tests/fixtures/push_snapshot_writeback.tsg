@@ -90,6 +90,8 @@ try
     push(n, to_list())
 catch e
     print("non-list: " + e)
+    print(e["type"])
+    print(e["line"])
 end
 print(n)
 
@@ -111,6 +113,8 @@ try
     push(undefined_name, noisy())
 catch e
     print("undefined: " + e)
+    print(e["type"])
+    print(e["line"])
 end
 
 # 第 2 引数の評価がエラーで終わったら書き戻さない
@@ -124,5 +128,7 @@ try
     push(q, fail_after_change())
 catch e
     print("failed: " + e)
+    print(e["type"])
+    print(e["line"])
 end
 print(q)

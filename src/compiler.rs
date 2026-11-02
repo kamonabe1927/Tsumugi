@@ -865,10 +865,10 @@ impl Compiler {
     /// `JumpIfBuiltinMark` が印を見て、builtin 経路なら印を取り除いて builtin の後処理へ、
     /// user 経路なら次の `Call` へ進む。
     ///
-    /// `push(識別子, 値)` は第2引数だけを共有し、第1引数（識別子の読み取り、定数サイズ）は
-    /// user 経路にだけ出す。builtin 経路は binding storage を `ListPushBinding` で in-place に
-    /// 書き換える（対象 List を operand stack へ複製しない）。stack の深さを揃えるため、
-    /// builtin 経路は第1引数の位置に `Null` を置き、それが式の結果（Null）になる。
+    /// `push(識別子, 値)` は第2引数だけを共有する。第1引数の位置には、user 経路も builtin 経路も
+    /// 識別子の読み取りを置く（builtin 経路ではこれが第2引数の評価前の snapshot になる）。
+    /// builtin 経路の `ListPushBinding` は value と snapshot を pop して binding へ書き戻し、
+    /// 式の結果 `Null` を積む。stack の深さは user 経路の `Call` の後と揃う。
     fn compile_shared_builtin_call(
         &mut self,
         callee: &Expr,
