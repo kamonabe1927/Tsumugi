@@ -1389,6 +1389,20 @@ impl Vm {
                     self.set_ip(target, line)?;
                 }
             }
+            OpCode::JumpIfBuiltinMark(arg_count, target) => {
+                let required = arg_count
+                    .checked_add(1)
+                    .ok_or_else(|| internal_error(line, "JumpIfBuiltinMark の引数数が不正です"))?;
+                let mark_pos = self.stack.len().checked_sub(required).ok_or_else(|| {
+                    internal_error(line, "JumpIfBuiltinMark のスタック要素が不足しています")
+                })?;
+                if matches!(self.stack[mark_pos], Value::Null) {
+                    // builtin 経路の印を取り除く（引数の位置を詰める）。
+                    self.checkpoint_stack_range(mark_pos, self.stack.len());
+                    self.stack.remove(mark_pos);
+                    self.set_ip(target, line)?;
+                }
+            }
             OpCode::RequireGlobal(name) => {
                 self.require_global(&name, line)?;
             }

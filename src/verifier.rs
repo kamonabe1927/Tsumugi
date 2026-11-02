@@ -202,7 +202,8 @@ fn verify_chunk(chunk: &Chunk, upvalue_count: usize) -> Result<(), ChunkVerifyEr
             | OpCode::JumpIfFalseKeep(t)
             | OpCode::JumpIfTrueKeep(t)
             | OpCode::Loop(t)
-            | OpCode::JumpIfGlobalDefined(_, t) => {
+            | OpCode::JumpIfGlobalDefined(_, t)
+            | OpCode::JumpIfBuiltinMark(_, t) => {
                 if !jump_target_ok(*t) {
                     return Err(ChunkVerifyError::BadJumpTarget);
                 }
@@ -468,6 +469,31 @@ mod tests {
             "エラーメッセージに operand の生値が含まれています: {}",
             error.message()
         );
+    }
+
+    /// builtin 名の呼び出し（共有 lowering、`JumpIfBuiltinMark` を含む）の正規 compiler 出力は
+    /// verify を通る。`push` の入れ子・`pop`・context builtin・user 関数の引数の中の builtin を含む。
+    #[test]
+    fn accepts_shared_builtin_call_lowering() {
+        let source = r#"
+            let xs = []
+            fn f(a)
+                let ys = []
+                push(ys, push(ys, abs(a)))
+                return len(to_str(abs(pop(ys))))
+            end
+            push(xs, push(xs, f(abs(-1))))
+            print(f(abs(abs(2))))
+        "#;
+        assert!(verify(compile(source)).is_ok());
+    }
+
+    #[test]
+    fn rejects_bad_builtin_mark_jump_target() {
+        let mut chunk = Chunk::new();
+        chunk.emit(OpCode::JumpIfBuiltinMark(0, 999), 1);
+        chunk.emit(OpCode::Return, 1);
+        assert_eq!(verify(chunk).unwrap_err(), ChunkVerifyError::BadJumpTarget);
     }
 
     #[test]

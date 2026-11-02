@@ -697,15 +697,21 @@ impl Compiler {
                         let has_static_binding = self.resolve_local(name, line).is_ok()
                             || self.resolve_upvalue(name).is_some();
                         if !has_static_binding {
-                            let user_jump = self
-                                .chunk
-                                .emit_jump(OpCode::JumpIfGlobalDefined(name.clone(), 0), line);
-                            self.compile_builtin_call(name, args, line)?;
-                            let end_jump = self.chunk.emit_jump(OpCode::Jump(0), line);
+                            if self.has_single_identifier_form(name, args, line) {
+                                // 引数が識別子 1 個だけの形（`len(x)` / `pop(x)`）は、引数の
+                                // bytecode が定数サイズなので 2 経路を別々に出してよい。
+                                let user_jump = self
+                                    .chunk
+                                    .emit_jump(OpCode::JumpIfGlobalDefined(name.clone(), 0), line);
+                                self.compile_builtin_call(name, args, line)?;
+                                let end_jump = self.chunk.emit_jump(OpCode::Jump(0), line);
 
-                            self.patch_jump(user_jump)?;
-                            self.compile_user_call(callee, args, line)?;
-                            self.patch_jump(end_jump)?;
+                                self.patch_jump(user_jump)?;
+                                self.compile_user_call(callee, args, line)?;
+                                self.patch_jump(end_jump)?;
+                            } else {
+                                self.compile_shared_builtin_call(callee, name, args, line)?;
+                            }
                             return Ok(());
                         }
                     }
@@ -776,7 +782,19 @@ impl Compiler {
         Ok(())
     }
 
-    /// builtin callを現在のengine固有契約でcompileする。
+    /// `len(識別子)` / `pop(識別子)` のように、引数が識別子 1 個だけの builtin 名の呼び出しが
+    /// 専用 lowering に入る形か。この形は引数の bytecode が定数サイズなので、builtin 経路と
+    /// user 経路を別々に出しても入れ子で増えない。
+    fn has_single_identifier_form(&mut self, name: &str, args: &[Expr], line: usize) -> bool {
+        match (name, args) {
+            ("len", [Expr::Ident(var_name)]) => self.resolve_local(var_name, line).is_ok(),
+            ("pop", [Expr::Ident(_)]) => true,
+            _ => false,
+        }
+    }
+
+    /// 引数が識別子 1 個だけの形（[`Self::has_single_identifier_form`]）の builtin 経路を
+    /// 現在のengine固有契約でcompileする。
     fn compile_builtin_call(
         &mut self,
         name: &str,
@@ -796,61 +814,25 @@ impl Compiler {
 
         // len(識別子) はコレクションを複製せず長さだけ読む（AUD-041）
         if name == "len"
-            && args.len() == 1
-            && let Expr::Ident(var_name) = &args[0]
+            && let [Expr::Ident(var_name)] = args
             && let Ok(slot) = self.resolve_local(var_name, line)
         {
             self.chunk.emit(OpCode::LenLocal(slot), line);
             return Ok(());
         }
 
-        // builtin ID は registry から引く。compile_builtin_call は is_builtin(name)
-        // を満たした名前だけに到達するため、ここでの欠落は内部不整合である（AUD-049）。
+        // builtin ID は registry から引く。ここは is_builtin(name) を満たした名前だけに
+        // 到達するため、欠落は内部不整合である（AUD-049）。
         let builtin_id = self.resolve_builtin_id(name, line)?;
 
-        // push は第一引数のリストを破壊的に変更する。
-        //
-        // REV-015 Slice 6 push charge parity: 対象 binding storage を直接書き換える
-        // `ListPushBinding`（`SetIndex` と同じ in-place 経路）へ lowering する。以前は
-        // `CallBuiltin(builtin_push)` が full-clone した untracked backing を返し、dispatch
-        // 境界の `track_result` が list_body(N+1) を丸ごと課金していた。これだと push のたびに
-        // 新旧 backing が一瞬同時に live になり peak_heap がスパイクし、tree engine の in-place
-        // delta 課金（`list_push_tracked`）と configured 上限下で食い違っていた。binding storage
-        // 経由なら backing の `Rc` を operand stack へ複製しないため、一意所有では COW 複製なしの
-        // delta（+32 byte）で済み、tree と peak_heap が一致する（共有 backing は tree と同じく
-        // `detach_list` が COW 複製する）。`builtin_push` は builtin registry 契約・エラー
-        // メッセージ parity のため残置する（tree からの直接呼び出しが消えても削除しない）。
-        if name == "push"
-            && !args.is_empty()
-            && let Expr::Ident(var_name) = &args[0]
-        {
-            let target = self.resolve_mutation_target(var_name, line);
-            if let MutationTarget::Global(global) = &target {
-                // 未定義 binding は value の副作用より先に報告する（tree の get_cell 検査と
-                // 同じ順序。IndexAssign の lowering と対称）。
-                self.chunk.emit(OpCode::RequireGlobal(global.clone()), line);
-            }
-            // 第2引数（push する値）だけを評価する。対象 List は binding storage から
-            // in-place で読む（operand stack へ複製しない）。
-            self.compile_expr(&args[1], line)?;
-            self.chunk.emit(OpCode::ListPushBinding(target), line);
-            // push 式の結果は Null。
-            self.chunk.emit_constant(Value::Null, line);
-            return Ok(());
-        }
-
         // pop は第一引数のリストを破壊的に変更する → 実行後に元の変数スロットを更新する。
+        // 引数がちょうど 1 個の識別子の形だけがここに入る（それ以外は共有 lowering の汎用経路）。
         if name == "pop"
-            && !args.is_empty()
-            && let Expr::Ident(var_name) = &args[0]
+            && let [Expr::Ident(var_name)] = args
         {
             let target = self.resolve_mutation_target(var_name, line);
-            let arg_count = args.len();
-            for arg in args {
-                self.compile_expr(arg, line)?;
-            }
-            self.chunk
-                .emit(OpCode::CallBuiltin(builtin_id, arg_count), line);
+            self.compile_expr(&args[0], line)?;
+            self.chunk.emit(OpCode::CallBuiltin(builtin_id, 1), line);
             // pop の戻り値（取り出した要素）はスタックに残したまま、変数側の
             // List を PopUpdate で更新する。内部命令なので source から呼べない。
             self.emit_get_mutation_target(&target, line);
@@ -866,6 +848,116 @@ impl Compiler {
         }
         self.chunk
             .emit(OpCode::CallBuiltin(builtin_id, arg_count), line);
+        Ok(())
+    }
+
+    /// builtin 名の呼び出しを、引数の bytecode を builtin 経路と user 経路で共有して compile する。
+    ///
+    /// 引数式を 2 経路で別々に compile すると、入れ子 k 段で bytecode が 2^k になる
+    /// （issue #292）。分岐（`JumpIfGlobalDefined`）は引数の評価より前の 1 回で決め、
+    /// 経路ごとに違う前処理だけを 2 つ出し、引数は 1 回だけ出す。
+    ///
+    /// stack の形（引数の直前、callee の位置 = 印の位置）:
+    /// - user 経路: `[callee, arg0, ...]`（`PrepareCall` → callee → `ValidateCall` → 引数）
+    /// - builtin 経路: `[Null(印), arg0, ...]`（`ValidateBuiltinCall` → 印 → 引数）
+    ///
+    /// user 経路の callee は `ValidateCall` を通った `VmFn` なので `Null` ではない。引数の後の
+    /// `JumpIfBuiltinMark` が印を見て、builtin 経路なら印を取り除いて builtin の後処理へ、
+    /// user 経路なら次の `Call` へ進む。
+    ///
+    /// `push(識別子, 値)` は第2引数だけを共有し、第1引数（識別子の読み取り、定数サイズ）は
+    /// user 経路にだけ出す。builtin 経路は binding storage を `ListPushBinding` で in-place に
+    /// 書き換える（対象 List を operand stack へ複製しない）。stack の深さを揃えるため、
+    /// builtin 経路は第1引数の位置に `Null` を置き、それが式の結果（Null）になる。
+    fn compile_shared_builtin_call(
+        &mut self,
+        callee: &Expr,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<(), TsumugiError> {
+        let builtin_id = self.resolve_builtin_id(name, line)?;
+        let arg_count = args.len();
+
+        // REV-015 Slice 6 push charge parity: `push(識別子, 値)` は対象 binding storage を
+        // 直接書き換える `ListPushBinding`（`SetIndex` と同じ in-place 経路）へ lowering する。
+        // `CallBuiltin(builtin_push)` だと full-clone した backing を返して list_body(N+1) を
+        // 丸ごと課金し、peak_heap がスパイクして tree の in-place delta 課金とずれる。
+        // `builtin_push` は registry 契約・エラーメッセージ parity のため残置する。
+        let push_target = match (name, args) {
+            ("push", [Expr::Ident(var_name), _]) => {
+                Some(self.resolve_mutation_target(var_name, line))
+            }
+            _ => None,
+        };
+
+        let user_jump = self
+            .chunk
+            .emit_jump(OpCode::JumpIfGlobalDefined(name.to_string(), 0), line);
+
+        // --- builtin 経路の前処理（引数より前） ---
+        if crate::builtin_core::is_context_builtin(name) {
+            self.chunk.emit(
+                OpCode::ValidateBuiltinCall(
+                    name.to_string(),
+                    arg_count,
+                    matches!(args.first(), Some(Expr::Ident(_))),
+                ),
+                line,
+            );
+        }
+        if let Some(MutationTarget::Global(global)) = &push_target {
+            // 未定義 binding は value の副作用より先に報告する（tree の get_cell 検査と
+            // 同じ順序。IndexAssign の lowering と対称）。
+            self.chunk.emit(OpCode::RequireGlobal(global.clone()), line);
+        }
+        // callee の位置に置く印。
+        self.chunk.emit_constant(Value::Null, line);
+        if push_target.is_some() {
+            // 第1引数の位置（user 経路では対象 List の読み取り）。push の結果 Null を兼ねる。
+            self.chunk.emit_constant(Value::Null, line);
+        }
+        let to_args = self.chunk.emit_jump(OpCode::Jump(0), line);
+
+        // --- user 経路の前処理（引数より前） ---
+        self.patch_jump(user_jump)?;
+        self.chunk.emit(OpCode::PrepareCall, line);
+        if let Expr::Ident(callee_name) = callee {
+            self.compile_name_read(callee_name, line, true);
+        } else {
+            self.compile_expr(callee, line)?;
+        }
+        self.chunk.emit(OpCode::ValidateCall(arg_count), line);
+        let shared_args = if push_target.is_some() {
+            self.compile_expr(&args[0], line)?;
+            &args[1..]
+        } else {
+            args
+        };
+
+        // --- 共有する引数 ---
+        self.patch_jump(to_args)?;
+        for arg in shared_args {
+            self.compile_expr(arg, line)?;
+        }
+
+        // --- 引数の後: 印で経路を選ぶ ---
+        let builtin_post = self
+            .chunk
+            .emit_jump(OpCode::JumpIfBuiltinMark(arg_count, 0), line);
+        self.chunk.emit(OpCode::Call(arg_count), line);
+        let end_jump = self.chunk.emit_jump(OpCode::Jump(0), line);
+
+        self.patch_jump(builtin_post)?;
+        if let Some(target) = push_target {
+            // value を pop して binding の List 末尾へ in-place で push する。stack に残る
+            // 第1引数の位置の Null が push 式の結果になる。
+            self.chunk.emit(OpCode::ListPushBinding(target), line);
+        } else {
+            self.chunk
+                .emit(OpCode::CallBuiltin(builtin_id, arg_count), line);
+        }
+        self.patch_jump(end_jump)?;
         Ok(())
     }
 
@@ -1230,4 +1322,99 @@ impl Compiler {
 /// lowering するため、この判定へは到達しない。
 fn is_builtin(name: &str) -> bool {
     crate::builtin_registry::is_public_builtin(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    /// source を compile し、(命令数, 定数の数) を返す。
+    fn size(source: &str) -> (usize, usize) {
+        let source = source.to_string();
+        // 深い入れ子の再帰が test thread の既定 stack に収まらないため、大きい stack で回す。
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                let tokens = Lexer::new(&source).tokenize();
+                let program = Parser::new(tokens).parse().expect("parse に失敗");
+                let chunk = Compiler::new()
+                    .compile(&program)
+                    .expect("compile に失敗")
+                    .into_inner();
+                (chunk.code.len(), chunk.constants.len())
+            })
+            .expect("spawn")
+            .join()
+            .expect("compile thread")
+    }
+
+    /// k = 1..=max_k の入れ子の大きさを測り、隣り合う k の差が一定（線形）であることを確かめる。
+    fn assert_linear(label: &str, max_k: usize, build: impl Fn(usize) -> String) {
+        let sizes: Vec<(usize, usize)> = (1..=max_k).map(|k| size(&build(k))).collect();
+        let step = (sizes[1].0 - sizes[0].0, sizes[1].1 - sizes[0].1);
+        for (i, pair) in sizes.windows(2).enumerate() {
+            let diff = (pair[1].0 - pair[0].0, pair[1].1 - pair[0].1);
+            assert_eq!(
+                diff,
+                step,
+                "{label}: k={} -> {} で差が一定でない",
+                i + 1,
+                i + 2
+            );
+        }
+    }
+
+    fn wrap(open: &str, inner: &str, close: &str, k: usize) -> String {
+        format!("{}{}{}", open.repeat(k), inner, close.repeat(k))
+    }
+
+    #[test]
+    fn vbc_at_02_nested_abs_is_linear() {
+        assert_linear("abs", 200, |k| {
+            format!("print({})\n", wrap("abs(", "1", ")", k))
+        });
+    }
+
+    #[test]
+    fn vbc_at_02_mixed_builtins_are_linear() {
+        assert_linear("len(to_str(abs))", 60, |k| {
+            format!("print({})\n", wrap("len(to_str(abs(", "1", ")))", k))
+        });
+    }
+
+    #[test]
+    fn vbc_at_02_nested_push_is_linear() {
+        assert_linear("push", 100, |k| {
+            format!(
+                "let xs = []\nlet ys = []\n{}\n",
+                wrap("push(xs, push(ys, ", "1", "))", k)
+            )
+        });
+        // local の対象でも同じ。
+        assert_linear("push local", 100, |k| {
+            format!(
+                "fn f()\n  let xs = []\n  {}\nend\n",
+                wrap("push(xs, ", "1", ")", k)
+            )
+        });
+    }
+
+    #[test]
+    fn vbc_at_02_builtin_inside_user_call_arguments_is_linear() {
+        assert_linear("user call args", 100, |k| {
+            format!(
+                "fn id(x)\n  return x\nend\nprint({})\n",
+                wrap("id(abs(", "1", "))", k)
+            )
+        });
+    }
+
+    #[test]
+    fn vbc_at_02_pop_and_len_forms_are_linear() {
+        assert_linear("pop/len in args", 100, |k| {
+            format!("let xs = [1]\nprint({})\n", wrap("abs(len(", "xs", "))", k))
+        });
+    }
 }

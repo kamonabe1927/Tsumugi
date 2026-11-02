@@ -126,12 +126,13 @@ order      = 2
 [[slice]]
 id         = "fix-vm-builtin-call-lowering"
 title      = "VM の builtin 名の呼び出しの lowering を、push(xs) で panic せず、引数の bytecode を 2 経路で共有して入れ子の深さに線形にする（determinism-and-audit §4.8、issue #292）"
-status     = "ready"
+status     = "done"
 parent     = "Phase 5 残"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "fix-vm-builtin-call-lowering 実装スライス（builtin 名の呼び出しの lowering を panic せず線形にする）" }
 acceptance = ["VBC-AT-01..05"]
 design_pr  = 313
+impl_pr    = 317
 order      = 3
 
 [[slice]]
