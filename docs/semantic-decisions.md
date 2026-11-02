@@ -2104,6 +2104,25 @@ watchdog の上限は `total_fuel × 2 + 16` とする。正規 compiler 出力�
   `.github/workflows/ci.yml` は凍結ファイル（[開発ループの守り](loop-guard.md) §3.1）なので、CI の job は変えずに `cargo test` の中で検査する。
 - 範囲外: `unstable-bytecode` を無効にした構成での `cargo test`・bench（CLI の subprocess test と VM の内部テストは feature を前提にする）。
 
+決定記録（判断役が選択（PR #322）。Q1=A、Q2=A、Q3=A）:
+
+- **Q1=A（bin `tsumugi` は `required-features` で無効の構成では作らない）**: §17.7（REV-018）と `Cargo.toml` の `[features]` のコメントは、
+  安定 surface を `Engine` 系だけとし、raw bytecode 経路は feature の下でだけ出し、同じ package の CLI はそれを使うと既に決めている。
+  A はこの位置付けを `[[bin]]` の宣言 1 つで表すだけで本体を変えない（原則 8、既存の決定との一貫性）。CLI を unstable から外す判断は
+  E9 で改めて取れる。採らなかった B（CLI が `compiler` / `vm` に依存しない形へ作り直す）は、無効の構成で `--vm` が消えるなど CLI の面が
+  feature で変わり、不具合 1 件の修正としては範囲が広く（原則 8）、E9（VM backend adapter）の設計を先取りする。
+- **Q2=A（検査は `cargo test` の integration test で行う）**: [開発ループの守り](loop-guard.md) §4.1 の 1 段目は機械チェックをテストとして
+  書くと定めており、`tests/slices_contract.rs` と同じ置き方である。凍結ファイルに触れずに CI の 3 OS・MSRV・coverage の各 job で毎回検査
+  される（原則 9、優先順位「再現可能な検証」）。`cargo test` に crate 1 つ分の build が加わる代償は、検査が無い状態を続けるより小さい。
+  採らなかった B（`.github/workflows/ci.yml` に step を足す）は guard 区分の凍結ファイルの変更で、ループは PR を出せず、kamonabe の
+  `frozen-ok` までこの構成の検査が無い（kamonabe が ci.yml の step を望むなら `判断:` で上書きできる）。C（検査しない）は、今回の不具合が
+  まさに検査の無いことで見逃されたもので、「再現可能な検証」に反しうる。
+- **Q3=A（無効時の module 宣言に限って `dead_code` を許可し、`-D warnings` で検査する）**: 有効時の lint を変えず、無効の構成でも
+  warning 0 を保つことで、CONTRIBUTING・CI の `-D warnings` と同じ基準を無効の構成にも当てられる。変更は属性 5 行程度（原則 8・9）。
+  採らなかった B（無効時は `compiler` / `verifier` / `vm` を compile しない）は、`chunk` / `opcode` を含む module 間の依存の切り分けが要り
+  範囲が広い（原則 8）。使われない code を `pub(crate)` のまま残しても安定 surface は変わらない。C（warning を許容する）は、無効の構成で
+  warning が増えても検査が気づけず、検査の意味が弱まる（原則 9）。
+
 ### 17.8 HumanDisplay / CanonicalRepr / TotalOrder の分離と全順序 sort（REV-017）
 
 > 設計ステータス: ✅ 実装済み（仕様 revision 0.21）。本節は sort / `list_dir` の並び順を「文字列表現比較」から**全値型を覆う単一の全順序 `TotalOrder`** へ移す仕様（revision 0.21）を定める。REV-003（§17.1）が確立した `NumericOrder` を数値帯で再利用し、観測挙動が変わる破壊的変更として扱う。REV-001（HumanDisplay / CanonicalRepr / TotalOrder の 3 層分離）と連動する。

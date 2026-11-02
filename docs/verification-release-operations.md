@@ -1088,6 +1088,8 @@ kubeconform -strict -summary -kubernetes-version 1.30.0 \
 issue #294 を受け入れて足した。`Cargo.toml` の「安定利用者は `default-features = false` で封印できる」という約束（REV-018）に対し、
 その構成では bin `tsumugi` が build できず、CI も `--all-features` の構成しか試さない（[次期意味論・実装決定](semantic-decisions.md) の
 逸脱一覧の該当行）。目標は同書 §17.7.9。本節の §16 の Slice 1〜7 とは別の、不具合を直す 1 本である。
+bin の扱い（Q1=A）・検査の置き場所（Q2=A）・dead code の warning の扱い（Q3=A）は判断役が選択（PR #322）した。
+選んだ内容と理由は同書 §17.7.9 の決定記録にある。
 
 - **実装範囲**:
   1. `Cargo.toml` に bin `tsumugi` の `[[bin]]`（`name = "tsumugi"`、`path = "src/main.rs"`、`required-features = ["unstable-bytecode"]`）を足す。
