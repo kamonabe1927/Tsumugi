@@ -14,7 +14,7 @@ semantic-decisions（D-20）と同じ形にそろう。状態行と §1 の列�
 分からない状態が残るので選ばなかった。
 載せたのは 2026-11-03 の整合点検の輪番（`.github/workflows/ci.yml`・`Cargo.toml`・`README.md`・`README.ja.md`・`src/main.rs`、
 リポジトリに `fuzz/`・`deploy/`・`Dockerfile`・release workflow が無いこと）と、D-33〜D-35 を直すときに確かめた分だけである。
-branch protection の required checks（VRO-AT-01）は GitHub の設定なので照合しておらず、§2.2 の表の capability/budget/audit の行、
+branch protection の required checks（VRO-AT-01）は GitHub の設定なので照合しておらず、§2.2 の表の capability/budget/audit の領域の現状、
 §5〜§6 の matrix の中身は他の spec との照合をまだしていない。`default-features = false` の構成で build できない件は
 [次期意味論・実装決定](semantic-decisions.md) の逸脱一覧が持つので、ここには再掲しない。
 
@@ -79,20 +79,22 @@ branch protection の required checks（VRO-AT-01）は GitHub の設定なの�
 
 ### 2.2 現行と目標の分離
 
-「現行」は下表を書いた時点の構成の要約、「本文書の完了状態」はPhase 7完了時の目標を表す。目標に対して今どこが未到達かは冒頭の逸脱一覧を正本とする。
+下表は、各領域の「本文書の完了状態」（Phase 7完了時の目標）を表す。現在の構成が目標に対してどこまで未到達かは表に書かず、冒頭の逸脱一覧を正本とする。
 
-| 領域 | 現行 | 本文書の完了状態 |
-|---|---|---|
-| toolchain | rolling stable + Rust 1.97、`rust-version = "1.97"` | stable + Rust 1.97、`rust-version = "1.97"` |
-| Clippy | `--all-targets --all-features -D warnings` | `--all-targets --all-features -D warnings` |
-| test | stable 3 OS + MSRV 1.97 | stable 3 OS + MSRV + release artifact smoke |
-| coverage | LCOV artifactのみ | line coverage 80%以上をgate化 |
-| fuzz/stress | 未実装 | PR smoke + weekly + release candidate gate |
-| release | workflow・artifactなし | 6 platform artifact、SHA-256、SBOM、provenance、署名 |
-| OCI | Dockerfile・imageなし | amd64/arm64 image、nonroot、署名・SBOM |
-| Kubernetes | 資材なし | image公開後に参照用Jobとdeny-all NetworkPolicy |
-| capability/budget/audit | 現行のstep・collection・深度上限、差分検証、構造化errorは部分実装済み。Phase 2〜6の完全な受入契約は未実装 | 各正本の受入基準をPhase 7 gateで再検証 |
-| backend | tree規範、VM experimental | 差分0のgateを満たさない限りVM experimentalを維持 |
+以前は表に「現行」列を置いていたが、外した。本文に実装状態を書かず、状態は逸脱一覧の 1 箇所だけが持つ（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」「状態の正本は粒度ごとに 1 箇所だけ」）。coverage・fuzz/stress・release（release artifact smoke を含む）・OCI・Kubernetes の現状は逸脱一覧の該当行が持ち、toolchain・Clippy・backend の現状は完了状態と同じなので、外しても失う記述は無い。capability/budget/audit の現状は他の spec とまだ照合していないので、逸脱一覧に足していない。列を残して決定記録の側を「照合が済むまで残す」と直す案（B）は、本文に状態を置き続け、D-33 で退けた形を別の形で戻すので選ばなかった（PR #326 のレビューの指摘 1 の Q1=A。判断役が選択（PR #326））。
+
+| 領域 | 本文書の完了状態 |
+|---|---|
+| toolchain | stable + Rust 1.97、`rust-version = "1.97"` |
+| Clippy | `--all-targets --all-features -D warnings` |
+| test | stable 3 OS + MSRV + release artifact smoke |
+| coverage | line coverage 80%以上をgate化 |
+| fuzz/stress | PR smoke + weekly + release candidate gate |
+| release | 6 platform artifact、SHA-256、SBOM、provenance、署名 |
+| OCI | amd64/arm64 image、nonroot、署名・SBOM |
+| Kubernetes | image公開後に参照用Jobとdeny-all NetworkPolicy |
+| capability/budget/audit | 各正本の受入基準をPhase 7 gateで再検証 |
+| backend | 差分0のgateを満たさない限りVM experimentalを維持 |
 
 ## 3. バージョンと互換性
 
