@@ -18,7 +18,8 @@ tree・`--vm` で照合）と、その点検で見つかったずれのうち D-
 
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
-| TM-AT-07 の AST 深度 256/257 と import 深度 128/129 の境界を固定するテストが無い（AST 深度は `src/limits.rs` の `MAX_AST_DEPTH`、import 深度は `MAX_IMPORT_DEPTH`。import は `MAX_IMPORT_DEPTH + 5` の chain だけを `src/embedding.rs` の unit test が確かめる）。挙動自体は tree・VM とも構造化 error。直すのは fix-depth-boundary-tests（§14） | §11 TM-AT-07 | — |
+
+照合済みの節に残っている逸脱は今は無い（表が空であることは、照合していない節に逸脱が無いことを意味しない）。
 
 ## 1. 目的と適用範囲
 
