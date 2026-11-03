@@ -1,6 +1,6 @@
 # Tsumugi 決定性・実行時監査仕様
 
-最終更新: 2026-11-01
+最終更新: 2026-11-03
 
 設計ステータス: **到達目標の確定仕様（§1〜§13）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -31,7 +31,7 @@
 | `AuditField` の `original_bytes` を §9.1 の canonical subtree 長（§9.2 の encoding で測る）ではなく値の UTF-8 byte 長で代用（Path は canonical label または requested path の長さ、引数型エラーは 0）。strict CBOR スライスで揃える | §9.1 | R-1a |
 | Path の HMAC-SHA-256 の入力が canonical label の UTF-8 生 byte（`src/audit.rs::RedactionPolicy::hmac_path`）。§9.1/§9.2 の「redaction 前 subtree の canonical encoding」（label を値とする `AuditValue` の deterministic CBOR）ではないため、digest 値が目標仕様と異なる（秘匿性・決定性は保たれる）。strict CBOR スライスで揃える | §9.1/§9.2 | R-1a |
 | `AuditFrame.module_id` / `AuditError.module_id` が §7.2 の `AuditField`（Identifier/Path policy 適用済み）ではなく plain `String`（`Option<String>`）。現在は常に空文字列 / `None` で埋めており（`src/embedding.rs` の Terminal error 構築）module 情報を記録しない。§9.2 の encoding も `AuditField` ではなく text / `Option` になる | §7.2/§9.1 | A-1 |
-| VM の compile が、ループの外の `break` / `continue` を compile error にする（`src/compiler.rs` の `compile_break` / `compile_continue`）。tree はその文に到達したときの runtime error で、到達しなければ実行が続く。VM は到達しない分岐にあっても script 全体を実行前に拒否し、それより前の文の出力も出ない | §2.1/§4.8 | —（issue #292。fix-vm-loop-control-outside-loop で扱う。未設計） |
+| VM の compile が、ループの外の `break` / `continue` を compile error にする（`src/compiler.rs` の `compile_break` / `compile_continue`）。tree はその文に到達したときの runtime error で、到達しなければ実行が続く。VM は到達しない分岐にあっても script 全体を実行前に拒否し、それより前の文の出力も出ない | §2.1/§4.8 | —（issue #292。fix-vm-loop-control-outside-loop で扱う） |
 | 公開 `ExecutionOutcome`（`src/embedding.rs`、crate root では `EmbeddingOutcome`）は `Completed` / `Exited` / `RuntimeError` / `BudgetExceeded` / `DeadlineExceeded` / `Cancelled` / `InternalFailure` の 7 variant だけで、§7.2 の `TerminalOutcome` と 1 対 1 に対応しない。link 時の拒否と resolver の host 失敗は `Engine::link` の `Result<_, LinkError>`（`LinkError::Denied` / `LinkError::Resolve(HostError)` ほか）で返し、run 中の capability 拒否と host function の失敗は `RuntimeError`（`ErrorKind::Capability` / `ErrorKind::Host`）に含める。監査失敗は監査付き経路だけの別型 `AuditedOutcome::AuditFailed` で返す。`RecordFailure` / `ReplayMismatch` は record/replay が未実装のため無い | §7.2 | A-1（7 variant の構成は [組み込みAPI仕様](embedding-api.md) の E 系スライス由来） |
 
 上の表の `ExecutionOutcome` が 7 variant だけである行（D-8）は、loop:drift #263 を受けて載せた。本文（§7.2 の 1 対 1 対応）を実装に合わせて後退させず、逸脱として記録する案を選んだ（issue #263 Q1=A。返信なしのため推奨案で確定、[開発ループ手順書](loop-runbook.md) §7.5）。理由: spec が実装の正本であり、現在の逸脱は事実を確かめて逸脱一覧に置く（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。D-8 の `ExecutionOutcome` は `#[non_exhaustive]` で、後続 Phase で variant を足す前提になっている。[組み込みAPI仕様](embedding-api.md) の `ExecutionOutcome`（13 variant）との差は、同 spec が逸脱一覧を作るときに載せる（ドキュメント運用ガイドの移行中注記）。
@@ -2004,6 +2004,50 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
   - **VBC-AT-04（user binding の優先と資源の一致）**: 同名の global を、呼び出しより前に宣言した場合・後で宣言した関数から呼ぶ場合・import した場合・REPL の後の入力で定義した場合のそれぞれで、入れ子の builtin 名の呼び出しが tree と同じく user binding を呼ぶ（入れ子の内側と外側で経路が違う混在も含む）。builtin の入れ子と `push` の入れ子で、fuel の消費・heap / peak_heap・出力 byte が tree と一致する。確かめ方: differential test と既存の REPL test の追加ケース。
   - **VBC-AT-05（非破壊と防御）**: 既存の `tests/differential.rs`・golden fixture・`tests/defensive_vm.rs`・REV-015 Slice 6 の `push` の peak_heap parity test（`tests/scaling.rs` の `push_peak_heap_has_no_full_clone_spike_across_engines`）が無改変で緑。足した・意味を変えた命令について、`src/verifier.rs` が compiler の出力を受け入れ、手組みの不正な Chunk（stack の不足・印の位置の誤り）を VM が panic せず `internal` error にする。確かめ方: `tests/defensive_vm.rs` と verifier の unit test への追加。
 - **想定の変更規模**: `src/compiler.rs` 約 60〜120 行（`push` / `pop` の条件、builtin 名の呼び出しの共有 lowering）、`src/vm.rs` 約 40〜80 行（経路の印と引数の後の呼び出し）、`src/opcode.rs`・`src/verifier.rs`・`src/chunk.rs` 合わせて約 20〜40 行。合わせて約 120〜240 行。テストは unit test と differential test で約 250〜400 行。触る仕組みは VM の builtin 名の呼び出しの lowering 1 つ、受入基準は 5 項目。
+
+#### fix-vm-loop-control-outside-loop 実装スライス（ループの外の `break` / `continue` を VM でも到達時の runtime error にする）
+
+> 状態: **未実装**（設計のみ）。issue #292（kamonabe、仕分け「受け入れ」）の補足から作った `fix` スライス。[言語仕様](language-spec.md)「break / continue」の「ループの外で使うとランタイムエラー」と、§2.1 の適合方針（tree が規範）・§4.8 の 1 項目め（compile は失敗せず、到達したときに tree と同じ runtime error を出す bytecode を生成する）を、VM のループ制御の lowering で満たす。catch の扱い（下の Q1）は、この設計 PR の「判断の候補」で判断役が A を選んだ（PR #328）。下の実装範囲と受入基準はこの選択で書いており、選んだ規則は言語仕様「break / continue」にも書いた。
+
+設計時点（main `882e093`、debug build の CLI）の事実:
+
+- VM の Compiler（`src/compiler.rs` の `compile_break` / `compile_continue`）は、`self.loops` が空のとき `TsumugiError::break_outside_loop` / `continue_outside_loop` を compile error として返す。`self.loops` は関数・lambda の本体ごとに空から始まるので、ループの中で定義した関数の本体にある `break` もループの外として扱う（tree と同じ）。compile error なので、到達しない分岐にあっても script 全体を実行前に拒否し、それより前の文の出力も出ない。import した module のトップレベルにある場合も、import 元の script を 1 文も実行しない。
+- tree（`src/eval.rs`）は `break` / `continue` を制御の信号（`EvalResult::Break` / `Continue`、driver の `FlowSignal`）として外へ伝える。同じ関数本体の中の `try` はこの信号を catch しない（`try` の handler を外して通り抜ける。`catch` ブロックの中にあっても同じ）。信号がループに会わずに関数本体・callback 本体・トップレベル（module のトップレベルを含む）の境界まで来たとき、その境界で `control_flow` の runtime error（message は [言語仕様](language-spec.md)「エラーの kind とメッセージ（正本）」の `control_flow` の行、行は `break` / `continue` の文の行）にする。関数の境界で作った error は、その関数の Call frame を畳んだ後に作るので、ふつうの runtime error として呼び出し元の `try` で catch できる。
+- 再現（`--vm` と tree の比較）:
+
+| script | tree | VM（今） |
+|---|---|---|
+| `print(1)` の次の行に `break` | `1` を出してから `2行目: break はループの中でのみ使用できます`、終了コード 1 | 何も出さず同じ message、終了コード 1 |
+| `if false` の中に `break`、その後に `print("done")` | `done`、終了コード 0 | 実行せず error |
+| トップレベルの `try` の中に `break`、`catch` で `print("caught")` | catch しない。同じ error で終了 | 同じ message（compile error） |
+| `fn f()` の本体に `continue`、トップレベルで `try f() catch e print("caught: " + e) end` | `caught: continue はループの中でのみ使用できます` を出して続行 | 実行せず error |
+| `fn f()` の本体の `try` の中に `break`、`for` の中で `f()` を呼ぶ | `f` の中の `catch` は動かず、`3行目: …` で終了（呼び出し元のループも抜けない） | 同じ message（compile error） |
+| ループの中で定義した lambda の本体に `break`、ループの中の `try` で呼ぶ | 呼び出し元の `try` が catch して続行 | 実行せず error |
+| `fn g()` に `break`、`fn f()` が `g()` を呼び、トップレベルで `f()` | `2行目: break…` の後の call trace は `in f() (7行目)` だけ（`g` の frame を畳んでから error を作るため、`g` の行が入らない） | 実行せず error |
+| `map` の callback の lambda 本体に `break` | callback の境界で `3行目: …` | 同じ message（compile error） |
+| import した module のトップレベルに `break` | import 元の `print` と module の `print` を出してから error | 何も出さず error |
+
+- **決定記録（判断役が選択（PR #328））: ループの外の `break` / `continue` を `try` で catch できる範囲（Q1=A）。** 設計時点の [言語仕様](language-spec.md)は「ランタイムエラー」とだけ書き、`control_flow` を catch できる種別に挙げるが、同じ関数本体の `try` で catch できるかを決めていなかった（§2.1 の優先順位 1 の [次期意味論・実装決定](semantic-decisions.md) にも無い）。選んだ規則: tree の今の観測結果を規則にする。同じ関数本体（トップレベル・module のトップレベルを含む）の `try` は catch せず（handler を外して通り抜ける。`catch` ブロックの中でも同じ）、関数・callback 本体の境界で文の行の `control_flow` の runtime error になり、呼び出し元の `try` は catch できる。VM をこれに合わせ、言語仕様「break / continue」に書き足した。理由: (1) manifesto 原則 5（backend ごとに意味論・エラーを変えない）と「一貫した意味論 > backend 固有の最適化」、§2.1（tree が規範）・§4.8 の 1 項目め。(2) spec と tree が矛盾しているのではなく spec が決めていない範囲なので、§2.1 の「tree の bug を無条件に仕様へ昇格しない」には当たらない。(3) ループの中の `break` が `try` に catch されずに抜ける既存の決定（`try_break_continue` fixture）と同じ「制御の信号は `try` を素通りする」扱いで一貫する。(4) 変更は VM の lowering 1 つで tree と既存 fixture を変えず（原則 8）、tree との differential test で検証できる（原則 9）。採らなかった案: B（文の位置で error を出し、同じ関数本体の `try` でも catch できる）— tree と VM の両方を変える言語挙動の変更で `fix` スライスの範囲を超え、ループの中の `break` は catch せずループの外だけ catch する形になって既存の決定と一貫しない。`control_flow` が catch 可能種別であることは A でも呼び出し元の `try` で満たされる。C（関数の外の `return`（AUD-043）と同じく parse 時のエラー）— 言語仕様の目標（ランタイムエラー）を変え、到達しない `break` を含む script を両 backend で拒否するようになる。採るなら目標を変える別の issue で扱う。
+
+- **実装範囲**:
+  - `compile_break` / `compile_continue` は、囲むループが無いときも compile error を返さず、到達したときに次の順で動く bytecode を出す: (1) 同じ関数本体（トップレベルを含む）の中で、その文を囲んでいる `try` の handler をすべて外す（ループの中の `break` が `LoopState.try_depth` の数だけ `TeardownTry` を出すのと同じ考え方。ループの外では関数本体ごとの `try` の深さを Compiler が数える）。(2) `break_outside_loop` / `continue_outside_loop`（文の行）の runtime error を出し、ふつうの runtime error と同じく frame を巻き戻す。こうすると、同じ関数本体の `try` は catch せず、関数の境界の外（呼び出し元・callback を呼んだ builtin の呼び出し元）の `try` は catch でき、トップレベルでは未捕捉の error になる。
+  - error の行と call trace を tree と揃える。tree は error を作る前に、`break` を含む関数の Call frame を畳むため、trace にその関数の行が入らない（上の表）。VM は、error を出す命令で今の frame を trace に積まない、または frame を 1 段畳んでから error を出す（どちらにするか・命令の形は実装 PR で決めてよい。`OpCode` は `unstable-bytecode` feature の下でだけ公開され、安定した公開 API ではない）。トップレベル（frame が 1 段）では trace を付けない。
+  - 命令を足す・意味を変える場合は、`src/verifier.rs` の検査と、不正な bytecode を `internal` error にする VM の防御（`tests/defensive_vm.rs`）を同じ PR で対応させる。
+- **変えないもの**: tree の挙動（このスライスは VM だけを tree に合わせる）。ループの中の `break` / `continue` の bytecode と、その fuel・step の課金（back-edge はループ文の行、`try_break_continue` fixture の TeardownTry）。error の kind・message（正本表の `control_flow` の 2 行）。到達しない `break` / `continue` が fuel・heap を消費しないこと（error を出す命令は到達したときだけ動く）。REPL で未捕捉の error になった入力は、その入力の language-state を rollback する（AUD-024。VM は今は compile error で 1 文も実行しないので、rollback の対象が新しく生まれる）。
+- **範囲外**:
+  - ループの外の `break` / `continue` を、関数の外の `return`（AUD-043）と同じく parse 時のエラーにする案。言語仕様「break / continue」の目標（ランタイムエラー）を変える言語挙動の変更で、tree も変わる。issue #292 の期待は「tree と同じ」で、このスライスでは扱わない（下の不採用案）。
+  - tree の call trace の欠け（`break` を含む関数の行が trace に入らない）を直すこと。直すなら tree と VM の両方の変更になり、別の issue で扱う。このスライスでは VM を今の tree に合わせる。
+  - ループの中の `break` / `continue` の lowering、`try` の lowering の他の部分。
+- **不採用案**:
+  - compile error のまま残し、tree を compile 時の拒否に合わせる: tree が実行できる script を拒否する方へ変えることになり、言語仕様「ループの外で使うとランタイムエラー」と §4.8 の 3 項目めに反する。
+  - parse 時の静的エラーにする（AUD-043 の `return` と同じ）: 上の範囲外のとおり、言語仕様の目標を変える。判断にかけるなら manifesto の原則に照らして別の issue で扱う。
+- **done PR で行う逸脱一覧の更新**: 逸脱一覧の「VM の compile が、ループの外の `break` / `continue` を compile error にする」の行を削除する。
+- **受入基準**:
+  - **VLC-AT-01（到達しなければ実行が続く）**: `if false` の中・呼ばない関数の本体・error が起きない `try` の `catch` ブロックの中にループの外の `break` / `continue` を置いた script を、VM が compile error にせず最後まで実行し、出力・終了コード・fuel・step が tree と一致する。library 経路（`Backend::VmExperimental` の `Engine::compile`）でも compile が成功する。確かめ方: tree/VM の differential test（`tests/differential.rs` かこのスライスの新しい test file）。
+  - **VLC-AT-02（到達したら tree と同じ runtime error）**: トップレベル・`if` の中・関数本体・lambda 本体・`map` などの callback 本体・import した module のトップレベルで、ループの外の `break` / `continue` に到達したとき、VM はそれより前の文の出力を出してから、tree と同じ kind・message・行・call trace・終了コードの error になる。`fn g` に `break`・`fn f` が `g()` を呼ぶ形の call trace を含む。確かめ方: CLI の paired test（tree と `--vm` の stdout・stderr・終了コードの比較）と differential test。
+  - **VLC-AT-03（catch できる範囲が tree と同じ）**: 同じ関数本体（トップレベルを含む）の `try` の中・`catch` ブロックの中・入れ子の `try` の中の `break` / `continue` を、その `try` が catch しない。関数の境界の外の `try`（呼び出し元・callback を呼んだ builtin の呼び出し元）が catch でき、`e["type"]` が `control_flow`、`e["line"]` が文の行で、catch の後の文が両 backend で同じように実行される。外した handler が残って後の error を誤って catch しない（`try` の中で `break` に到達して catch された後に、別の error を起こす）。確かめ方: differential test と golden fixture（tree・VM の両方で実行される fixture）。
+  - **VLC-AT-04（REPL と既存挙動）**: REPL で、ループの外の `break` を含む入力が、それより前の出力を出してから error になり、その入力が加えた binding を rollback し、次の入力が両 backend で同じように続く。既存の `error_break_outside_loop`・`error_continue_outside_loop`・`try_break_continue`・`break_continue` fixture、`tests/differential.rs`・`tests/defensive_vm.rs` が無改変で緑。足した・意味を変えた命令について、`src/verifier.rs` が compiler の出力を受け入れ、手組みの不正な Chunk を VM が panic せず `internal` error にする。確かめ方: REPL の paired test、既存 test、verifier と `tests/defensive_vm.rs` への追加。
+- **想定の変更規模**: `src/compiler.rs` 約 30〜60 行（ループの外の `break` / `continue` の lowering、関数本体ごとの `try` の深さ）、`src/vm.rs` 約 20〜50 行（error を出す命令と trace の扱い）、`src/opcode.rs`・`src/verifier.rs`・`src/chunk.rs` 合わせて約 10〜30 行。合わせて約 60〜140 行。テストは differential test・CLI の paired test・fixture・verifier で約 200〜350 行。触る仕組みは VM のループ制御の lowering 1 つ、受入基準は 4 項目。
 
 ## 15. 受入基準
 

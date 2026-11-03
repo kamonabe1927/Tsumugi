@@ -183,12 +183,16 @@ design_pr  = 313
 impl_pr    = 317
 order      = 3
 
+# 設計 PR で ready にした。catch できる範囲は判断役が Q1=A を選んだ（PR #328）。
 [[slice]]
 id         = "fix-vm-loop-control-outside-loop"
 title      = "VM がループの外の break / continue を compile error にせず、tree と同じく到達時の control_flow runtime error にする（言語仕様「break / continue」、issue #292）"
-status     = "todo"
+status     = "ready"
 parent     = "Phase 5 残"
 spec_slice = "determinism Slice 6"
+spec       = { doc = "docs/determinism-and-audit.md", section = "fix-vm-loop-control-outside-loop 実装スライス（ループの外の `break` / `continue` を VM でも到達時の runtime error にする）" }
+acceptance = ["VLC-AT-01..04"]
+design_pr  = 328
 order      = 8
 
 # loop:drift #302 の D-21（判断済み Q3=A）から作った fix。order は loop-runbook §12.3・§8 の「不具合の報告」の既定
