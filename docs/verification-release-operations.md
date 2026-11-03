@@ -1,13 +1,45 @@
 # Tsumugi — 検証・リリース・運用設計
 
-最終更新: 2026-11-02
-設計ステータス: **実装仕様確定・部分実装**（検証ゲートの一部〔MSRV gate・all-targets Clippy、下記 VRO-AT-01/02 相当〕を実装済み。release workflow・fuzz/stress・coverage gate・drift 検査・artifact 署名・OCI image・Kubernetes manifest・運用 SLO は未実装。詳細は本文 1 節を参照）
+最終更新: 2026-11-03
+設計ステータス: **実装仕様確定・部分実装**
+
+本文書の §1〜§18 は **到達目標の確定仕様**であり、現在の実装状態ではない。現在の実装が目標からどう逸脱しているか・どこが未実装かは、
+下の **逸脱一覧** が唯一の正本である（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。表は現在の逸脱と
+未実装範囲だけを持ち、解消した行は削除する。実装スライスの進捗の正本は [`slices.toml`](slices.toml)。
+
+逸脱一覧は loop:drift #318 の D-33 で新設した。冒頭の状態行と §1・§2.2 の「実装済み／未実装」の記述を本文に置き続けず、逸脱一覧を
+作って事実を確かめた逸脱だけを載せること（Q1=A）は判断役が選択（issue #318）した。理由: spec の実装状態は各 spec の逸脱一覧だけが
+持ち、移行中の spec も輪番で事実を確かめたものから寄せる（ドキュメント運用ガイド「逸脱一覧の持ち方」）。threat-model（D-24）・
+semantic-decisions（D-20）と同じ形にそろう。状態行と §1 の列挙だけを直す案（B）は、本文に現在の状態を置き続け、正本が目標か現状か
+分からない状態が残るので選ばなかった。
+載せたのは 2026-11-03 の整合点検の輪番（`.github/workflows/ci.yml`・`Cargo.toml`・`README.md`・`README.ja.md`・`src/main.rs`、
+リポジトリに `fuzz/`・`deploy/`・`Dockerfile`・release workflow が無いこと）と、D-33〜D-35 を直すときに確かめた分だけである。
+branch protection の required checks（VRO-AT-01）は GitHub の設定なので照合しておらず、§2.2 の表の capability/budget/audit の領域の現状、
+§5〜§6 の matrix の中身は他の spec との照合をまだしていない。`default-features = false` の構成で build できない件は
+[次期意味論・実装決定](semantic-decisions.md) の逸脱一覧が持つので、ここには再掲しない。
+
+## 逸脱一覧（目標仕様に対する現在の逸脱と未実装範囲）
+
+| 逸脱内容 | 対象の節(§) | 発生スライス |
+|---|---|---|
+| CI の coverage は gate になっていない。`ci.yml` の `coverage` job は `cargo llvm-cov --all-features --lcov --output-path lcov.info` で `lcov.info` を作って artifact にするだけで、line coverage 80% 未満でも失敗しない（`--fail-under-lines` が無い）。VRO-AT-02 の coverage 80% の分 | §4.1・§15.2・§17 VRO-AT-02 | — |
+| docs link・drift を検査する `docs` job と、manifest を検査する `manifest` job（`cargo metadata`・`cargo package`・`actionlint`）が `ci.yml` に無い。VRO-AT-02 の docs drift・manifest validation の分 | §4.2・§4.3・§17 VRO-AT-02 | — |
+| `ci.yml` の `uses:` が 40 桁の commit SHA に固定されていない。`actions/checkout@v7`・`actions/cache@v6`・`actions/upload-artifact@v7`・`dtolnay/rust-toolchain@stable`・`dtolnay/rust-toolchain@master`・`taiki-e/install-action@cargo-llvm-cov` の mutable な参照だけである | §4.4・§17 VRO-AT-03 | — |
+| `lcov.info` の保存期間を 30 日に指定していない。`ci.yml` の `actions/upload-artifact` に `retention-days` が無く、リポジトリの既定の保存期間に従う | §4.5 | — |
+| `README.md`・`README.ja.md` に Git tag からの `cargo install`・`$HOME/.cargo/bin` を PATH に足す手順・uninstall の案内が無い | §7.1・§16 Slice 1 | Slice 1 |
+| `tsumugi --version` の stdout が目標の `tsumugi <package-version> (language <revision>, commit <12桁SHA>)` でなく、`tsumugi <package-version>` だけである（`src/main.rs` の `CliOutcome::Version` の分岐が `CARGO_PKG_VERSION` だけを出す） | §7.1 | — |
+| `FilesystemModuleResolver` の resolve の契約を確かめる unit test（`src/capability.rs` の C6-b の節）は、空 root・重複 mount の 2 件を除き `#[cfg(unix)]` で、Windows の CI では走らない（§4.1.1 の先送り。Phase 7 で解除する） | §4.1.1 | capability-model C6-b |
+| release workflow・release artifact・GitHub Release が無い（リポジトリに release 用の workflow が無い） | §7・§8・§17 VRO-AT-10/11 | — |
+| fuzz target と stress・資源制約・failure injection の test 階層が無い（リポジトリに `fuzz/` が無い） | §5・§17 VRO-AT-04/05 | — |
+| OCI image が無い（`Dockerfile` が無い） | §9・§17 VRO-AT-12 | — |
+| Kubernetes の参照用 Job・NetworkPolicy が無い（`deploy/` が無い。§1.1 のとおり image の公開前には作らない） | §10・§11・§17 VRO-AT-13/14 | — |
+| 運用 SLO・運用指標が無い | §13・§17 VRO-AT-15 | — |
 
 ## 1. 目的と適用範囲
 
 本文書は、[ロードマップ](roadmap.md) Phase 7「運用保証と検証」、AUD-022「REPL・differential・limit境界・defensive VMテスト」、AUD-045「配布・実行手順とtoolchainの下限」を完了させるため、検証、配布、supply chain、OCI image、参照用Kubernetes Job、rollback、deprecation、runbookの実装契約を定める。
 
-現行CIでは、fmt・Clippy（`--all-targets --all-features`）・3 OS test・MSRV 1.97 test・coverage artifact、golden test、timeout、scaling test、defensive VM testが実装済みである。MSRV gate（`rust-version = "1.97"` 宣言と専用CI job）とall-targets Clippyは、本文書のVRO-AT-01/02受入基準を先取りする形で既に実装した。本文書が追加するrelease workflow、fuzz/stress、coverage 80% gate、docs/manifest drift検査、artifact署名、OCI image、Kubernetes manifest、運用SLOは**未実装**であり、現在の保証として扱わない。
+本文書が定めるgate・資材のうち、まだ実装されていないものは冒頭の逸脱一覧が持つ。逸脱一覧に行がある範囲は、現在の保証として扱わない。
 
 本文書では次を決定済みとし、各実装sliceで再選択しない。
 
@@ -47,20 +79,22 @@
 
 ### 2.2 現行と目標の分離
 
-「現行」は実装済みの状態、「本文書の完了状態」はPhase 7完了時の目標を表す。toolchain・Clippy・testのMSRV/all-targets化はVRO-AT-01/02を先取りして実装済みだが、release artifact smokeやcoverage gateを含む完了状態には未到達である。
+下表は、各領域の「本文書の完了状態」（Phase 7完了時の目標）を表す。現在の構成が目標に対してどこまで未到達かは表に書かず、冒頭の逸脱一覧を正本とする。
 
-| 領域 | 現行 | 本文書の完了状態 |
-|---|---|---|
-| toolchain | rolling stable + Rust 1.97、`rust-version = "1.97"` | stable + Rust 1.97、`rust-version = "1.97"` |
-| Clippy | `--all-targets --all-features -D warnings` | `--all-targets --all-features -D warnings` |
-| test | stable 3 OS + MSRV 1.97 | stable 3 OS + MSRV + release artifact smoke |
-| coverage | LCOV artifactのみ | line coverage 80%以上をgate化 |
-| fuzz/stress | 未実装 | PR smoke + weekly + release candidate gate |
-| release | workflow・artifactなし | 6 platform artifact、SHA-256、SBOM、provenance、署名 |
-| OCI | Dockerfile・imageなし | amd64/arm64 image、nonroot、署名・SBOM |
-| Kubernetes | 資材なし | image公開後に参照用Jobとdeny-all NetworkPolicy |
-| capability/budget/audit | 現行のstep・collection・深度上限、差分検証、構造化errorは部分実装済み。Phase 2〜6の完全な受入契約は未実装 | 各正本の受入基準をPhase 7 gateで再検証 |
-| backend | tree規範、VM experimental | 差分0のgateを満たさない限りVM experimentalを維持 |
+以前は表に「現行」列を置いていたが、外した。本文に実装状態を書かず、状態は逸脱一覧の 1 箇所だけが持つ（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」「状態の正本は粒度ごとに 1 箇所だけ」）。coverage・fuzz/stress・release（release artifact smoke を含む）・OCI・Kubernetes の現状は逸脱一覧の該当行が持ち、toolchain・Clippy・backend の現状は完了状態と同じなので、外しても失う記述は無い。capability/budget/audit の現状は他の spec とまだ照合していないので、逸脱一覧に足していない。列を残して決定記録の側を「照合が済むまで残す」と直す案（B）は、本文に状態を置き続け、D-33 で退けた形を別の形で戻すので選ばなかった（PR #326 のレビューの指摘 1 の Q1=A。判断役が選択（PR #326））。
+
+| 領域 | 本文書の完了状態 |
+|---|---|
+| toolchain | stable + Rust 1.97、`rust-version = "1.97"` |
+| Clippy | `--all-targets --all-features -D warnings` |
+| test | stable 3 OS + MSRV + release artifact smoke |
+| coverage | line coverage 80%以上をgate化 |
+| fuzz/stress | PR smoke + weekly + release candidate gate |
+| release | 6 platform artifact、SHA-256、SBOM、provenance、署名 |
+| OCI | amd64/arm64 image、nonroot、署名・SBOM |
+| Kubernetes | image公開後に参照用Jobとdeny-all NetworkPolicy |
+| capability/budget/audit | 各正本の受入基準をPhase 7 gateで再検証 |
+| backend | 差分0のgateを満たさない限りVM experimentalを維持 |
 
 ## 3. バージョンと互換性
 
@@ -134,7 +168,8 @@ Tsumugiは最終的にOSへ依存しない言語を目指すが、その**機能
 - **ただし次の2つは開発フェーズでも維持する。**
   1. **退行検出:** `test` jobのWindows行（Ubuntu, macOS, Windows / stable、`fail-fast: false`）は止めない。OS非依存の言語中核（型・計算・制御フロー・VM等）の退行はWindowsでも即検出する。これらはOS差がほぼ無く維持コストが低い。
   2. **セキュリティ境界の健全性:** capabilityモデル・secure resolution・sandboxに関わるWindowsテストはgreenを優先する。OS固有のセキュリティホール（例: junction / reparse pointによるroot脱出）はWindowsでのみ露出し、Tsumugiの中核価値であるcapability境界を直接脅かす。これらを「releaseまで未検出」にすると、崩れた前提の上に後続Phaseの設計が積み上がる。
-- **重いOS固有対応の先送りの作法:** OS境界機能でWindows対応が重く、当該sliceのスコープを超える場合は、該当する個別テストを**削除せず** `#[ignore]`（または `#[cfg(unix)]`）＋理由コメント＋[ロードマップ](roadmap.md)のPhase 7 TODO化で可視化を保つ。テストを消して「都合よくgreen」にしない。先送りの事実と返済先を常に追跡可能にする。
+- **重いOS固有対応の先送りの作法:** OS境界機能でWindows対応が重く、当該sliceのスコープを超える場合は、該当する個別テストを**削除せず** `#[ignore]`（または `#[cfg(unix)]`）＋理由コメント＋本書の逸脱一覧への行の追加（対象の節と発生スライスを書く）で可視化を保つ。テストを消して「都合よくgreen」にしない。先送りの事実と返済先を常に追跡可能にする。
+  - 先送りの記録先は、ロードマップでなく本書の逸脱一覧とする。ロードマップは項目の状態だけを持ち、個別のTODOを持たない（[ドキュメント運用ガイド](documentation-guide.md)「ロードマップと spec の責務分離」）。逸脱一覧の行（対象の節・発生スライス）で、先送りの事実と返済先を同じく追跡できる。ロードマップのステータス一覧に「Phase 7 TODO」の行を足して受ける案（B）は、ロードマップに個別のTODOが戻り責務分離を崩すので選ばなかった（loop:drift #318 の D-35 Q1=A。判断役が選択（issue #318））。
 - **release（Phase 7）での引き上げ:** release gate（§4.1の全job + §6 matrix）でWindowsを含む全対象OSの機能完全性を検証する。`#[ignore]` / `#[cfg(unix)]` で先送りしたOS境界テストは、Phase 7で解除・実装し、全対象OSでgreenにすることをreleaseの前提とする。
 
 この区別は[ロードマップ](roadmap.md)のPhase 7完了gateに紐づく。開発フェーズのWindows CIは「機能の完全性保証」ではなく「退行検出とセキュリティ境界の番人」として位置づける。
@@ -147,7 +182,7 @@ Tsumugiは最終的にOSへ依存しない言語を目指すが、その**機能
 - `Cargo.toml`のpackage versionとrelease tagが一致する。
 - `README.md`に記載するpackage versionと言語revisionが各正本と一致する。
 - builtin catalog、tree、VM、compiler、生成文書のbuiltin名・arity・metadataが一致する。
-- 既知backend差のAUD IDが`language-spec.md`と`roadmap.md`で一致する。
+- `language-spec.md`が既知backend差として挙げる事項と、各specの逸脱一覧にある既知backend差の行が一致する（既知の差の状態の正本は各specの逸脱一覧で、ロードマップには持たない。§4.1.1の決定と同じ）。
 - `README.md`のCI job・ローカルcommand・artifact名がworkflowと一致する。
 - release noteのpackage version、language revision、MSRVがrelease metadataと一致する。
 
@@ -176,6 +211,7 @@ cargo package --locked --list
 - Action更新は自動PRで行い、変更元repository、release note、SHAとtagの対応をreviewする。
 - third-party Actionが不要な処理はshell commandまたは公式Actionを優先する。
 - fork PRへwrite permission、OIDC token、package write、release writeを付与しない。
+  - 例外: 凍結ガード（`.github/workflows/frozen-guard.yml`、[開発ループの守り](loop-guard.md) §3.2）は`pull_request_target`で動き、workflow単位で`pull-requests: write`と`statuses: write`を持つ。これは次の条件をすべて満たすときだけ許す。(1) workflowの定義と実行するscriptはmain側のものだけを使い、PRのコードをcheckout・実行しない。(2) checkoutは`persist-credentials: false`にする。(3) 権限はラベルの操作とstatusの付与に要る`pull-requests: write`・`statuses: write`だけを最小限に書き、`id-token`・`packages`・release（`contents`）のwriteは付けない。このwrite tokenはPRのコードではなくmain側の定義に渡るので、本項が禁じる「fork PRのコードへのwrite付与」とは別物である。凍結ガードの権限を外す・job単位に絞る案（B）は、凍結ファイルの変更で`frozen-ok`が要り（loop-guard §3.1）、ラベルの除去と必須statusの付与ができなくなると守りが働かなくなるので選ばなかった（loop:drift #318 の D-36 Q1=A。判断役が選択（issue #318））。
 - provenance、署名、GHCR pushに必要な`id-token: write`と`packages: write`はprotected tagのrelease jobだけにjob単位で付与する。
 
 ### 4.5 CI artifact retention
@@ -391,7 +427,9 @@ production backendはtreeだけとする。VMは次の全行が0差分になる�
 | state | REPL継続、未捕捉error、rollback、import marker、pause/resumeが一致 |
 | record/replay | tree recordとVM replayを含む全組合せが一致 |
 | fuzz | AUD-022 generation matrixと4 fuzz targetで差分0 |
-| known deviations | AUD-016、AUD-017、AUD-019、AUD-024、AUD-048を含む既知非適合0件 |
+| known deviations | 各specの逸脱一覧（逸脱一覧をまだ持たない移行中のspecは、整備され次第その一覧）にある既知非適合0件 |
+
+known deviationsの行は、既知非適合の状態を本文に列挙せず、正本である各specの逸脱一覧を指す（gateの条件「0件」は変えない）。以前ここに挙げていたAUD-016・AUD-017・AUD-019・AUD-024・AUD-048は解消済みで、回帰の検出は上の各行（error・state・identity等）と既存のconformance test（`tests/canonical_error_inventory.rs`等）が担う。ID の列挙を残して「解消済み（回帰しないこと）」と注記する案（B）は、本文に状態を書くことになるので選ばなかった（loop:drift #318 の D-34 Q1=A。判断役が選択（issue #318））。
 
 stdoutだけの一致、hello smoke、benchmark優位性はconformanceの証拠にしない。
 
@@ -833,7 +871,7 @@ NetworkPolicy自体に問題がある場合だけ、影響を記録して削除�
 3. tagを別bytesへ付け替えず、必要なら危険なasset/imageを配布先からremove/revokeする。
 4. 直前の安全なSemVerへのrollback commandを公開する。
 5. 修正版を新しいpatch/minor versionでreleaseする。
-6. root cause、検出できなかったgate、追加testをroadmap/AUDへ記録する。
+6. root cause、検出できなかったgate、追加testを、該当specの実装スライス小節（修正のスライス）とissueへ記録する。修正版のreleaseまで残る逸脱は該当specの逸脱一覧に載せる（記録先は§4.1.1の決定と同じく、ロードマップに持たない）。
 
 ### 12.4 証跡
 
@@ -914,7 +952,6 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features --locked
 cargo test -j 1 -- --test-threads=1
 cargo check --lib --no-default-features
-cargo build --no-default-features --bins
 cargo build --release --locked
 cargo run -- examples/hello.tsg
 cargo run -- --vm examples/hello.tsg

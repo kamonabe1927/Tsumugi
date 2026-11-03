@@ -330,11 +330,12 @@ operation の網羅に加えて、次の軸を paired で固定する。
 
 ### CI
 
-GitHub Actions (`.github/workflows/ci.yml`) が `main` への push と PR で4つのジョブを実行する。本節を現行CIジョブ構成の正本とし、`README.ja.md` は完全な表を複製せず本節を参照する（更新漏れを防ぐための一本化）。英語版 `README.md` は簡潔版でありCI表を持たない。
+GitHub Actions (`.github/workflows/ci.yml`) が `main` への push と PR で5つのジョブを実行する。本節を現行CIジョブ構成の正本とし、`README.ja.md` は完全な表を複製せず本節を参照する（更新漏れを防ぐための一本化）。英語版 `README.md` は簡潔版でありCI表を持たない。
 
 | ジョブ | 実行環境 | 内容 |
 |---|---|---|
 | `lint` | ubuntu-latest | `cargo fmt --check`（フォーマット整合性）、`cargo clippy --all-targets --all-features -- -D warnings`（静的解析） |
+| `loop-scripts` | ubuntu-latest | `python3 -m unittest discover` で、開発ループのスクリプト（`.claude/skills/loop-advance/scripts`）と凍結ガード（`.github/scripts`）の unit test を実行する |
 | `test` | ubuntu-latest / macos-latest / windows-latest | `cargo test --all-features --locked`。`fail-fast: false` で1つのOSが落ちても他の結果を得る |
 | `msrv` | ubuntu-latest | MSRV（Rust 1.97.0）を明示 install して `cargo test --all-features --locked` |
 | `coverage` | ubuntu-latest | `cargo llvm-cov --all-features --lcov` で `lcov.info` を生成し、artifact `lcov-report` として保存する |

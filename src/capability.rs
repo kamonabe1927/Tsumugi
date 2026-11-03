@@ -3624,7 +3624,8 @@ mod tests {
         // -----------------------------------------------------------------
         // C6-b: filesystem ModuleResolver 実体 + @NAME/... routing（設計 §3.6）。
         // link へ未配線なので CLI 観測挙動は不変。resolve の契約だけを直接呼んで固定する。
-        // OS 依存（path 区切り・symlink）のため #[cfg(unix)] 中心。Windows は Phase 7 TODO。
+        // OS 依存（path 区切り・symlink）のため #[cfg(unix)] 中心。Windows は Phase 7 で解除する
+        // （先送りは verification-release-operations.md の逸脱一覧、§4.1.1）。
         // -----------------------------------------------------------------
 
         /// 単一 root `default`（= tempdir）の resolver を作る。
