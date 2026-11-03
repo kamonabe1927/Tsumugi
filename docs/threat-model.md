@@ -1,6 +1,6 @@
 # Tsumugi — 脅威モデル
 
-最終更新: 2026-11-02
+最終更新: 2026-11-04
 設計ステータス: **実装仕様確定・実装進行中**
 
 本文書の §1〜§13 は **到達目標の確定仕様**であり、現在の実装状態ではない。現在の実装が目標からどう逸脱しているかは、下の
@@ -14,12 +14,21 @@
 tree・`--vm` で照合）と、その点検で見つかったずれのうち D-27・D-29 を確かめた分だけである。照合していない節
 （TM-003・TM-010〜014・TM-017・TM-020〜023、Phase 3/6/7 の受入試験、§9・§12・§13）の逸脱は、まだ表へ移していない。
 
+TM-024・TM-AT-24 の行は loop:drift #318 の D-26 で足した。TM-024・TM-AT-24 の目標は変えず（REPL と scheduler の handle 経路の
+import も対象に含め、範囲を file/stdin に絞らない）、この 2 経路の import が resolver gate を通らない件を残余リスクとして本文に
+固定せず、未解消の逸脱として表に載せることは kamonabe が選択した（issue #318 のコメント、2026-11-03）。理由: 目標の範囲を
+file/stdin に絞る案（判断役の Q1=A）は、それを反映した PR #319 の審査で原則 2（明示的 capability ＞ ambient authority）の疑いと
+なった。目標を保ったまま逸脱として記録すれば、その疑いを避け、目標と逸脱一覧の食い違いもなくなる。REPL の import を塞ぐか
+どうか（[Capability Model仕様](capability-model.md) §10 の issue #291 Q1=A「REPL は範囲外」の見直しを含む）は、別の
+`needs-design` issue で決める。
+
 ## 逸脱一覧（目標仕様に対する現在の逸脱）
 
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
+| REPL（tree・`--vm`）と scheduler の handle 経路（`src/engine.rs` の `Engine::compile` / `create_execution` / `start`）の import は `Engine::link` と resolver を経ず、実行中に評価器内蔵 `ModuleLoader`（`src/module.rs`）がファイルを読む。`module_resolver` の grant を要さず（`TSUMUGI_SANDBOX` の検査だけを受ける）、この 2 経路では TM-024 の「全 import は link 時に resolver capability だけを使う。runtime import 禁止」と TM-AT-24 が成り立たない。例: CLI で `--allow-import-root` を渡さずに REPL へ `import "lib/m.tsg"` を入れると、tree・`--vm` とも module が実行される（同じ内容のファイルを実行すると terminal `Denied`、exit 1）。REPL の経路は [Capability Model仕様](capability-model.md) の冒頭の設計ステータス段落、scheduler の handle 経路は同書の逸脱一覧の行（§10）にある | §10 TM-024、§11 TM-AT-24 | E7（REPL の `ModuleLoader` 保全）、exec-control Slice 3 PR-a（scheduler の handle 経路） |
 
-照合済みの節に残っている逸脱は今は無い（表が空であることは、照合していない節に逸脱が無いことを意味しない）。
+照合済みの節に残っている逸脱は上の行だけである（照合していない節に逸脱が無いことを意味しない）。
 
 ## 1. 目的と適用範囲
 
