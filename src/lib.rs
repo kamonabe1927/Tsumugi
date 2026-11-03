@@ -38,26 +38,31 @@ pub mod value;
 #[cfg(feature = "unstable-bytecode")]
 pub mod chunk;
 #[cfg(not(feature = "unstable-bytecode"))]
+#[allow(dead_code)]
 pub(crate) mod chunk;
 
 #[cfg(feature = "unstable-bytecode")]
 pub mod compiler;
 #[cfg(not(feature = "unstable-bytecode"))]
+#[allow(dead_code)]
 pub(crate) mod compiler;
 
 #[cfg(feature = "unstable-bytecode")]
 pub mod opcode;
 #[cfg(not(feature = "unstable-bytecode"))]
+#[allow(dead_code)]
 pub(crate) mod opcode;
 
 #[cfg(feature = "unstable-bytecode")]
 pub mod verifier;
 #[cfg(not(feature = "unstable-bytecode"))]
+#[allow(dead_code)]
 pub(crate) mod verifier;
 
 #[cfg(feature = "unstable-bytecode")]
 pub mod vm;
 #[cfg(not(feature = "unstable-bytecode"))]
+#[allow(dead_code)]
 pub(crate) mod vm;
 
 pub use engine::{
