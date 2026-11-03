@@ -261,7 +261,7 @@ fixture は `fixture_tests!` へ1行宣言するとツリーウォーク版 / VM
 
 ## CI
 
-`main` への push と PR で GitHub Actions が `lint` / `test`（3 OS）/ `msrv` / `coverage` の4つのジョブを並行実行する。各ジョブの実行環境と正確なコマンドは[設計ドキュメント](docs/design.md)の「CI」節を正本とし、設定の実体は `.github/workflows/ci.yml` にある。
+`main` への push と PR で GitHub Actions が `lint` / `loop-scripts` / `test`（3 OS）/ `msrv` / `coverage` の5つのジョブを並行実行する。各ジョブの実行環境と正確なコマンドは[設計ドキュメント](docs/design.md)の「CI」節を正本とし、設定の実体は `.github/workflows/ci.yml` にある。
 
 ローカルで主要な検査を再現する場合は次を順に実行する。
 
