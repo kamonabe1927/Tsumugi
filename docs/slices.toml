@@ -182,7 +182,7 @@ design_pr  = 313
 impl_pr    = 317
 order      = 3
 
-# 設計 PR で ready にした。catch できる範囲（Q1）は設計 PR の判断の候補で判断役が選ぶ。
+# 設計 PR で ready にした。catch できる範囲は判断役が Q1=A を選んだ（PR #328）。
 [[slice]]
 id         = "fix-vm-loop-control-outside-loop"
 title      = "VM がループの外の break / continue を compile error にせず、tree と同じく到達時の control_flow runtime error にする（言語仕様「break / continue」、issue #292）"
