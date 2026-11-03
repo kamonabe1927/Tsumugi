@@ -15,8 +15,7 @@ semantic-decisions（D-20）と同じ形にそろう。状態行と §1 の列�
 載せたのは 2026-11-03 の整合点検の輪番（`.github/workflows/ci.yml`・`Cargo.toml`・`README.md`・`README.ja.md`・`src/main.rs`、
 リポジトリに `fuzz/`・`deploy/`・`Dockerfile`・release workflow が無いこと）と、D-33〜D-35 を直すときに確かめた分だけである。
 branch protection の required checks（VRO-AT-01）は GitHub の設定なので照合しておらず、§2.2 の表の capability/budget/audit の領域の現状、
-§5〜§6 の matrix の中身は他の spec との照合をまだしていない。`default-features = false` の構成で build できない件は
-[次期意味論・実装決定](semantic-decisions.md) の逸脱一覧が持つので、ここには再掲しない。
+§5〜§6 の matrix の中身は他の spec との照合をまだしていない。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱と未実装範囲）
 
