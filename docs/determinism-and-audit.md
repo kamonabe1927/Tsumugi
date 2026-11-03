@@ -2007,7 +2007,7 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
 
 #### fix-vm-loop-control-outside-loop 実装スライス（ループの外の `break` / `continue` を VM でも到達時の runtime error にする）
 
-> 状態: **未実装**（設計のみ）。issue #292（kamonabe、仕分け「受け入れ」）の補足から作った `fix` スライス。[言語仕様](language-spec.md)「break / continue」の「ループの外で使うとランタイムエラー」と、§2.1 の適合方針（tree が規範）・§4.8 の 1 項目め（compile は失敗せず、到達したときに tree と同じ runtime error を出す bytecode を生成する）を、VM のループ制御の lowering で満たす。catch の扱い（下の Q1）は、この設計 PR の「判断の候補」で判断役が選ぶ。下の実装範囲と受入基準は推奨案 A で書いており、別の案が選ばれたらこの PR の中で書き直す。
+> 状態: **未実装**（設計のみ）。issue #292（kamonabe、仕分け「受け入れ」）の補足から作った `fix` スライス。[言語仕様](language-spec.md)「break / continue」の「ループの外で使うとランタイムエラー」と、§2.1 の適合方針（tree が規範）・§4.8 の 1 項目め（compile は失敗せず、到達したときに tree と同じ runtime error を出す bytecode を生成する）を、VM のループ制御の lowering で満たす。catch の扱い（下の Q1）は、この設計 PR の「判断の候補」で判断役が A を選んだ（PR #328）。下の実装範囲と受入基準はこの選択で書いており、選んだ規則は言語仕様「break / continue」にも書いた。
 
 設計時点（main `882e093`、debug build の CLI）の事実:
 
@@ -2027,9 +2027,9 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
 | `map` の callback の lambda 本体に `break` | callback の境界で `3行目: …` | 同じ message（compile error） |
 | import した module のトップレベルに `break` | import 元の `print` と module の `print` を出してから error | 何も出さず error |
 
-- **Q1（判断待ち）: ループの外の `break` / `continue` を `try` で catch できる範囲。** [言語仕様](language-spec.md)は「ランタイムエラー」とだけ書き、`control_flow` を catch できる種別に挙げるが、同じ関数本体の `try` で catch できるかを決めていない（§2.1 の優先順位 1 の [次期意味論・実装決定](semantic-decisions.md) にも無い）。推奨案 A は「tree の今の観測結果を規則にする」で、上の事実の 2 項目めをそのまま言語仕様「break / continue」に書き足し、VM をそれに合わせる。判断役が選んだら、選んだ内容と理由をこの小節の決定記録と言語仕様「break / continue」に書く。
+- **決定記録（判断役が選択（PR #328））: ループの外の `break` / `continue` を `try` で catch できる範囲（Q1=A）。** 設計時点の [言語仕様](language-spec.md)は「ランタイムエラー」とだけ書き、`control_flow` を catch できる種別に挙げるが、同じ関数本体の `try` で catch できるかを決めていなかった（§2.1 の優先順位 1 の [次期意味論・実装決定](semantic-decisions.md) にも無い）。選んだ規則: tree の今の観測結果を規則にする。同じ関数本体（トップレベル・module のトップレベルを含む）の `try` は catch せず（handler を外して通り抜ける。`catch` ブロックの中でも同じ）、関数・callback 本体の境界で文の行の `control_flow` の runtime error になり、呼び出し元の `try` は catch できる。VM をこれに合わせ、言語仕様「break / continue」に書き足した。理由: (1) manifesto 原則 5（backend ごとに意味論・エラーを変えない）と「一貫した意味論 > backend 固有の最適化」、§2.1（tree が規範）・§4.8 の 1 項目め。(2) spec と tree が矛盾しているのではなく spec が決めていない範囲なので、§2.1 の「tree の bug を無条件に仕様へ昇格しない」には当たらない。(3) ループの中の `break` が `try` に catch されずに抜ける既存の決定（`try_break_continue` fixture）と同じ「制御の信号は `try` を素通りする」扱いで一貫する。(4) 変更は VM の lowering 1 つで tree と既存 fixture を変えず（原則 8）、tree との differential test で検証できる（原則 9）。採らなかった案: B（文の位置で error を出し、同じ関数本体の `try` でも catch できる）— tree と VM の両方を変える言語挙動の変更で `fix` スライスの範囲を超え、ループの中の `break` は catch せずループの外だけ catch する形になって既存の決定と一貫しない。`control_flow` が catch 可能種別であることは A でも呼び出し元の `try` で満たされる。C（関数の外の `return`（AUD-043）と同じく parse 時のエラー）— 言語仕様の目標（ランタイムエラー）を変え、到達しない `break` を含む script を両 backend で拒否するようになる。採るなら目標を変える別の issue で扱う。
 
-- **実装範囲**（推奨案 A の場合）:
+- **実装範囲**:
   - `compile_break` / `compile_continue` は、囲むループが無いときも compile error を返さず、到達したときに次の順で動く bytecode を出す: (1) 同じ関数本体（トップレベルを含む）の中で、その文を囲んでいる `try` の handler をすべて外す（ループの中の `break` が `LoopState.try_depth` の数だけ `TeardownTry` を出すのと同じ考え方。ループの外では関数本体ごとの `try` の深さを Compiler が数える）。(2) `break_outside_loop` / `continue_outside_loop`（文の行）の runtime error を出し、ふつうの runtime error と同じく frame を巻き戻す。こうすると、同じ関数本体の `try` は catch せず、関数の境界の外（呼び出し元・callback を呼んだ builtin の呼び出し元）の `try` は catch でき、トップレベルでは未捕捉の error になる。
   - error の行と call trace を tree と揃える。tree は error を作る前に、`break` を含む関数の Call frame を畳むため、trace にその関数の行が入らない（上の表）。VM は、error を出す命令で今の frame を trace に積まない、または frame を 1 段畳んでから error を出す（どちらにするか・命令の形は実装 PR で決めてよい。`OpCode` は `unstable-bytecode` feature の下でだけ公開され、安定した公開 API ではない）。トップレベル（frame が 1 段）では trace を付けない。
   - 命令を足す・意味を変える場合は、`src/verifier.rs` の検査と、不正な bytecode を `internal` error にする VM の防御（`tests/defensive_vm.rs`）を同じ PR で対応させる。
