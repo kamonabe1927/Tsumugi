@@ -15,10 +15,16 @@ rust-version = "1.97"
 # 安定した埋め込み surface は `Engine` 系のみ。raw bytecode を直接構築・実行する利用は
 # この feature を明示的に有効化する必要がある。同一 package の CLI・ベンチ・内部テストが
 # これらを使うため default で有効にし、安定利用者は `default-features = false` で封印できる。
+# 無効にした構成では bin `tsumugi` は作らない（下の `required-features`）。
 default = ["unstable-bytecode"]
 unstable-bytecode = []
 
 [dependencies]
+
+[[bin]]
+name = "tsumugi"
+path = "src/main.rs"
+required-features = ["unstable-bytecode"]
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

@@ -16,15 +16,13 @@ Q2=A。当時の[開発ループ手順書](loop-runbook.md) §7.5）。理由: �
 （§4〜§12・§17・§20 を実装と release ビルドの実行〔tree・`--vm`〕で照合）と、2026-11-01 に PR #309 で §5・§10・§14.3・
 §17.5・§20 を実装と照合して確かめた差だけである。照合していない節（§3・§13〜§16・§17.7・§17.8 ほか）の逸脱と、本文の
 節ごとに残る「ステータス」注記（§13・§14.1・§14.2 など）は、まだ表へ移していない。§10（AUD-036）・§20（`format_time` の
-`%z` / `%Z`）は照合の結果、逸脱が無かった。§17.7.9（issue #294 で足した節）の行は、2026-11-02 に main で `cargo build --no-default-features`
-と `cargo check --lib --no-default-features` を実行して確かめた。§17.7 のほかの小節はまだ照合していない。
+`%z` / `%Z`）は照合の結果、逸脱が無かった。§17.7.9（issue #294 で足した節）の逸脱は PR #329 で解消し、行を削除した。§17.7 のほかの小節はまだ照合していない。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱と未実装範囲）
 
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
 | user call の評価順が目標と違う。目標（§5.1・§17.5.2）は「動的 callee を先に一度だけ評価・分類し、user callable の場合だけ step と深度を検査する」（callee 先行）だが、実装は現行の [言語仕様](language-spec.md)「ユーザー定義関数の呼び出し順序」のとおり「step と深度を検査してから callee を評価する」。tree（`src/eval.rs` の user call の準備で `begin_user_call` が callee の評価より前）と VM で同じで、深度 128 の内側で `[print("x"), g][1](…)` を呼ぶと、両 backend とも `x` を出さずに `overflow` になる。深度の境界値（128 user frame、§5.1）は両 backend で目標どおり。callee 先行への切り替えは `LanguageRevision` を上げる破壊的変更で、まだスライスが無い（ロードマップの REV-012 の `callee-precedence`） | §5.1・§17.5 | —（本ガイド導入前からの実装） |
-| `default-features = false`（`unstable-bytecode` を無効）の構成で package を build できない。目標（§17.7.9）は library が warning なしで build でき、bin `tsumugi` は `required-features` で無効時に作られないことだが、`src/main.rs` が `tsumugi::compiler::Compiler` と `tsumugi::vm::Vm` を import し、無効時はこれらが `pub(crate)` になるため `cargo build --no-default-features` が bin `tsumugi` の E0603（module is private）で失敗する。library だけ（`cargo check --lib --no-default-features`）は通るが、`compiler` / `verifier` / `vm` の dead code の warning が 18 件出る（2026-11-02 に main `ddc0767` で確かめた）。CI は `--all-features` の構成しか試さない。直すスライスは `fix-no-default-features-build`（[検証・リリース・運用設計](verification-release-operations.md) §16） | §17.7.9 | —（REV-018 の封印の時点からの実装） |
 | process-global の `OnceLock` が残る。目標（§14.3）は process-global な `OnceLock` を廃止し `FilesystemCapability` を実行 request へ注入することだが、`src/sandbox.rs` の `SANDBOX_PATHS`（`TSUMUGI_SANDBOX` を一度だけ読む `OnceLock`）が残り、評価器内蔵の `ModuleLoader`（`src/module.rs`）が import のファイルを読むときに `sandbox::check_path` で検査する。fs builtin は capability handle 経由に移っており（C10）、`OnceLock` を読まない。`ModuleLoader` を使うのは REPL と scheduler の handle 経路の import だけで（file/stdin の run 層は `fix-import-run-from-link-graph` で link の graph から展開するようになり `OnceLock` を読まない）、scheduler の handle 経路の差は [Capability Model仕様](capability-model.md) の逸脱一覧（§10）にある | §14.3 | —（本ガイド導入前からの実装。fs builtin の移行は C10） |
 
 ## 1. 本書の位置づけ
