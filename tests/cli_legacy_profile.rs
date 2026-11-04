@@ -51,6 +51,18 @@ struct Run {
 
 /// legacy profile で script を実行する。`envs` は環境変数、`src_dir` は script を置く dir。
 fn run_legacy(use_vm: bool, src_dir: &std::path::Path, source: &str, envs: &[(&str, &str)]) -> Run {
+    run_legacy_in(use_vm, src_dir, source, envs, None)
+}
+
+/// `cwd` を指定すると子プロセスの current_dir にする。Windows の unrestricted root は CWD の
+/// volume root なので、temp 上のファイルを読むテストは CWD を同じ volume に置く。
+fn run_legacy_in(
+    use_vm: bool,
+    src_dir: &std::path::Path,
+    source: &str,
+    envs: &[(&str, &str)],
+    cwd: Option<&std::path::Path>,
+) -> Run {
     let script = src_dir.join("s.tsg");
     std::fs::write(&script, source).expect("write script");
     let mut cmd = Command::new(tsumugi_bin());
@@ -58,6 +70,9 @@ fn run_legacy(use_vm: bool, src_dir: &std::path::Path, source: &str, envs: &[(&s
         cmd.arg("--vm");
     }
     cmd.arg("--profile").arg("legacy").arg(&script);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -82,6 +97,7 @@ fn run_legacy(use_vm: bool, src_dir: &std::path::Path, source: &str, envs: &[(&s
 }
 
 const WARN_EMPTY_SANDBOX: &str = "警告: TSUMUGI_SANDBOX が未設定のため、legacy profile はファイルシステム全体へのアクセスを許可します";
+const WARN_EMPTY_SANDBOX_LIST: &str = "警告: TSUMUGI_SANDBOX にパスが含まれていないため、legacy profile はファイルシステム操作をすべて拒否します";
 const WARN_EMPTY_ENV_ALLOW: &str = "警告: TSUMUGI_ENV_ALLOW が未設定のため、legacy profile は TSUMUGI_ 以外の全環境変数を公開します";
 
 #[test]
@@ -292,5 +308,105 @@ fn legacy_symlink_escaping_root_is_denied() {
             "root 外へ逃げる中間 symlink は拒否される [vm={use_vm}]: {}",
             r.stdout
         );
+    }
+}
+
+/// 区切り文字と空白だけの `TSUMUGI_SANDBOX`（LSE-AT-01）: 実在ファイルの read_file も全部拒否、catch 可能。
+#[test]
+fn separator_only_sandbox_denies_all_filesystem_operations() {
+    for value in [",", " , ", " "] {
+        for use_vm in [false, true] {
+            let dir = TestDir::new("seponly");
+            std::fs::write(dir.path.join("in.txt"), b"secret-data").unwrap();
+            let target = dir.path.join("in.txt");
+            let target_str = target.to_str().unwrap().replace('\\', "/");
+            let envs = [("TSUMUGI_SANDBOX", value), ("TSUMUGI_ENV_ALLOW", "*")];
+
+            // 未捕捉: エラーで終わり exit 1、内容は出ない。
+            let r = run_legacy(
+                use_vm,
+                &dir.path,
+                &format!("print(read_file(\"{}\"))", target_str),
+                &envs,
+            );
+            assert!(!r.status_ok, "未捕捉は exit 1 [{value:?} vm={use_vm}]");
+            assert!(
+                r.stderr
+                    .contains("ファイルシステム操作が許可されていません"),
+                "[{value:?} vm={use_vm}]: {}",
+                r.stderr
+            );
+            assert!(!r.stdout.contains("secret-data"));
+            assert!(!r.stderr.contains("secret-data"));
+
+            // try / catch で捕捉でき、後続の print が実行される。
+            let r = run_legacy(
+                use_vm,
+                &dir.path,
+                &format!(
+                    "try\n  print(read_file(\"{}\"))\ncatch e\n  print(\"caught\")\nend\nprint(\"after\")",
+                    target_str
+                ),
+                &envs,
+            );
+            assert!(
+                r.status_ok,
+                "catch 後は成功 [{value:?} vm={use_vm}]: {}",
+                r.stderr
+            );
+            assert_eq!(r.stdout, "caught\nafter", "[{value:?} vm={use_vm}]");
+        }
+    }
+}
+
+/// LSE-AT-02: 区切り文字だけの値は別の警告がちょうど 1 行、`WARN_EMPTY_SANDBOX` は出ない。
+#[test]
+fn separator_only_sandbox_emits_single_list_warning() {
+    for value in [",", " , ", " "] {
+        for use_vm in [false, true] {
+            let dir = TestDir::new("sepwarn");
+            let r = run_legacy(
+                use_vm,
+                &dir.path,
+                "print(1)",
+                &[("TSUMUGI_SANDBOX", value), ("TSUMUGI_ENV_ALLOW", "*")],
+            );
+            assert!(r.status_ok, "[{value:?} vm={use_vm}]: {}", r.stderr);
+            let list = r
+                .stderr
+                .lines()
+                .filter(|l| *l == WARN_EMPTY_SANDBOX_LIST)
+                .count();
+            let unset = r
+                .stderr
+                .lines()
+                .filter(|l| *l == WARN_EMPTY_SANDBOX)
+                .count();
+            assert_eq!(list, 1, "[{value:?} vm={use_vm}]: {}", r.stderr);
+            assert_eq!(unset, 0, "[{value:?} vm={use_vm}]: {}", r.stderr);
+        }
+    }
+}
+
+/// LSE-AT-02: 空文字列の `TSUMUGI_SANDBOX` は従来どおり unrestricted + `WARN_EMPTY_SANDBOX` 1 行。
+#[test]
+fn empty_string_sandbox_stays_unrestricted_with_existing_warning() {
+    for use_vm in [false, true] {
+        let dir = TestDir::new("emptystr");
+        std::fs::write(dir.path.join("in.txt"), b"data").unwrap();
+        let target = dir.path.join("in.txt");
+        let target_str = target.to_str().unwrap().replace('\\', "/");
+        let r = run_legacy_in(
+            use_vm,
+            &dir.path,
+            &format!("print(read_file(\"{}\"))", target_str),
+            &[("TSUMUGI_SANDBOX", ""), ("TSUMUGI_ENV_ALLOW", "*")],
+            Some(&dir.path),
+        );
+        assert!(r.status_ok, "[vm={use_vm}]: {}", r.stderr);
+        assert_eq!(r.stdout, "data");
+        let count = |w: &str| r.stderr.lines().filter(|l| *l == w).count();
+        assert_eq!(count(WARN_EMPTY_SANDBOX), 1);
+        assert_eq!(count(WARN_EMPTY_SANDBOX_LIST), 0);
     }
 }

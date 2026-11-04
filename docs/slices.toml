@@ -227,11 +227,12 @@ order      = 6
 [[slice]]
 id         = "fix-legacy-sandbox-empty-list"
 title      = "legacy profile の区切り文字だけの TSUMUGI_SANDBOX を空の許可リスト（filesystem grant 無し）にし警告を出す（capability-model §14.3、issue #291）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-legacy-sandbox-empty-list 実装スライス（区切り文字だけの `TSUMUGI_SANDBOX` を空の許可リストにする）" }
 acceptance = ["LSE-AT-01..03"]
 design_pr  = 303
+impl_pr    = 333
 order      = 7
 
 # issue #290（kamonabe、「優先」）から作った不具合の fix 2 本と、その設計で見つかった関連の 1 本。
