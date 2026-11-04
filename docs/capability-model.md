@@ -12,7 +12,7 @@
 逸脱として載せる案（Q2=A）は、返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5、
 issue #263 Q2=A）。理由: spec が実装の正本であり、adapter の context 引数・`Control` は Phase 3/4 の予算・協調実行
 （[マニフェスト](manifesto.md) 原則 3・4）を受ける目標の形である。本文を実装に合わせるとその受け皿が spec から消える。載せたのは 2026-10-25 の整合点検で §3〜§11.1 を実装と照合して確かめた差であり、
-照合していない節（§12・§14.2 以降）の逸脱は、事実を確かめられたものから順に載せる。表は現時点で #263 D-3 の (a)〜(d) と、issue #291 の設計で事実を確かめた 2 行（scheduler の handle 経路の import、区切り文字だけの `TSUMUGI_SANDBOX`）を持つ（(e) は fix-host-function-id-unique で、file/stdin の run 層の import 展開の行は fix-import-run-from-link-graph で解消した）。上の設計ステータス段落にある現在の状態のうち、§10 の範囲の REPL の resolver gate 迂回、REPL と scheduler の handle 経路の import 展開、E9 の残りなどと、§18「実装slice」の状態注記は、まだ表へ移していない。
+照合していない節（§12・§14.2 以降）の逸脱は、事実を確かめられたものから順に載せる。表は現時点で #263 D-3 の (a)〜(d) と、issue #291 の設計で事実を確かめた 1 行（scheduler の handle 経路の import）を持つ（(e) は fix-host-function-id-unique で、区切り文字だけの `TSUMUGI_SANDBOX` の行は fix-legacy-sandbox-empty-list で、file/stdin の run 層の import 展開の行は fix-import-run-from-link-graph で解消した）。上の設計ステータス段落にある現在の状態のうち、§10 の範囲の REPL の resolver gate 迂回、REPL と scheduler の handle 経路の import 展開、E9 の残りなどと、§18「実装slice」の状態注記は、まだ表へ移していない。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱）
 
@@ -23,7 +23,6 @@ issue #263 Q2=A）。理由: spec が実装の正本であり、adapter の cont
 | 同期 adapter のメソッドが `&mut CapabilityCallContext` を取らない。実装（`src/capability.rs`）の `Clock::now_utc(&self)` は `Result<SystemTime, AdapterError>` でなく `SystemTime` を返し、`Input::read_line(&self)`・`Output::write_all(&self, bytes)`・`Output::flush(&self)`・`DirectoryHandle` と `FileHandle` の各メソッドも context 引数を持たない。`ReadLimit` 型は無く、`read_line` は上限引数を取らない | §6・§7・§8.3 | C3（Clock）、C4（Input/Output）、C5（DirectoryHandle/FileHandle） |
 | host function の呼び出し境界が目標と違う。実装（`src/host_function.rs`）に `HostCallContext` と `charge_external` は無く、`HostFunction::call(&self, arguments)` は context を取らない。`HostCallError` は `Host { category: String }` の 1 variant だけで（`#[non_exhaustive]`、derive は `Debug`）、`Control(ControlStop)` が無い | §11.1 | C8 |
 | scheduler の handle 経路（`src/engine.rs` の `Engine::compile` / `create_execution` / `start`）は `Engine::link` と resolver を経ない。初回 poll の `Evaluator::begin_execution` で評価器内蔵 `ModuleLoader` が `ExecutionContext::set_script_path` のディレクトリ（未設定なら CWD）を基準にファイルを読み、import に `module_resolver` の grant を要さない（`TSUMUGI_SANDBOX` の検査だけを受ける）。`&LinkedScript` を取らない差は [実行予算・協調実行仕様](execution-control.md) の逸脱一覧（§9.1）にある | §10 | exec-control Slice 3 PR-a |
-| legacy profile で `TSUMUGI_SANDBOX` が区切り文字と空白だけの値（`,`・` , ` など）のとき、CLI（`src/cli_capability.rs` の `build_legacy_sandbox_fs`）は host root が 0 個なのを未設定と同じに扱い、unrestricted filesystem を security warning なしで grant する。同じ値を `src/sandbox.rs` は空の許可リスト（全部拒否）と解釈する。issue #291 の再現 2 | §14.3 | C9/C10 |
 
 ## 1. 目的と規範範囲
 
