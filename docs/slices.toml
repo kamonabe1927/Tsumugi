@@ -201,11 +201,12 @@ order      = 8
 [[slice]]
 id         = "fix-limits-call-order-doc"
 title      = "src/limits.rs の MAX_USER_CALL_DEPTH の doc comment を current（深度検査が先）と target（callee 先行）に分けて書く（semantic-decisions §17.5.2、loop:drift #302 D-21）"
-status     = "ready"
+status     = "done"
 parent     = "REV-012"
 spec       = { doc = "docs/execution-control.md", section = "fix-limits-call-order-doc 実装スライス（`MAX_USER_CALL_DEPTH` の doc を current と target に分ける）" }
 acceptance = ["LCD-AT-01..02"]
 design_pr  = 309
+impl_pr    = 331
 order      = 5
 
 # issue #291（kamonabe）から作った不具合の fix 2 本。仕分けの判断待ち Q1=A・Q2=A（返信なしのため推奨案で確定）を
