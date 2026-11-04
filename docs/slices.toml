@@ -248,6 +248,7 @@ status     = "ready"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-rename-destination-delete 実装スライス（`rename` で移動先の `Delete` も要求する）" }
 acceptance = ["RDD-AT-01..02"]
+design_pr  = 332
 order      = 18
 
 [[slice]]
@@ -257,6 +258,7 @@ status     = "ready"
 parent     = "REV-015"
 spec       = { doc = "docs/capability-model.md", section = "fix-print-newline-charge 実装スライス（`print` の output 課金に改行を含める）" }
 acceptance = ["PNC-AT-01..02"]
+design_pr  = 332
 order      = 19
 
 [[slice]]
