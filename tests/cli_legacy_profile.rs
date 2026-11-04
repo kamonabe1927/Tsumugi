@@ -51,6 +51,18 @@ struct Run {
 
 /// legacy profile で script を実行する。`envs` は環境変数、`src_dir` は script を置く dir。
 fn run_legacy(use_vm: bool, src_dir: &std::path::Path, source: &str, envs: &[(&str, &str)]) -> Run {
+    run_legacy_in(use_vm, src_dir, source, envs, None)
+}
+
+/// `cwd` を指定すると子プロセスの current_dir にする。Windows の unrestricted root は CWD の
+/// volume root なので、temp 上のファイルを読むテストは CWD を同じ volume に置く。
+fn run_legacy_in(
+    use_vm: bool,
+    src_dir: &std::path::Path,
+    source: &str,
+    envs: &[(&str, &str)],
+    cwd: Option<&std::path::Path>,
+) -> Run {
     let script = src_dir.join("s.tsg");
     std::fs::write(&script, source).expect("write script");
     let mut cmd = Command::new(tsumugi_bin());
@@ -58,6 +70,9 @@ fn run_legacy(use_vm: bool, src_dir: &std::path::Path, source: &str, envs: &[(&s
         cmd.arg("--vm");
     }
     cmd.arg("--profile").arg("legacy").arg(&script);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -381,11 +396,12 @@ fn empty_string_sandbox_stays_unrestricted_with_existing_warning() {
         std::fs::write(dir.path.join("in.txt"), b"data").unwrap();
         let target = dir.path.join("in.txt");
         let target_str = target.to_str().unwrap().replace('\\', "/");
-        let r = run_legacy(
+        let r = run_legacy_in(
             use_vm,
             &dir.path,
             &format!("print(read_file(\"{}\"))", target_str),
             &[("TSUMUGI_SANDBOX", ""), ("TSUMUGI_ENV_ALLOW", "*")],
+            Some(&dir.path),
         );
         assert!(r.status_ok, "[vm={use_vm}]: {}", r.stderr);
         assert_eq!(r.stdout, "data");
