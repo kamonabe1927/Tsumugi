@@ -239,8 +239,8 @@ order      = 7
 # マージ後に PM が付け直しだけの状態整理 PR で今ある ready より前に移す。
 # fix-rename-destination-delete: 見積もり src/ +5〜15 行、触る仕組みは filesystem builtin の認可 1 つ、受入基準 2。parent は path-handle の受入試験の AUD-020。
 # fix-print-newline-charge: 見積もり src/ +2〜10 行、触る仕組みは print の output 課金 1 つ、受入基準 2。parent は I-O の budget の REV-015。
-# fix-fs-path-syntax-before-grant: 見積もり src/ +20〜50 行、触る仕組みは filesystem builtin の dispatch 1 つ、受入基準 2〜3。
-# grant が無いときの形式検査の構文（safe と legacy）が判断待ち（PR 本文の D-38 Q2）のため todo。parent は AUD-020。
+# fix-fs-path-syntax-before-grant: 見積もり src/ +40〜90 行、触る仕組みは filesystem builtin の path 検査 1 つ、受入基準 3。
+# grant が無いときの形式検査の構文は判断役が Q2=A を選んだ（PR #332）。parent は AUD-020。
 [[slice]]
 id         = "fix-rename-destination-delete"
 title      = "builtin の rename で移動先の Delete も事前要求する（capability-model §8.4、loop:drift #318 D-39）"
@@ -264,8 +264,11 @@ order      = 19
 [[slice]]
 id         = "fix-fs-path-syntax-before-grant"
 title      = "Filesystem の grant が無いときもパスの形式を先に検査し、形式の誤りを argument error にする（capability-model §8.5、loop:drift #318 D-38）"
-status     = "todo"
+status     = "ready"
 parent     = "AUD-020"
+spec       = { doc = "docs/capability-model.md", section = "fix-fs-path-syntax-before-grant 実装スライス（Filesystem の grant が無いときもパスの形式を先に検査する）" }
+acceptance = ["FPS-AT-01..03"]
+design_pr  = 332
 order      = 21
 
 # issue #290（kamonabe、「優先」）から作った不具合の fix 2 本と、その設計で見つかった関連の 1 本。

@@ -490,7 +490,7 @@ builtin mappingは固定する。`read_file`/`read_lines`は`ReadExisting`、`wr
 
 ### 8.5 Denialと存在oracle
 
-lexical path syntaxはcapability lookupより先に検証し、`PathError`をcatch可能な`RuntimeErrorCode::Argument`へ変換する。Filesystem capability自体がgrantされていないときも同じ順序で、形式の誤りは`sandbox`でなく`argument`になる（判断役が選択、loop:drift #318 D-38 Q1=A）。理由: 形式の誤りはscript自身の文字列だけで決まりhostの状態に依らないので、同じパスにgrantの有無で違う種類のerrorを返さない（[マニフェスト](manifesto.md) 原則5）。形式検査はOS/adapterを呼ばず、整った形式のパスはgrantが無ければ`sandbox`のままなので、deny-by-default（原則2）は弱まらず存在oracleにもならない。形式の誤りもgrantが無ければ`sandbox`にする案は、§8.2・§13・[次期意味論・実装決定](semantic-decisions.md)の2 channelの分離を実装に合わせて後退させるため採らない。syntaxが正しい場合だけcapability/mount/operationを調べ、不足時はadapter/OS call 0で内部`Denial`を生成する。script filesystem operationではsafe fieldだけからcatch可能なcanonical `sandbox` errorへ変換し、未捕捉なら`RuntimeError`とする。handler開始前のimport resolver denialだけはcatch不可terminal `Denied`である。存在path/不存在pathを同じpublic denial code/messageにし、absolute host path、symlink、permissionを含めない。grant済みroot内のnot-found等だけがcatch可能なcanonical `host` errorまたは既存言語意味論の`null`/`false`になれる。denyを`null`/`false`へ変換しない。
+lexical path syntaxはcapability lookupより先に検証し、`PathError`をcatch可能な`RuntimeErrorCode::Argument`へ変換する。Filesystem capability自体がgrantされていないときも同じ順序で、形式の誤りは`sandbox`でなく`argument`になる（判断役が選択、loop:drift #318 D-38 Q1=A）。検査の構文はprofileのパス構文に従い、safe profileと埋め込みhostは`FilesystemTarget::parse`、legacy profile（§14.3）はgrantが無くても`LegacyFsTranslator`と同じlexical検査のうちrootを引かない部分を使う（判断役が選択、PR #332 のD-38 Q2=A。理由はfix-fs-path-syntax-before-grantの小節）。理由: 形式の誤りはscript自身の文字列だけで決まりhostの状態に依らないので、同じパスにgrantの有無で違う種類のerrorを返さない（[マニフェスト](manifesto.md) 原則5）。形式検査はOS/adapterを呼ばず、整った形式のパスはgrantが無ければ`sandbox`のままなので、deny-by-default（原則2）は弱まらず存在oracleにもならない。形式の誤りもgrantが無ければ`sandbox`にする案は、§8.2・§13・[次期意味論・実装決定](semantic-decisions.md)の2 channelの分離を実装に合わせて後退させるため採らない。syntaxが正しい場合だけcapability/mount/operationを調べ、不足時はadapter/OS call 0で内部`Denial`を生成する。script filesystem operationではsafe fieldだけからcatch可能なcanonical `sandbox` errorへ変換し、未捕捉なら`RuntimeError`とする。handler開始前のimport resolver denialだけはcatch不可terminal `Denied`である。存在path/不存在pathを同じpublic denial code/messageにし、absolute host path、symlink、permissionを含めない。grant済みroot内のnot-found等だけがcatch可能なcanonical `host` errorまたは既存言語意味論の`null`/`false`になれる。denyを`null`/`false`へ変換しない。
 
 このargument error規定はscript runtimeのfilesystem operation用である。link層のmalformed import specifierにはscript handlerもcatchable channelも無いため適用せず、terminal `LinkError::Resolve(code: "invalid_import_specifier")`を採る（mount未登録はterminal `Denied`。§13も参照）。
 
@@ -1100,25 +1100,52 @@ loop:drift #318 の D-38 を直す。目標（§8.2・§8.5・§13）は、lexic
 `PathError` を catch 可能な `argument` error にすることで、Filesystem の grant が無いときも同じ順序である（§8.5、D-38 Q1=A）。
 実装は grant が無いと形式を見ずに `sandbox` error を返す（逸脱一覧の該当行）。
 
-**設計の残り（判断待ち、このスライスは `todo`）**: grant が無いときに、どの構文で形式を検査するかが spec で決まっていない。
-safe profile と埋め込み host（translator なし）の構文は `FilesystemTarget::parse`（`@MOUNT/...`。絶対パス・`.`・`..` は形式の誤り）、
-legacy profile の構文は `LegacyFsTranslator`（host の絶対パス・相対パスを受け付ける）で、grant が無い `CapabilitySet` はどちらの構文かを持たない。
-今の CLI で grant が無いのは safe profile と埋め込み host だけだが、fix-legacy-sandbox-empty-list（ready）の後は legacy profile でも
-grant が無くなる（区切り文字だけの `TSUMUGI_SANDBOX`）。§14.3 はそのとき「script filesystem操作はすべて§8.5の単一denial（`sandbox`）」とし、
-LSE-AT-01 も実在するファイルの `read_file` が `sandbox` で終わることを求める。判断の候補は PR 本文（loop:drift #318 D-38 の Q2）に書いた。
-判断が付いたら、この小節の実装範囲・受入基準を確定して `ready` にする。
+**grant が無いときの構文（判断役が選択、PR #332 の D-38 Q2=A）**: 形式の検査は profile のパス構文に従う。safe profile と埋め込み host は
+`FilesystemTarget::parse`（`@MOUNT/...`。絶対パス・`.`・`..` は形式の誤り）、legacy profile は grant が無くても `LegacyFsTranslator::translate` と
+同じ lexical 検査のうち root を引かない部分（空・NUL・component 内の `:`）で検査する。grant の無い legacy の set は、authority を持たない
+「legacy の構文」の印だけを持つ。理由: §8.5 の Q1=A の理由（同じパスに grant の有無で違う種類の error を返さない）を legacy でも成り立たせるには、
+grant が無いときも legacy の構文で検査するしかない。legacy の正しい形式の host パス（`/etc/passwd`・`../x`）は grant があれば `sandbox`（root の外）なので、
+grant が無くても `sandbox` のままになり、error の種類がパスの字面だけで決まる（[マニフェスト](manifesto.md) 原則5）。§14.3 の「空の許可リストでは
+すべて§8.5の単一denial」と fix-legacy-sandbox-empty-list の LSE-AT-01（filesystem group を含まない `CapabilitySetId`）も変えずに済む。印は authority を
+持たず、形式検査は adapter・OS を呼ばないので、deny-by-default（原則2）は弱まらない。採らなかった案: grant が無いときは profile にかかわらず
+`FilesystemTarget::parse` で検査する案は、legacy で `/etc/passwd` が grant の有無で `argument` と `sandbox` に分かれ、整った形式のパスに「形式が不正」と
+告げるため採らない（原則5・6）。legacy の空の許可リストで root 0 個の filesystem capability を grant する案は、何も許可していないのに set ID と
+`capability_policy_hash` が filesystem group を含み監査の見え方が実態と食い違うため採らない（原則2・7）。
 
-- **実装範囲（判断に依らない部分）**:
-  1. `src/builtin_core.rs` の `dispatch_fs` の `None` 分岐で、各 builtin の path 引数（`rename` は 2 つ）の arity・型の検査と lexical な形式検査を、
-     grant がある場合と同じ順に行ってから `sandbox` error を返す。形式検査は adapter・OS を呼ばない。
-  2. tree と VM は `dispatch_fs` を共有しているので、両方に効く。
-- **範囲外**: 形式の正しいパスの扱い（grant が無ければ従来どおり `sandbox`）、link 層の malformed import specifier（§8.5 のとおり terminal）。
-- **受入基準（案。判断の後に確定する）**:
-  - **FPS-AT-01**: safe profile で filesystem を grant しないとき、`read_file("/etc/passwd")`・`read_file("../x")` が catch 可能な `argument` error
-    （`ファイルパスの形式が不正です`）、`read_file("x.txt")`・`read_file("@data/x.txt")` が `sandbox` error になる。tree と `--vm` の両方。
-  - **FPS-AT-02**: grant があるときの同じ 4 パスの結果（形式の誤りは `argument`、root の外は `sandbox`）が変わらず、FPS-AT-01 と形式の誤りの種類が一致する。
-- **想定の変更規模**: 本体は `src/builtin_core.rs` で +20〜50 行程度（`None` 分岐で path 引数を取り出して形式を検査する関数の切り出し）。
-  テストは +60〜120 行程度。触る仕組みは filesystem builtin の dispatch 1 つ、受入基準は 2〜3 項目。
+**印の持ち方（設計役が spec で確かめた点）**: 印は `CapabilitySet` の crate 内部の値（例: `FsPathSyntax { Safe, Legacy }`、既定は `Safe`）とし、
+公開 API（`CapabilitySetBuilder` の公開メソッド）にしない。埋め込み host の構文は常に `FilesystemTarget::parse` である（§8.2）。印は
+`CapabilitySetId`・filesystem policy encoding（§3.1・§8.6）に入れない。理由: 印は grant でなく、形式の誤りに返す error の種類だけを決める。
+ID に入れると filesystem を grant しない legacy の set の ID が「filesystem group を含まない」（LSE-AT-01）以外の形で変わり、CAP-AT-28 の
+golden bytes も変わる。legacy の set は env・clock・stdin・exit などの grant で safe の set と ID が既に異なるので、監査で profile を見分けられる。
+
+- **実装範囲**:
+  1. `src/capability.rs`: `LegacyFsTranslator::translate` の root を引かない lexical 検査（空・NUL・component 内の `:`）を関数に切り出し、
+     `translate` もそれを使う（挙動は変えない）。`CapabilitySet` に crate 内部の構文の印を足し、crate 内部の builder メソッドで設定する。
+     `CapabilitySetId` の計算は変えない。
+  2. `src/cli_capability.rs`: legacy profile の set に、filesystem を grant するかどうかにかかわらず legacy の印を付ける
+     （fix-legacy-sandbox-empty-list の後に grant しない場合もそのまま legacy の構文になる。このスライスは fix-legacy-sandbox-empty-list に依存しない）。
+  3. `src/builtin_core.rs` の `dispatch_fs` の `None` 分岐で、各 builtin の arity・型の検査と path 引数（`rename` は 2 つ）の形式検査を、
+     grant がある場合と同じ順に行ってから `sandbox` error を返す。構文は印に従う（safe は `FilesystemTarget::parse`、legacy は 1 の関数）。
+     形式の誤りは `fs_route` と同じ `ARGUMENT_INVALID_PATH`（`ファイルパスの形式が不正です`）にする。印は `dispatch_fs` の呼び出し側
+     （`src/builtin.rs`・`src/vm.rs`）から渡す。tree と VM は `dispatch_fs` を共有しているので、両方に効く。
+- **範囲外**: 形式の正しいパスの扱い（grant が無ければ従来どおり `sandbox`）、link 層の malformed import specifier（§8.5 のとおり terminal）、
+  legacy の `absolutize_lexical` が CWD を読む点（既存の挙動のまま）。
+- **観測される変化**: safe profile と埋め込み host で filesystem を grant しないとき、形式の誤ったパス（絶対パス・`.`・`..` など）が
+  `sandbox` でなく catch 可能な `argument` error になる。legacy profile は今は常に filesystem を grant するので、CLI の legacy の挙動は変わらない。
+- **受入基準（fix-fs-path-syntax-before-grant）**:
+  - **FPS-AT-01**（safe・grant 無し）: safe profile で filesystem を grant しないとき、`read_file("/etc/passwd")`・`read_file("../x")` が catch 可能な
+    `argument` error（`ファイルパスの形式が不正です`）、`read_file("x.txt")`・`read_file("@data/x.txt")` が `sandbox` error になる。
+    `rename("../a", "b")` も `argument` error になる。tree と `--vm` の両方。確かめ方: `tests/cli_safe_profile.rs` の subprocess test で stderr・exit code を照合する。
+  - **FPS-AT-02**（grant の有無で一致）: safe profile で root `data` を grant したとき、FPS-AT-01 の 4 パスの error の種類が FPS-AT-01 と一致する
+    （形式の誤りは `argument`、`@data/x.txt` 以外の整った形式のパスは `sandbox` か、grant 済み root 内の not-found の `host`）。tree と `--vm` の両方。
+    確かめ方: FPS-AT-01 と同じ test。
+  - **FPS-AT-03**（legacy の印）: legacy の印を付けて filesystem を grant しない set で、`read_file("/etc/passwd")`・`read_file("../x")` が `sandbox` error、
+    NUL を含むパスが `argument` error になり、印の有無で `CapabilitySetId` が変わらない。tree と VM の両方。
+    確かめ方: `src/` の `#[cfg(test)]` の test（crate 内部の builder で印を付ける）。
+- **想定の変更規模**: 本体（`#[cfg(test)]` を除く `src/`）は `src/capability.rs`・`src/builtin_core.rs`・`src/cli_capability.rs`・`src/builtin.rs`・`src/vm.rs` で
+  +40〜90 行程度（lexical 検査の切り出し、印の field と builder メソッド、`None` 分岐の形式検査、呼び出し側の引数）。テストは +100〜180 行程度。
+  触る仕組みは filesystem builtin の path 検査 1 つ、受入基準は 3 項目で、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
+  done にする実装 PR で、逸脱一覧の「Filesystem の grant が無いとき」の行と、[言語仕様](language-spec.md)「現在の既知非適合」の該当項目を削除する。
 
 ### fix-rename-destination-delete 実装スライス（`rename` で移動先の `Delete` も要求する）
 
