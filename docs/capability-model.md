@@ -12,7 +12,7 @@
 逸脱として載せる案（Q2=A）は、返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5、
 issue #263 Q2=A）。理由: spec が実装の正本であり、adapter の context 引数・`Control` は Phase 3/4 の予算・協調実行
 （[マニフェスト](manifesto.md) 原則 3・4）を受ける目標の形である。本文を実装に合わせるとその受け皿が spec から消える。載せたのは 2026-10-25 の整合点検で §3〜§11.1 を実装と照合して確かめた差であり、
-照合していない節（§12・§14.2 以降）の逸脱は、事実を確かめられたものから順に載せる。表は現時点で #263 D-3 の (a)〜(d) と、issue #291 の設計で事実を確かめた 2 行（scheduler の handle 経路の import、区切り文字だけの `TSUMUGI_SANDBOX`）を持つ（(e) は fix-host-function-id-unique で、file/stdin の run 層の import 展開の行は fix-import-run-from-link-graph で解消した）。上の設計ステータス段落にある現在の状態のうち、§10 の範囲の REPL の resolver gate 迂回、REPL と scheduler の handle 経路の import 展開、E9 の残りなどと、§18「実装slice」の状態注記は、まだ表へ移していない。
+照合していない節（§12・§14.2 以降）の逸脱は、事実を確かめられたものから順に載せる。表は現時点で #263 D-3 の (a)〜(d) と、issue #291 の設計で事実を確かめた 2 行（scheduler の handle 経路の import、区切り文字だけの `TSUMUGI_SANDBOX`）を持つ（(e) は fix-host-function-id-unique で、file/stdin の run 層の import 展開の行は fix-import-run-from-link-graph で解消した）。loop:drift #318 の D-38〜D-41 で、パスの形式検査と grant の検査の順序、`rename` の移動先の `Delete`、byte 上限 N の境界、`print` の改行の課金の 4 行を足した。上の設計ステータス段落にある現在の状態のうち、§10 の範囲の REPL の resolver gate 迂回、REPL と scheduler の handle 経路の import 展開、E9 の残りなどと、§18「実装slice」の状態注記は、まだ表へ移していない。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱）
 
@@ -24,6 +24,10 @@ issue #263 Q2=A）。理由: spec が実装の正本であり、adapter の cont
 | host function の呼び出し境界が目標と違う。実装（`src/host_function.rs`）に `HostCallContext` と `charge_external` は無く、`HostFunction::call(&self, arguments)` は context を取らない。`HostCallError` は `Host { category: String }` の 1 variant だけで（`#[non_exhaustive]`、derive は `Debug`）、`Control(ControlStop)` が無い | §11.1 | C8 |
 | scheduler の handle 経路（`src/engine.rs` の `Engine::compile` / `create_execution` / `start`）は `Engine::link` と resolver を経ない。初回 poll の `Evaluator::begin_execution` で評価器内蔵 `ModuleLoader` が `ExecutionContext::set_script_path` のディレクトリ（未設定なら CWD）を基準にファイルを読み、import に `module_resolver` の grant を要さない（`TSUMUGI_SANDBOX` の検査だけを受ける）。`&LinkedScript` を取らない差は [実行予算・協調実行仕様](execution-control.md) の逸脱一覧（§9.1）にある | §10 | exec-control Slice 3 PR-a |
 | legacy profile で `TSUMUGI_SANDBOX` が区切り文字と空白だけの値（`,`・` , ` など）のとき、CLI（`src/cli_capability.rs` の `build_legacy_sandbox_fs`）は host root が 0 個なのを未設定と同じに扱い、unrestricted filesystem を security warning なしで grant する。同じ値を `src/sandbox.rs` は空の許可リスト（全部拒否）と解釈する。issue #291 の再現 2 | §14.3 | C9/C10 |
+| Filesystem の grant が無いとき、script のファイルシステム操作はパスの形式を検査せずに `sandbox` error を返す（`src/builtin_core.rs` の `dispatch_fs` の `None => filesystem_denied`）。目標は lexical なパスの形式検査を capability の有無より先に行い、`PathError` を catch 可能な `argument` error にすることである。grant があるときは形式検査が先に行われる（`fs_route`）。順序を固定するテストは無い。loop:drift #318 D-38 | §8.2・§8.5・§13 | C5 |
+| builtin の `rename` は常に上書き版（`replace=true`）で adapter を呼ぶが、移動元の `Delete` と移動先の `Create` だけを検査し、移動先の `Delete` を要求しない（`src/builtin_core.rs` の `rename`）。OS adapter は root をまたぐ rename を fail closed にする（`src/capability.rs` の `OsDirectoryHandle` の rename）ので CLI では移動先の `Delete` 不足で上書きされることは無いが、root をまたげる埋め込み host の adapter では移動先の `Delete` なしで上書きできる。loop:drift #318 D-39 | §8.4 | C5 |
+| 有限の byte 上限 N で N+1 byte を溜める前に止める規定が、file の読み込みと module source では未実装である。`read_file` / `read_lines` は `read_to_end` で全部読んでから課金し（`src/builtin_core.rs`）、link 時の module source も上限を見ずに全部読む（`src/embedding.rs` の `read_module_source`、`src/capability.rs` の OS の `ModuleSource::read_chunk`）。CAP-AT-15 と CAP-AT-17 の byte の境界のテストは無い（CAP-AT-17 のテストは module の本数の境界だけ）。loop:drift #318 D-40 | §7・§10・§19 | C11 |
+| `print` の output 課金に改行の 1 byte が入らない。tree（`src/builtin.rs` の `apply_print`）と VM（`src/vm.rs`）はどちらも `parts.join(" ")` の byte 長だけを `charge_output` へ渡し、adapter へは改行を足した bytes を書く。`TSUMUGI_MAX_OUTPUT_BYTES=2` で `print("ab")` が成功する。loop:drift #318 D-41 | §7 | REV-015 Slice 2 |
 
 ## 1. 目的と規範範囲
 
@@ -480,13 +484,13 @@ adapter契約:
 | `rename` replace |  |  | ✓(to) | ✓(from+to) |  |  |  |  |
 | Tsumugi import |  |  |  |  |  |  | ✓ |  |
 
-builtin mappingは固定する。`read_file`/`read_lines`は`ReadExisting`、`write_file`は`Upsert { Truncate }`、`append_file`は`Upsert { Append }`を使う。upsertはfileの存在を調べずWrite+Createを事前要求する。現行言語に`WriteExisting`/`CreateNew`専用builtinはなく、これらは将来またはhost adapter用である。`remove`は`FileOrSymlink`、`remove_dir`は`EmptyDirectory`（空directoryのみ。非空は削除しない）を使う。再帰削除は`remove_tree`が`RemoveKind::Tree`＋専用`RecursiveDelete`権限で行い、`EmptyDirectory`から暗黙昇格しない（REV-021 §17.6）。final/中間symlinkはリンク先を辿らずリンク自体を削除する。`PublicMetadata`は時刻、owner、absolute pathを公開せず、`DirectoryEntry.name`が空、`.`、`..`、separator含有ならadapter contract violationとしてHostErrorにする。
+builtin mappingは固定する。`read_file`/`read_lines`は`ReadExisting`、`write_file`は`Upsert { Truncate }`、`append_file`は`Upsert { Append }`を使う。upsertはfileの存在を調べずWrite+Createを事前要求する。`rename`は上書き版（上の表の「`rename` replace」、§8.3 adapter契約6の`replace=true`）を使い、移動先の存在を調べずに移動元の`Delete`、移動先の`Create`と`Delete`を事前要求する（判断役が選択、loop:drift #318 D-39 Q1=A）。理由: 実装が実際に行う操作（`replace=true`）が要する権限を明示的に要求し（[マニフェスト](manifesto.md) 原則2）、upsertと同じく存在を調べない事前要求にして存在oracle（§8.5）を作らない。移動先が既にあれば失敗する非上書き版にする案は、既存の移動先があるとき今は成功する`rename`を`host` errorに変える言語挙動の変更で、specのどこにも要求されていないため採らない。現行言語に`WriteExisting`/`CreateNew`専用builtinはなく、これらは将来またはhost adapter用である。`remove`は`FileOrSymlink`、`remove_dir`は`EmptyDirectory`（空directoryのみ。非空は削除しない）を使う。再帰削除は`remove_tree`が`RemoveKind::Tree`＋専用`RecursiveDelete`権限で行い、`EmptyDirectory`から暗黙昇格しない（REV-021 §17.6）。final/中間symlinkはリンク先を辿らずリンク自体を削除する。`PublicMetadata`は時刻、owner、absolute pathを公開せず、`DirectoryEntry.name`が空、`.`、`..`、separator含有ならadapter contract violationとしてHostErrorにする。
 
 `Import`はruntime `Read`と独立する。filesystem resolverが内部でImport rootを使う。Readだけでimportできず、Importだけで`read_file`できない。
 
 ### 8.5 Denialと存在oracle
 
-lexical path syntaxはcapability lookupより先に検証し、`PathError`をcatch可能な`RuntimeErrorCode::Argument`へ変換する。syntaxが正しい場合だけcapability/mount/operationを調べ、不足時はadapter/OS call 0で内部`Denial`を生成する。script filesystem operationではsafe fieldだけからcatch可能なcanonical `sandbox` errorへ変換し、未捕捉なら`RuntimeError`とする。handler開始前のimport resolver denialだけはcatch不可terminal `Denied`である。存在path/不存在pathを同じpublic denial code/messageにし、absolute host path、symlink、permissionを含めない。grant済みroot内のnot-found等だけがcatch可能なcanonical `host` errorまたは既存言語意味論の`null`/`false`になれる。denyを`null`/`false`へ変換しない。
+lexical path syntaxはcapability lookupより先に検証し、`PathError`をcatch可能な`RuntimeErrorCode::Argument`へ変換する。Filesystem capability自体がgrantされていないときも同じ順序で、形式の誤りは`sandbox`でなく`argument`になる（判断役が選択、loop:drift #318 D-38 Q1=A）。理由: 形式の誤りはscript自身の文字列だけで決まりhostの状態に依らないので、同じパスにgrantの有無で違う種類のerrorを返さない（[マニフェスト](manifesto.md) 原則5）。形式検査はOS/adapterを呼ばず、整った形式のパスはgrantが無ければ`sandbox`のままなので、deny-by-default（原則2）は弱まらず存在oracleにもならない。形式の誤りもgrantが無ければ`sandbox`にする案は、§8.2・§13・[次期意味論・実装決定](semantic-decisions.md)の2 channelの分離を実装に合わせて後退させるため採らない。syntaxが正しい場合だけcapability/mount/operationを調べ、不足時はadapter/OS call 0で内部`Denial`を生成する。script filesystem operationではsafe fieldだけからcatch可能なcanonical `sandbox` errorへ変換し、未捕捉なら`RuntimeError`とする。handler開始前のimport resolver denialだけはcatch不可terminal `Denied`である。存在path/不存在pathを同じpublic denial code/messageにし、absolute host path、symlink、permissionを含めない。grant済みroot内のnot-found等だけがcatch可能なcanonical `host` errorまたは既存言語意味論の`null`/`false`になれる。denyを`null`/`false`へ変換しない。
 
 このargument error規定はscript runtimeのfilesystem operation用である。link層のmalformed import specifierにはscript handlerもcatchable channelも無いため適用せず、terminal `LinkError::Resolve(code: "invalid_import_specifier")`を採る（mount未登録はterminal `Denied`。§13も参照）。
 
@@ -1090,6 +1094,76 @@ security warning なしで許可する（逸脱一覧の該当行）。同じ値
   done にする実装 PR で、逸脱一覧の「legacy profile で `TSUMUGI_SANDBOX` が区切り文字と空白だけの値のとき」の行を削除し、
   [言語仕様](language-spec.md)「現在の既知非適合」の区切り文字と空白だけの `TSUMUGI_SANDBOX` の項目を削除する。
 
+### fix-fs-path-syntax-before-grant 実装スライス（Filesystem の grant が無いときもパスの形式を先に検査する）
+
+loop:drift #318 の D-38 を直す。目標（§8.2・§8.5・§13）は、lexical なパスの形式検査を capability の有無より先に行い、
+`PathError` を catch 可能な `argument` error にすることで、Filesystem の grant が無いときも同じ順序である（§8.5、D-38 Q1=A）。
+実装は grant が無いと形式を見ずに `sandbox` error を返す（逸脱一覧の該当行）。
+
+**設計の残り（判断待ち、このスライスは `todo`）**: grant が無いときに、どの構文で形式を検査するかが spec で決まっていない。
+safe profile と埋め込み host（translator なし）の構文は `FilesystemTarget::parse`（`@MOUNT/...`。絶対パス・`.`・`..` は形式の誤り）、
+legacy profile の構文は `LegacyFsTranslator`（host の絶対パス・相対パスを受け付ける）で、grant が無い `CapabilitySet` はどちらの構文かを持たない。
+今の CLI で grant が無いのは safe profile と埋め込み host だけだが、fix-legacy-sandbox-empty-list（ready）の後は legacy profile でも
+grant が無くなる（区切り文字だけの `TSUMUGI_SANDBOX`）。§14.3 はそのとき「script filesystem操作はすべて§8.5の単一denial（`sandbox`）」とし、
+LSE-AT-01 も実在するファイルの `read_file` が `sandbox` で終わることを求める。判断の候補は PR 本文（loop:drift #318 D-38 の Q2）に書いた。
+判断が付いたら、この小節の実装範囲・受入基準を確定して `ready` にする。
+
+- **実装範囲（判断に依らない部分）**:
+  1. `src/builtin_core.rs` の `dispatch_fs` の `None` 分岐で、各 builtin の path 引数（`rename` は 2 つ）の arity・型の検査と lexical な形式検査を、
+     grant がある場合と同じ順に行ってから `sandbox` error を返す。形式検査は adapter・OS を呼ばない。
+  2. tree と VM は `dispatch_fs` を共有しているので、両方に効く。
+- **範囲外**: 形式の正しいパスの扱い（grant が無ければ従来どおり `sandbox`）、link 層の malformed import specifier（§8.5 のとおり terminal）。
+- **受入基準（案。判断の後に確定する）**:
+  - **FPS-AT-01**: safe profile で filesystem を grant しないとき、`read_file("/etc/passwd")`・`read_file("../x")` が catch 可能な `argument` error
+    （`ファイルパスの形式が不正です`）、`read_file("x.txt")`・`read_file("@data/x.txt")` が `sandbox` error になる。tree と `--vm` の両方。
+  - **FPS-AT-02**: grant があるときの同じ 4 パスの結果（形式の誤りは `argument`、root の外は `sandbox`）が変わらず、FPS-AT-01 と形式の誤りの種類が一致する。
+- **想定の変更規模**: 本体は `src/builtin_core.rs` で +20〜50 行程度（`None` 分岐で path 引数を取り出して形式を検査する関数の切り出し）。
+  テストは +60〜120 行程度。触る仕組みは filesystem builtin の dispatch 1 つ、受入基準は 2〜3 項目。
+
+### fix-rename-destination-delete 実装スライス（`rename` で移動先の `Delete` も要求する）
+
+loop:drift #318 の D-39 を直す。builtin の `rename` は上書き版（`replace=true`）で、移動先の存在を調べずに移動元の `Delete`、
+移動先の `Create` と `Delete` を事前要求する（§8.4 の builtin mapping、D-39 Q1=A）。実装は移動先の `Delete` を検査しない（逸脱一覧の該当行）。
+
+- **実装範囲**:
+  1. `src/builtin_core.rs` の `rename` で、`to` を `Create` で route した後、同じ root の operations に `Delete` が無ければ、
+     adapter call 0 のまま catch 可能な `sandbox` error（`filesystem_denied`）を返す。移動先の存在は調べない（§8.5 の存在 oracle を作らない）。
+  2. 検査の順は、移動元の route（`Delete`）→ 移動先の route（`Create`）→ 移動先の `Delete` とする。canonical resource label の扱いは
+     `fs_route` の既存の規則（認可が通った時点で確定）を変えない。
+  3. tree と VM は `dispatch_fs` を共有しているので、両方に効く。adapter の `rename` 契約（§8.3 契約6）と OS adapter は変えない。
+- **範囲外**: 非上書き版の builtin（現行言語に無い）、root をまたぐ rename を OS adapter で実装すること（今は fail closed）。
+- **観測される変化**: 移動元と移動先が同じ root のとき（CLI の今の唯一の成功経路）は、必要な権限が今と同じ（その root の `Delete` と `Create`）なので変わらない。
+  移動先の root に `Create` があって `Delete` が無いときは、adapter を呼ぶ前に `sandbox` error になる（今は adapter まで進み、OS adapter では root をまたぐ rename の `host` error）。
+- **受入基準（fix-rename-destination-delete）**:
+  - **RDD-AT-01**: 移動元の root に `Delete`、移動先の root に `Create` だけを grant したとき、`rename` は catch 可能な `sandbox` error になり、
+    adapter の `rename` は呼ばれない（呼び出しを数える adapter で 0 回）。移動先のファイルが有るときと無いときで同じ error になる。tree と VM の両方。
+    確かめ方: 埋め込み API（`CapabilitySet` に呼び出しを数える `DirectoryHandle` を grant する）の test。
+  - **RDD-AT-02**: 移動先の root に `Create` と `Delete` があり移動元に `Delete` があるとき、adapter の `rename` が `replace=true` で 1 回呼ばれる。
+    同じ root の `rename` の既存のテスト（CLI の `--fs-op`）が期待値を変えずに通る。tree と VM の両方。
+- **想定の変更規模**: 本体は `src/builtin_core.rs` で +5〜15 行。テストは +80〜150 行程度。触る仕組みは filesystem builtin の認可 1 つ、受入基準は 2 項目。
+  done にする実装 PR で、逸脱一覧の「builtin の `rename` は常に上書き版」の行を削除する。
+
+### fix-print-newline-charge 実装スライス（`print` の output 課金に改行を含める）
+
+loop:drift #318 の D-41 を直す。§7 は「grant時はUTF-8 bytes+改行をlogical write前に一括chargeする」と定めるが、tree・VM とも
+`parts.join(" ")` の byte 長だけを課金し、改行の 1 byte を含めない（逸脱一覧の該当行）。
+
+- **実装範囲**:
+  1. `src/builtin.rs` の `apply_print`（tree）と `src/vm.rs` の print の課金で、`charge_output` に渡す byte 数を「payload の UTF-8 byte 長 + 1」にする。
+     課金は従来どおり Stdout authority の検査と adapter の write より前に行う。adapter へ渡す bytes（`resolve_print` が改行を足す）は変えない。
+  2. 加算は checked にする（`u64` の加算。overflow は既存の上限超過と同じ扱いでよい）。
+- **範囲外**: `input` の課金、output の呼び出し回数の課金、REPL のプロンプトやバナー（CLI の出力で script の output ではない）。
+- **観測される変化**: `output_bytes`（`charge_output` が同じ量を計上する `host_request_bytes`・`host_call_bytes` も）の計上が `print` 1 回につき 1 byte 増え、`TSUMUGI_MAX_OUTPUT_BYTES` の境界が改行を含めた byte 数になる。
+- **受入基準（fix-print-newline-charge）**:
+  - **PNC-AT-01**（N 境界）: `TSUMUGI_MAX_OUTPUT_BYTES=3` で `print("ab")` は成功し、`TSUMUGI_MAX_OUTPUT_BYTES=2` で `print("ab")` は
+    `output の総バイト数が上限を超えました` で止まって stdout に何も書かれない（Output の write 0）。tree と `--vm` の両方。
+    確かめ方: `tests/integration.rs` の subprocess test（既存の `output_bytes_limit_gates_print_in_both_engines` と同じ形）。
+  - **PNC-AT-02**（計上）: `print("ab")` と `print()` の後の `output_bytes` が 3 と 1 で、tree と VM で一致する。
+    確かめ方: 埋め込み API の usage（`committed.output_bytes`）を照合する test。既存の `output_bytes` を照合するテスト（`tests/differential.rs`・
+    `tests/vm_builtin_call_lowering.rs` など）は tree と VM の一致を見るもので、期待値が変わるものがあれば改行分を足して直す。
+- **想定の変更規模**: 本体は `src/builtin.rs` と `src/vm.rs` で +2〜10 行。テストは +40〜80 行程度。触る仕組みは print の output 課金 1 つ、受入基準は 2 項目。
+  done にする実装 PR で、逸脱一覧の「`print` の output 課金に改行の 1 byte が入らない」の行を削除する。
+
 ## 19. 受入基準
 
 | ID | Phase | 基準 |
@@ -1109,17 +1183,17 @@ security warning なしで許可する（逸脱一覧の該当行）。同じ値
 | CAP-AT-13 | 2 | FS operation matrix全組合せで1 authority欠落ごとI/O前に内部Denialを生成。script operationはcatch可能sandbox error、未捕捉時RuntimeError |
 | CAP-AT-14 | 2 | secure resolution不能adapterはfail closed、文字列fallback 0。script operationはcatch可能host error、未捕捉時RuntimeError |
 | CAP-AT-15 | 3 | file read/write N-1/N成功、N+1はallocation/write前BudgetExceeded |
-| CAP-AT-16 | 2 | importありresolverなしはresolver call 0のterminal Denied。grant時linkだけ、run 0（C6-cで実装・テスト済み: `cap_at_16_*` / `emb_at_05_run_does_not_call_resolver`） |
+| CAP-AT-16 | 2 | importありresolverなしはresolver call 0のterminal Denied。grant時linkだけ、run 0 |
 | CAP-AT-17 | 3 | source N-1/N成功、N+1はchunk蓄積前拒否 |
 | CAP-AT-18 | 2 | exit capabilityなしはprocess/OS call 0のcatch可能capability error（未捕捉時RuntimeError）、あり0/255 Exited、-1/256 RuntimeError、process継続 |
 | CAP-AT-19 | 2/3 | Phase 2でregistered/granted 4組合せとarity。ungrantedはcallback 0のcatch可能capability error（未捕捉時RuntimeError）。Phase 3でfuel N-1/N/N+1 |
 | CAP-AT-20 | 2 | catalog/tree/VM/compiler/generated docsの名前・arity・metadata完全一致、重複build error |
 | CAP-AT-21 | 2/3 | callback success/catch可能host error/panicを分離。Phase 3でresult N+1 BudgetExceeded。link前host failureはterminal HostError |
 | CAP-AT-22 | 2/6 | Omit/TypeOnly/LengthOnly serializerにfake secret本文0。Phase 6でsink eventも同じ |
-| CAP-AT-23 | 2 | safe profileでroot source読込みとprofile builderが明示grantしたstdout以外ambient call 0。`--deny-stdout`時はstdout call 0。`--fs-op`は6トークン対応操作のみmapping一致（RecursiveDelete/ImportはCLI非対象で`remove_tree`は常にdeny）。C6-cで`--allow-import-root`は`module_resolver`をgrantするためset IDが変化し、tree経路の`@NAME/...`がlink層で実効化される（unqualifiedは`default`へrouting。run層はlink層が読んだsourceを展開するので、`@NAME/...`のimportはrunまでend-to-endで実行できる。§10）。E9で同じgrant経路はVM file/stdinにも効く（VM safe setも`--allow-import-root`で`module_resolver` groupを含むset IDになる） |
+| CAP-AT-23 | 2 | safe profileでroot source読込みとprofile builderが明示grantしたstdout以外ambient call 0。`--deny-stdout`時はstdout call 0。`--fs-op`は6トークン対応操作のみmapping一致（RecursiveDelete/ImportはCLI非対象で`remove_tree`は常にdeny）。`--allow-import-root`は`module_resolver`をgrantし（tree・VMともset IDが`module_resolver` groupを含む）、`@NAME/...`のimportをlink層で解決する（unqualifiedは`default`へrouting）。run層はlink層が読んだsourceを展開するので、`@NAME/...`のimportはrunまでend-to-endで実行できる（§10） |
 | CAP-AT-24 | 2/6 | legacy互換、empty sandbox/env allowはstderr warning各1。区切り文字と空白だけの`TSUMUGI_SANDBOX`（実質空）はfilesystem grant 0で全filesystem操作がcatch可能sandbox error、stderr warning 1（§14.3）。legacy symlinkは`FollowWithinRoot`、root選択曖昧はprofile構築error（exit 1）。Phase 6でも別eventを追加せずcanonical schemaとfail-closedを維持 |
 | CAP-AT-25 | N | 本revisionはN-1を飛ばしsafe既定（N相当）を採るため、golden は「無指定=safe」vs「`--profile legacy`」のprofile選択差2点へ縮退して固定する |
-| CAP-AT-26 | 2 | safeで旧環境変数変更がset ID/挙動へ影響0。射程はruntime fs/env/clock/stdin/exit/stdoutのcapability経路に限る。import解決はlink層（capability gate）とrun層（実import展開）の2層で動く。C6-cでtree file/stdinの、E9でVM file/stdinの**link層**import gateがEngine resolver（capability）へ移行し`sandbox.rs`/`TSUMUGI_SANDBOX`非依存になった。**run層**もlink層が読んだsourceから展開する（§10）ので、tree/VM file/stdinのimportは`sandbox.rs`/`TSUMUGI_SANDBOX`に依存しない。`sandbox.rs`/`TSUMUGI_SANDBOX`依存はtree REPL・VM REPLの`ModuleLoader`経路だけに残る（既知の設計、設計ステータス段落）。本fixtureは引き続きimportを含めない |
+| CAP-AT-26 | 2 | safeで旧環境変数変更がset ID/挙動へ影響0。射程はruntime fs/env/clock/stdin/exit/stdoutのcapability経路に限る。import解決はlink層（Engine resolverによるcapability gate）とrun層（link層が読んだsourceの展開、§10）の2層で動き、どちらも`sandbox.rs`/`TSUMUGI_SANDBOX`に依存しない。本fixtureはimportを含めない |
 | CAP-AT-27 | 2 | adapter/CLI以外のprocess env、runtime fs、stdio、process exit、ambient clock直接利用0 |
 | CAP-AT-28 | 2 | CapabilitySetId/filesystem encodingのgolden bytes/hash固定 |
 | CAP-AT-29 | 2 | 複数mount qualified/default/missing/duplicateのroutingを完全一致検証 |

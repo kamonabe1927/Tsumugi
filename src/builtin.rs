@@ -314,7 +314,7 @@ impl Evaluator {
         self.budget
             .charge_output(payload.len() as u64, ExecutionPhase::Run)
             .map_err(|stop| self.control_stop_to_error(stop, line))?;
-        // C4（CAP-AT-07）: Stdout authority を consult してから adapter へ write する。
+        // C4（CAP-AT-08）: Stdout authority を consult してから adapter へ write する。
         // 未 grant は adapter call 0 の catch 可能な `capability` error。
         crate::builtin_core::resolve_print(self.capabilities().stdout(), &payload, line)?;
         Ok(Value::Null)
@@ -431,7 +431,7 @@ impl Evaluator {
                 if !args.is_empty() {
                     return Err(TsumugiError::builtin_arity(line, "input", 0, args.len()));
                 }
-                // C4（CAP-AT-08）: Stdin authority を consult する。未 grant は adapter call 0 の
+                // C4（CAP-AT-07）: Stdin authority を consult する。未 grant は adapter call 0 の
                 // catch 可能な `capability` error。EOF は null、host 失敗は catch 可能な `host` error。
                 let value = crate::builtin_core::resolve_input(self.capabilities().stdin(), line)?;
                 // input（stdio host call）を課金する（§6.1、REV-015 Slice 2）。受け取った

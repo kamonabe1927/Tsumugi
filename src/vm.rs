@@ -1597,7 +1597,7 @@ impl Vm {
                 self.budget
                     .charge_output(payload.len() as u64, ExecutionPhase::Run)
                     .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
-                // C4（CAP-AT-07）: Stdout authority を consult してから adapter へ write する。
+                // C4（CAP-AT-08）: Stdout authority を consult してから adapter へ write する。
                 // tree engine（builtin.rs の print）と同じ共有ロジックを通す。
                 crate::builtin_core::resolve_print(self.capabilities.stdout(), &payload, line)?;
             }
@@ -2221,7 +2221,7 @@ impl Vm {
         match name {
             "input" => {
                 crate::builtin_core::check_arity(name, &args, 0, line)?;
-                // C4（CAP-AT-08）: Stdin authority を consult する。tree engine と同じ共有
+                // C4（CAP-AT-07）: Stdin authority を consult する。tree engine と同じ共有
                 // ロジック（`resolve_input`）を通す。未 grant は catch 可能な `capability` error、
                 // EOF は null、host 失敗は catch 可能な `host` error。
                 let value = crate::builtin_core::resolve_input(self.capabilities.stdin(), line)?;
