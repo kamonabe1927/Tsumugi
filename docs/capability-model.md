@@ -1131,13 +1131,14 @@ golden bytes も変わる。legacy の set は env・clock・stdin・exit など
 - **範囲外**: 形式の正しいパスの扱い（grant が無ければ従来どおり `sandbox`）、link 層の malformed import specifier（§8.5 のとおり terminal）、
   legacy の `absolutize_lexical` が CWD を読む点（既存の挙動のまま）。
 - **観測される変化**: safe profile と埋め込み host で filesystem を grant しないとき、形式の誤ったパス（絶対パス・`.`・`..` など）が
-  `sandbox` でなく catch 可能な `argument` error になる。legacy profile は今は常に filesystem を grant するので、CLI の legacy の挙動は変わらない。
+  `sandbox` でなく catch 可能な `argument` error になる。grant が無いときの arity・型の誤り（`read_file()`・`read_file(1)` など）も、grant があるときと同じく `sandbox` でなく arity・型の error になる（実装範囲 3 の帰結。今は `None` 分岐が arity・型の検査より先に `sandbox` を返す）。legacy profile は今は常に filesystem を grant するので、CLI の legacy の挙動は変わらない。
 - **受入基準（fix-fs-path-syntax-before-grant）**:
   - **FPS-AT-01**（safe・grant 無し）: safe profile で filesystem を grant しないとき、`read_file("/etc/passwd")`・`read_file("../x")` が catch 可能な
     `argument` error（`ファイルパスの形式が不正です`）、`read_file("x.txt")`・`read_file("@data/x.txt")` が `sandbox` error になる。
     `rename("../a", "b")` も `argument` error になる。tree と `--vm` の両方。確かめ方: `tests/cli_safe_profile.rs` の subprocess test で stderr・exit code を照合する。
-  - **FPS-AT-02**（grant の有無で一致）: safe profile で root `data` を grant したとき、FPS-AT-01 の 4 パスの error の種類が FPS-AT-01 と一致する
-    （形式の誤りは `argument`、`@data/x.txt` 以外の整った形式のパスは `sandbox` か、grant 済み root 内の not-found の `host`）。tree と `--vm` の両方。
+  - **FPS-AT-02**（grant の有無で一致）: safe profile で root `data` だけを grant したとき（`x.txt` は無い）、`read_file("/etc/passwd")`・`read_file("../x")` は
+    `argument` error（FPS-AT-01 と一致）、`read_file("x.txt")` は `sandbox` error（mount `default` が未登録）、`read_file("@data/x.txt")` は
+    grant 済み root 内の not-found の catch 可能な `host` error になる。grant の有無で一致するのは形式の誤りの 2 パスである。tree と `--vm` の両方。
     確かめ方: FPS-AT-01 と同じ test。
   - **FPS-AT-03**（legacy の印）: legacy の印を付けて filesystem を grant しない set で、`read_file("/etc/passwd")`・`read_file("../x")` が `sandbox` error、
     NUL を含むパスが `argument` error になり、印の有無で `CapabilitySetId` が変わらない。tree と VM の両方。
@@ -1167,6 +1168,7 @@ loop:drift #318 の D-39 を直す。builtin の `rename` は上書き版（`rep
     確かめ方: 埋め込み API（`CapabilitySet` に呼び出しを数える `DirectoryHandle` を grant する）の test。
   - **RDD-AT-02**: 移動先の root に `Create` と `Delete` があり移動元に `Delete` があるとき、adapter の `rename` が `replace=true` で 1 回呼ばれる。
     同じ root の `rename` の既存のテスト（CLI の `--fs-op`）が期待値を変えずに通る。tree と VM の両方。
+    確かめ方: RDD-AT-01 と同じ呼び出しを数える `DirectoryHandle` の埋め込み API test で、`rename` の呼び出し回数（1 回）と `replace` 引数（`true`）を照合する。既存のテストはそのまま通す。
 - **想定の変更規模**: 本体は `src/builtin_core.rs` で +5〜15 行。テストは +80〜150 行程度。触る仕組みは filesystem builtin の認可 1 つ、受入基準は 2 項目。
   done にする実装 PR で、逸脱一覧の「builtin の `rename` は常に上書き版」の行を削除する。
 
@@ -1180,7 +1182,7 @@ loop:drift #318 の D-41 を直す。§7 は「grant時はUTF-8 bytes+改行をl
      課金は従来どおり Stdout authority の検査と adapter の write より前に行う。adapter へ渡す bytes（`resolve_print` が改行を足す）は変えない。
   2. 加算は checked にする（`u64` の加算。overflow は既存の上限超過と同じ扱いでよい）。
 - **範囲外**: `input` の課金、output の呼び出し回数の課金、REPL のプロンプトやバナー（CLI の出力で script の output ではない）。
-- **観測される変化**: `output_bytes`（`charge_output` が同じ量を計上する `host_request_bytes`・`host_call_bytes` も）の計上が `print` 1 回につき 1 byte 増え、`TSUMUGI_MAX_OUTPUT_BYTES` の境界が改行を含めた byte 数になる。
+- **観測される変化**: `output_bytes`（`charge_output` が同じ量を計上する `host_request_bytes`・`host_call_bytes` も）の計上と、tree の `BudgetCharged` 監査 event の量（output・host request・host call の bytes。`src/budget.rs` の課金の funnel を通る）が `print` 1 回につき 1 byte 増え、`TSUMUGI_MAX_OUTPUT_BYTES` の境界が改行を含めた byte 数になる。
 - **受入基準（fix-print-newline-charge）**:
   - **PNC-AT-01**（N 境界）: `TSUMUGI_MAX_OUTPUT_BYTES=3` で `print("ab")` は成功し、`TSUMUGI_MAX_OUTPUT_BYTES=2` で `print("ab")` は
     `output の総バイト数が上限を超えました` で止まって stdout に何も書かれない（Output の write 0）。tree と `--vm` の両方。
