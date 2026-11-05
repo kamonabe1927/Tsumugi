@@ -1548,6 +1548,12 @@ pub fn resolve_input(
     }
 }
 
+/// `print` の output 課金量（第7節: UTF-8 bytes + 改行）。payload の byte 長に改行の 1 byte を
+/// 飽和加算で足す（overflow は上限超過と同じ扱いにするため `u64::MAX`）。tree と VM が共有する。
+pub(crate) fn print_charge_bytes(payload: &str) -> u64 {
+    (payload.len() as u64).saturating_add(1)
+}
+
 /// `print` を解決する共通ロジック（Phase 2 C4、CAP-AT-08）。tree/VM 両 engine が使う。
 ///
 /// - 引数の評価・join・budget 課金は呼び出し側が済ませ、logical write 対象の `payload` を渡す。

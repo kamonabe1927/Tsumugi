@@ -312,7 +312,10 @@ impl Evaluator {
         // output（stdio host call）を課金する（§6.1、REV-015 Slice 2、I-O accounting）。
         // payload を host へ渡す前に課金する。
         self.budget
-            .charge_output(payload.len() as u64, ExecutionPhase::Run)
+            .charge_output(
+                crate::builtin_core::print_charge_bytes(&payload),
+                ExecutionPhase::Run,
+            )
             .map_err(|stop| self.control_stop_to_error(stop, line))?;
         // C4（CAP-AT-08）: Stdout authority を consult してから adapter へ write する。
         // 未 grant は adapter call 0 の catch 可能な `capability` error。
