@@ -222,6 +222,15 @@ pub enum OpCode {
     /// 例外ハンドラを解除する（try ブロック正常完了時）
     TeardownTry,
 
+    /// ループの外の `break`（言語仕様「break / continue」）。到達したときだけ
+    /// `control_flow` の runtime error を出す。tree と同じく、`break` を含む関数の
+    /// Call frame を畳んでから error を作る（call trace にその関数の行が入らない）。
+    /// compiler は同じ関数本体の `try` ハンドラを `TeardownTry` で外してからこの命令を置く。
+    BreakOutsideLoop,
+
+    /// ループの外の `continue`。`BreakOutsideLoop` と同じ（message だけが違う）。
+    ContinueOutsideLoop,
+
     /// f-string 連結: スタックから N 個の値を pop して文字列として連結
     /// operand: パーツ数
     FStrConcat(usize),
