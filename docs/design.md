@@ -489,7 +489,7 @@ Parserはプログラム直下とblock内の文を区別し、block内のimport�
 
 #### link済みProgramを両backendへ渡す
 
-- file・stdinの実行（埋め込みAPIのtree `Engine::run`・`run_audited`、VMの`src/main.rs`の`execute_vm_with_path`）は、`Engine::link`がresolver capabilityで読んで検証したsourceのgraphから、`src/module.rs`の`expand_from_graph`（CLIは`src/embedding.rs`の`expand_for_cli`経由）がimport文をmodule文へ置換したlink済みProgramを作る。展開時にfilesystemを読み直さない
+- file・stdinの実行（埋め込みAPIのtree `Engine::run`・`run_audited`、VMの`src/main.rs`の`execute_vm_with_path`）は、`Engine::link`がresolver capabilityで読んで検証したsourceのgraphから、`src/module.rs`の`expand_from_graph`（VMのCLIは`src/embedding.rs`の`expand_for_cli`経由）がimport文をmodule文へ置換したlink済みProgramを作る。展開時にfilesystemを読み直さない
 - REPLとschedulerのhandle経路は、評価器内蔵の`ModuleLoader`（`src/module.rs`）がファイルを読み込み、パースし、同じ形のlink済みProgramを作る。この経路はresolver gateを通らず、`TSUMUGI_SANDBOX`で検査する（[Capability Model仕様](capability-model.md)の逸脱一覧）
 - どちらの経路でも、ツリーウォーク版は実行前、VM版はCompilerへProgramを渡す前にlink済みProgramを受け取る
 - 経路ごとの詳細の正本は[Capability Model仕様](capability-model.md)第10節とする（判断役が選択、issue #318 D-48 Q1=A。理由: 本書は現行実装の記録であり、「両backendとも共有`ModuleLoader`」はfile・stdinのimportがresolver capabilityのgateを通るという現行の権限境界を誤って伝えるため）
@@ -681,7 +681,7 @@ builtin_core.rs
 この節は、現行実装の実行安全性の機構を記録する。外部効果の権限は実行単位の`CapabilitySet`でdeny-by-defaultに付与し、CLIの既定は`--profile safe`である（上の「目的と位置づけ」）。権限・profileの契約の正本は[Capability Model仕様](capability-model.md)（CLIは第14節）、実行予算の正本は[実行予算・協調実行仕様](execution-control.md)とし、本節では詳細を繰り返さない。
 
 現行機構は誤操作と過剰な資源消費を抑えるが、敵対的コードを隔離するsecurity sandboxではない。非信頼コードにはOS・コンテナ側の権限、CPU、メモリ、filesystem、実行時間制限を併用する。
-- **権限:** filesystem・環境変数・時刻・script stdin・exit・import resolver・host functionは、safe profileではoptionで明示したものだけをgrantする。未grantの操作はadapter・OSを呼ばずにcatch可能なerrorになる（filesystemは`sandbox`、それ以外は`capability`）。core evaluator/builtinは環境変数を読まない
+- **権限:** filesystem・環境変数・時刻・script stdin・exit・import resolver・host functionは、safe profileではoptionで明示したものだけをgrantする。未grantの操作はadapter・OSを呼ばずにcatch可能なerrorになる（filesystemは`sandbox`、それ以外は`capability`）。import resolverだけは、未grantでimportがあれば実行前のlinkでterminal `Denied`になる（[Capability Model仕様](capability-model.md)第2節）。core evaluator/builtinは環境変数を読まない
 - **従来の環境変数:** `TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`は、`--profile legacy`でCLI adapterが起動時に1回だけ読んでcapabilityを構築する互換入口である（capability-model 第14.3節）。例外はREPLとschedulerのhandle経路のimportで、評価器内蔵の`ModuleLoader`が`TSUMUGI_SANDBOX`で検査する（`src/sandbox.rs`。capability-modelの逸脱一覧）
 - **実行予算:** `BudgetConfig`の上限で制御する。`TSUMUGI_MAX_*`はCLIが起動時に1回だけ読む非推奨の上書きである（execution-control 第13節）
 - **構造的上限:** 構文・AST・call frame・import chainの上限はコンパイル時定数で固定する
@@ -690,8 +690,8 @@ builtin_core.rs
 
 | 設定 / 定数 | 対象 | 動作 |
 |---|---|---|
-| `--profile safe`（CLIの既定） | 外部効果のcapability | optionで明示したものだけをgrantする。未grantの操作はadapter・OSを呼ばずにcatch可能なerror |
-| `--profile legacy` | 互換用のcapability | CLI adapterが`TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`を1回読んで構築する。未設定時はunrestrictedのfilesystem・全環境変数（`TSUMUGI_`を除く）をgrantし、警告をstderrへ1件出す |
+| `--profile safe`（CLIの既定） | 外部効果のcapability | optionで明示したものだけをgrantする。未grantの操作はadapter・OSを呼ばずにcatch可能なerror（import resolverだけは実行前のlinkでterminal `Denied`） |
+| `--profile legacy` | 互換用のcapability | CLI adapterが`TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`を1回読んで構築する。未設定時はunrestrictedのfilesystem・全環境変数（`TSUMUGI_`を除く）をgrantし、未設定の変数ごとに警告をstderrへ1件ずつ出す（capability-model 第14.3節） |
 | `TSUMUGI_SANDBOX`（REPL・schedulerのhandle経路） | `ModuleLoader`のimport | 許可パス外のimportを拒否する |
 | `TSUMUGI_MAX_STEPS` / `TSUMUGI_MAX_COLLECTION_SIZE` ほか`TSUMUGI_MAX_*` | `BudgetConfig`の各上限（CLIのみ・非推奨） | CLIが起動時に1回読み、同名の上限へ設定して非推奨の警告を出す |
 | `MAX_USER_CALL_DEPTH = 128` | ユーザー関数のcall frame（root除く） | 129個目の直前で`StackOverflow` |
