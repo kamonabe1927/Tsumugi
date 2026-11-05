@@ -131,20 +131,24 @@ def verdict(ws: list[dict], head_sha: str | None, head: str, ok: str, ng: str | 
     """最新 commit を 1 行目に挙げた、先頭が head のエージェントの書き込みのうち最後のものの結論（loop-guard §4.2・§6）。
 
     1 行目に最新 commit の先頭 7 桁が無いもの、書いたあとで編集されたものは数えない。
-    ng の行が本文のどこかにあれば ng とする。ok は最後の空でない行がちょうど ok のときだけ。
+    ng の行が本文のどこかにあれば ng とする。同じ commit に ng の書き込みが 1 つでもあれば、
+    後から書かれたものに関わらず ng のままにする（後の ok で ng を上書きできない。loop-guard §4.3）。
+    ok は最後の空でない行がちょうど ok のときだけ。
     """
     if not head_sha:
         return None
     sha7 = head_sha[:7]
     last = None
+    any_ng = False
     for w in ws:
         body = w["body"].lstrip()
         if is_agent(w) and body.startswith(head) and sha7 in body.splitlines()[0] and not w["edited"]:
             last = w
+            if ng is not None and ng in [ln.strip() for ln in body.splitlines()]:
+                any_ng = True
     if last is None:
         return None
-    lines = [ln.strip() for ln in last["body"].splitlines()]
-    if ng is not None and ng in lines:
+    if any_ng:
         return "ng"
     return "ok" if last_line(last["body"]) == ok else "findings"
 
@@ -169,7 +173,10 @@ def unanswered_owner(ws: list[dict]) -> list[dict]:
 
 
 def stuck_counts(closed: list[dict]) -> dict[str, int]:
-    """閉じた `loop:stuck` の PR の数を、ブランチ名（`feat/<スライスID>` など）のスライス ID ごとに数える（loop-guard §7）。"""
+    """閉じた `loop:stuck` の PR の数を、ブランチ名（`feat/<スライスID>` など）のスライス ID ごとに数える（loop-guard §7）。
+
+    渡すのは `loop:stuck` の付いた閉じた PR のすべて（collect の `stuck_closed`）。直近の 100 本に限らない。
+    """
     out: dict[str, int] = {}
     for pr in closed:
         if "loop:stuck" not in {lb["name"] for lb in pr.get("labels", [])}:
@@ -313,7 +320,12 @@ def collect(repo: str, now: datetime):
     # 直近に更新された 100 本だけを見る（全ページはたどらない）
     closed = gh(f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100", paginate=False)
     merged = [p for p in closed if p.get("merged_at") and p["merged_at"] >= since]
-    return prs, issues, merged, closed
+    # stuck の回数は、閉じた PR の直近 100 本ではなく、`loop:stuck` の付いた閉じた PR をすべてたどって数える（loop-guard §7）
+    stuck_closed = []
+    for it in gh(f"repos/{repo}/issues?state=closed&labels=loop:stuck&per_page=100"):
+        if "pull_request" in it:
+            stuck_closed.append(gh(f"repos/{repo}/pulls/{it['number']}", paginate=False))
+    return prs, issues, merged, stuck_closed
 
 
 def main() -> int:
@@ -323,8 +335,8 @@ def main() -> int:
     args = ap.parse_args()
     now = parse_time(args.now) if args.now else datetime.now(timezone.utc)
     try:
-        prs, issues, merged, closed = collect(args.repo, now)
-        result = judge(prs, issues, merged, now, closed)
+        prs, issues, merged, stuck_closed = collect(args.repo, now)
+        result = judge(prs, issues, merged, now, stuck_closed)
     except Exception as e:  # noqa: BLE001
         detail = getattr(e, "stderr", "") or repr(e)
         print(json.dumps({"error": str(detail).strip()[:500]}, ensure_ascii=False))
