@@ -12,7 +12,7 @@
 逸脱として載せる案（Q2=A）は、返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5、
 issue #263 Q2=A）。理由: spec が実装の正本であり、adapter の context 引数・`Control` は Phase 3/4 の予算・協調実行
 （[マニフェスト](manifesto.md) 原則 3・4）を受ける目標の形である。本文を実装に合わせるとその受け皿が spec から消える。載せたのは 2026-10-25 の整合点検で §3〜§11.1 を実装と照合して確かめた差であり、
-照合していない節（§12・§14.2 以降）の逸脱は、事実を確かめられたものから順に載せる。表は現時点で #263 D-3 の (a)〜(d) と、issue #291 の設計で事実を確かめた 1 行（scheduler の handle 経路の import）を持つ（(e) は fix-host-function-id-unique で、区切り文字だけの `TSUMUGI_SANDBOX` の行は fix-legacy-sandbox-empty-list で、file/stdin の run 層の import 展開の行は fix-import-run-from-link-graph で解消した）。loop:drift #318 の D-38〜D-41 で、パスの形式検査と grant の検査の順序、`rename` の移動先の `Delete`、byte 上限 N の境界、`print` の改行の課金の 4 行を足した。上の設計ステータス段落にある現在の状態のうち、§10 の範囲の REPL の import 展開、E9 の残りなどと、§18「実装slice」の状態注記は、まだ表へ移していない。
+照合していない節（§12・§14.2 以降）の逸脱は、事実を確かめられたものから順に載せる。表は現時点で #263 D-3 の (a)〜(d) と、issue #291 の設計で事実を確かめた 1 行（scheduler の handle 経路の import）を持つ（(e) は fix-host-function-id-unique で、区切り文字だけの `TSUMUGI_SANDBOX` の行は fix-legacy-sandbox-empty-list で、file/stdin の run 層の import 展開の行は fix-import-run-from-link-graph で解消した）。loop:drift #318 の D-38〜D-41 で、パスの形式検査と grant の検査の順序、`rename` の移動先の `Delete`、byte 上限 N の境界、`print` の改行の課金の 4 行を足した。上の設計ステータス段落にある現在の状態のうち、E9 の残りなどと、§18「実装slice」の状態注記は、まだ表へ移していない。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱）
 
@@ -1198,7 +1198,7 @@ loop:drift #318 の D-41 を直す。§7 は「grant時はUTF-8 bytes+改行をl
 ### fix-repl-import-gate-tree 実装スライス（tree REPL の import を resolver gate に通す）
 
 issue #327 の Q1=A を tree REPL に当てはめる（§10、逸脱一覧の REPL の行）。VM REPL は fix-repl-import-gate-vm、scheduler の handle 経路は
-fix-handle-import-from-link（`todo`。公開 API の形を判断にかけている）で扱う。3 本は触る仕組みが別（tree REPL の link/run の入口、
+fix-handle-import-from-link（形は PR #339 の Q1=A・Q2=A で決まった。REPL の 2 本が `ModuleLoader` を使わなくなってから削除するため、その 2 本に依存して `todo`）で扱う。3 本は触る仕組みが別（tree REPL の link/run の入口、
 VM REPL の session、alpha `Engine` の handle）なので分けた。
 
 - **実装範囲**:
@@ -1284,7 +1284,9 @@ issue #327 の Q2=A を scheduler の handle 経路（alpha `Engine`、`src/engi
      で graph を作る。失敗の outcome は §1.1（execution-control）の写像（`Denied` / `HostError` / `BudgetExceeded` / … / `LinkError`）に従う。
   2. 展開は §10 の規則のまま `Evaluator::begin_execution_from_graph`（`expand_from_graph`）で行い、評価器の `ModuleLoader` を使う `begin_execution` の経路を無くす。
   3. `src/module.rs` の `ModuleLoader` と、`src/sandbox.rs` の import 用の検査（`check_path` ほか）を削除する。`TSUMUGI_SANDBOX` は CLI の legacy profile（§14.3）が読むだけになる。
-  4. `ModuleLoader` を前提にする既存テスト（`tests/engine_api.rs`・`tests/scheduler_api.rs` の import を含むもの、`src/eval.rs`・`src/module.rs` のテスト）は、resolver を grant する形に直すか削除する。
+  4. `src/` のコメントにある `ModuleLoader` への言及（`src/value.rs` の所有構造の説明、`src/vm.rs` の link 課金の説明、`src/embedding.rs`・`src/eval.rs`・`src/main.rs` の doc ほか）を、
+     link の graph からの展開の説明に書き換えるか削除する。
+  5. `ModuleLoader` を前提にする既存テスト（`tests/engine_api.rs`・`tests/scheduler_api.rs` の import を含むもの、`src/eval.rs`・`src/module.rs` のテスト）は、resolver を grant する形に直すか削除する。
 - **範囲外**: `start(&LinkedScript)`・`LinkOptions` の導入と 2 つの `Engine` の統合（E10）、REPL（fix-repl-import-gate-tree / -vm）。
 - **受入基準（fix-handle-import-from-link）**:
   - **HIL-AT-01**（未 grant）: `module_resolver` を grant しない context で、import を含む script を `create_execution` → `poll` すると、`Running` に入らず resolver 呼び出し 0 回の
@@ -1292,7 +1294,7 @@ issue #327 の Q2=A を scheduler の handle 経路（alpha `Engine`、`src/engi
   - **HIL-AT-02**（grant あり・execution 中の resolver 0 回、TM-AT-24）: 呼ばれた回数を数える resolver を grant し、import を 2 本含む script を 1 slice ずつ poll すると、resolver は
     Link フェーズで import の数だけ呼ばれ、`Running` 以降は 0 回で、module の top-level が実行される。確かめ方: `tests/scheduler_api.rs`。
   - **HIL-AT-03**（読み直さない）: on-disk に無い module を返す in-memory resolver で handle 経路の import が実行され、CWD に同名のファイルがあっても読まれない。確かめ方: 同上。
-  - **HIL-AT-04**（経路の削除）: `src/` に `ModuleLoader` の定義・参照が無く、`src/sandbox.rs` に import 用の検査が無い。確かめ方: `grep` の結果を PR 本文に貼る。
+  - **HIL-AT-04**（経路の削除）: `src/` に `ModuleLoader` の定義・参照（コメントを含む。実装範囲 4 で書き換える）が無く、`src/sandbox.rs` に import 用の検査が無い。確かめ方: `grep` の結果を PR 本文に貼る。
 - **想定の変更規模**: `src/engine.rs`・`src/eval.rs` の Link フェーズの切り替え +80〜200 行、`src/module.rs` の `ModuleLoader` と `src/sandbox.rs` の import 検査の削除 −300〜500 行。
   合計 400〜700 行。触る仕組みは handle の Link フェーズ 1 つ（削除はその結果）、受入基準 4 項目。done にする実装 PR で、逸脱一覧の handle 経路の行（§10）と、
   [脅威モデル](threat-model.md) の逸脱一覧の REPL・handle 経路の行のうち handle の部分を削除する（REPL の 2 本が done なら行ごと削除する）。execution-control の逸脱一覧（§9.1）の行は形の差として残す。
