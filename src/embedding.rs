@@ -5249,7 +5249,7 @@ mod tests {
             .build()
     }
 
-    /// Stdout grant 済みなら print は adapter へ書き出す（CAP-AT-07）。
+    /// Stdout grant 済みなら print は adapter へ書き出す（CAP-AT-08）。
     #[test]
     fn c4_print_granted_writes_to_adapter() {
         let engine = Engine::builder().build().unwrap();
@@ -5265,7 +5265,7 @@ mod tests {
         assert_eq!(sink.lock().unwrap().as_slice(), b"hello\n");
     }
 
-    /// Stdout 未 grant の print は catch 可能な capability error（未捕捉→RuntimeError、CAP-AT-07）。
+    /// Stdout 未 grant の print は catch 可能な capability error（未捕捉→RuntimeError、CAP-AT-08）。
     #[test]
     fn c4_print_ungranted_is_runtime_error() {
         let engine = Engine::builder().build().unwrap();
@@ -5296,7 +5296,7 @@ mod tests {
         ));
     }
 
-    /// print の host adapter 失敗は catch 可能な `host` error で、null へ潰さない（CAP-AT-07）。
+    /// print の host adapter 失敗は catch 可能な `host` error で、null へ潰さない（CAP-AT-08）。
     #[test]
     fn c4_print_host_failure_is_host_error() {
         let engine = Engine::builder().build().unwrap();
@@ -5316,7 +5316,7 @@ mod tests {
         }
     }
 
-    /// Stdin grant 済みなら input は adapter の行を返す（CAP-AT-08）。値 "8" を exit code へ写す。
+    /// Stdin grant 済みなら input は adapter の行を返す（CAP-AT-07）。値 "8" を exit code へ写す。
     #[test]
     fn c4_input_granted_reads_from_adapter() {
         let engine = Engine::builder().build().unwrap();
@@ -5330,7 +5330,7 @@ mod tests {
         assert!(matches!(outcome, ExecutionOutcome::Exited { code: c, .. } if c == (8)));
     }
 
-    /// Stdin grant 済みで入力が尽きたら input は null（EOF、CAP-AT-08）。
+    /// Stdin grant 済みで入力が尽きたら input は null（EOF、CAP-AT-07）。
     #[test]
     fn c4_input_granted_eof_is_null() {
         let engine = Engine::builder().build().unwrap();
@@ -5349,7 +5349,7 @@ mod tests {
         assert!(matches!(outcome, ExecutionOutcome::Exited { code: c, .. } if c == (3)));
     }
 
-    /// Stdin 未 grant の input は catch 可能な capability error（未捕捉→RuntimeError、CAP-AT-08）。
+    /// Stdin 未 grant の input は catch 可能な capability error（未捕捉→RuntimeError、CAP-AT-07）。
     #[test]
     fn c4_input_ungranted_is_runtime_error() {
         let engine = Engine::builder().build().unwrap();

@@ -32,6 +32,7 @@
 両engine共通の仕様違反（[Capability Model仕様](capability-model.md) の目標との差）:
 
 - REPL の import の実行時の読み込みは、profile にかかわらず `TSUMUGI_SANDBOX` を読み、許可範囲外のパスをサンドボックス違反にする。目標は「safe profile では `TSUMUGI_SANDBOX` を読まない」である（同 §14.3・§14.4）。REPL の import が評価器内蔵の module loader を経由していることによる。ファイル・標準入力から実行するスクリプトの import は、link 時に resolver が import root の下で確かめた内容だけを実行し、`TSUMUGI_SANDBOX` を読まない
+- ファイルシステムの root が 1 つも許可されていないとき、ファイルシステム関数はパスの形式にかかわらず `sandbox` エラーになる。目標は「パスの形式を許可より先に検査し、形式の誤りは許可の有無にかかわらず `argument` エラーにする」である（「組み込み関数」、同 §8.2・§8.5。loop:drift #318 D-38 で修正予定）
 
 本書の文法どおり、複数行lambdaの終端`end`は必須である。
 
@@ -855,7 +856,7 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 外部状態に触れる組み込み関数は、ホストが許可したときだけ動く（冒頭の「外部操作の権限」、[Capability Model仕様](capability-model.md)）。
 
 - `print` は標準出力、`env` は環境変数、`now` は時刻、`input` はスクリプトの標準入力、`exit` はプロセス終了の許可を要する。許可が無ければ catch 可能な `capability` エラー（`host function の実行が許可されていません: {name}`）になる
-- ファイルシステム関数（`read_file` / `read_lines` / `write_file` / `append_file` / `path_exists` / `is_file` / `is_dir` / `mkdir` / `remove` / `remove_dir` / `remove_tree` / `rename` / `list_dir` / `file_size`）は、対象パスを含む root と操作の許可を要する。許可が無ければ catch 可能な `sandbox` エラー（`ファイルシステム操作が許可されていません`）になる。safe profile のパスは `@NAME/...` か、root `default` に対する相対パスで書く。ファイルシステムの root が 1 つも許可されていなければ、パスの形式にかかわらず `sandbox` エラーになる。root が許可されているとき、絶対パス・`.`・`..` を含むパスは catch 可能な `argument` エラーになる（[Capability Model仕様](capability-model.md) §8.2・§14.1）
+- ファイルシステム関数（`read_file` / `read_lines` / `write_file` / `append_file` / `path_exists` / `is_file` / `is_dir` / `mkdir` / `remove` / `remove_dir` / `remove_tree` / `rename` / `list_dir` / `file_size`）は、対象パスを含む root と操作の許可を要する。許可が無ければ catch 可能な `sandbox` エラー（`ファイルシステム操作が許可されていません`）になる。safe profile のパスは `@NAME/...` か、root `default` に対する相対パスで書く。safe profile では、絶対パス・`.`・`..` を含むパスは、root の許可の有無にかかわらず catch 可能な `argument` エラーになる。パスの形式は許可より先に検査する（[Capability Model仕様](capability-model.md) §8.2・§8.5・§14.1）
 - 許可された操作の失敗（存在しないファイルの読み込み、親ディレクトリの無い場所への書き込み、既存ディレクトリへの `mkdir` など）は、`null` や `false` を返さず catch 可能な `host` エラー（`host function の実行に失敗しました: {name} (filesystem)`）になる。legacy profile でも同じである
 - 下の表の説明は、必要な許可があるときの挙動である
 

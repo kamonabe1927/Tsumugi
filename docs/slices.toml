@@ -235,6 +235,44 @@ design_pr  = 303
 impl_pr    = 333
 order      = 7
 
+# loop:drift #318 の D-39（判断済み Q1=A）と D-41（機械的）から作った fix 2 本と、D-38（判断済み Q1=A）から作った fix 1 本。
+# order は loop-runbook §12.3・§8 の「不具合の報告」の既定（今ある ready より前）にしたいが、0〜7 に空きが無い
+# （0〜4・6 は done が持つ）。fix-no-default-features-build と同じく空いている値に置き（PR #322 の C1=A）、
+# マージ後に PM が付け直しだけの状態整理 PR で今ある ready より前に移す。
+# fix-rename-destination-delete: 見積もり src/ +5〜15 行、触る仕組みは filesystem builtin の認可 1 つ、受入基準 2。parent は path-handle の受入試験の AUD-020。
+# fix-print-newline-charge: 見積もり src/ +2〜10 行、触る仕組みは print の output 課金 1 つ、受入基準 2。parent は I-O の budget の REV-015。
+# fix-fs-path-syntax-before-grant: 見積もり src/ +40〜90 行、触る仕組みは filesystem builtin の path 検査 1 つ、受入基準 3。
+# grant が無いときの形式検査の構文は判断役が Q2=A を選んだ（PR #332）。parent は AUD-020。
+[[slice]]
+id         = "fix-rename-destination-delete"
+title      = "builtin の rename で移動先の Delete も事前要求する（capability-model §8.4、loop:drift #318 D-39）"
+status     = "ready"
+parent     = "AUD-020"
+spec       = { doc = "docs/capability-model.md", section = "fix-rename-destination-delete 実装スライス（`rename` で移動先の `Delete` も要求する）" }
+acceptance = ["RDD-AT-01..02"]
+design_pr  = 332
+order      = 18
+
+[[slice]]
+id         = "fix-print-newline-charge"
+title      = "print の output 課金に改行の 1 byte を含める（capability-model §7、loop:drift #318 D-41）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/capability-model.md", section = "fix-print-newline-charge 実装スライス（`print` の output 課金に改行を含める）" }
+acceptance = ["PNC-AT-01..02"]
+design_pr  = 332
+order      = 19
+
+[[slice]]
+id         = "fix-fs-path-syntax-before-grant"
+title      = "Filesystem の grant が無いときもパスの形式を先に検査し、形式の誤りを argument error にする（capability-model §8.5、loop:drift #318 D-38）"
+status     = "ready"
+parent     = "AUD-020"
+spec       = { doc = "docs/capability-model.md", section = "fix-fs-path-syntax-before-grant 実装スライス（Filesystem の grant が無いときもパスの形式を先に検査する）" }
+acceptance = ["FPS-AT-01..03"]
+design_pr  = 332
+order      = 21
+
 # issue #290（kamonabe、「優先」）から作った不具合の fix 2 本と、その設計で見つかった関連の 1 本。
 # order は loop-runbook §8.1 の「優先」の既定（今ある ready・todo のすべてより前の空いている値）。
 # parent は共有 DAG の比較・表示を有限化する REV-001（値を再帰でたどる処理の有限化として同じ項目に置いた）。

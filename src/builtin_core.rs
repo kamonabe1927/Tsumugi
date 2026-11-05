@@ -1522,7 +1522,7 @@ pub fn resolve_now(
     Ok(Value::Int(secs))
 }
 
-/// `input()` を解決する共通ロジック（Phase 2 C4、CAP-AT-08）。tree/VM 両 engine が使う。
+/// `input()` を解決する共通ロジック（Phase 2 C4、CAP-AT-07）。tree/VM 両 engine が使う。
 ///
 /// - arity（0）は呼び出し側が検査済み。
 /// - `stdin` が `None`（Stdin 未 grant）なら Input adapter call 0 のまま catch 可能な
@@ -1548,7 +1548,7 @@ pub fn resolve_input(
     }
 }
 
-/// `print` を解決する共通ロジック（Phase 2 C4、CAP-AT-07）。tree/VM 両 engine が使う。
+/// `print` を解決する共通ロジック（Phase 2 C4、CAP-AT-08）。tree/VM 両 engine が使う。
 ///
 /// - 引数の評価・join・budget 課金は呼び出し側が済ませ、logical write 対象の `payload` を渡す。
 /// - `stdout` が `None`（Stdout 未 grant）なら Output adapter call 0 のまま catch 可能な
