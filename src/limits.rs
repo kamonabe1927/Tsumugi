@@ -14,9 +14,20 @@ pub(crate) const MAX_IMPORT_DEPTH: usize = 128;
 /// 同じ規則で数える。host function と core builtin 自体は user frame として数えない。
 ///
 /// # いつ拒否するか
-/// 128 個目の user frame は実行可能で、129 個目を作る直前に拒否する。動的 callee は
-/// 先に一度だけ評価・分類し、user callable の場合だけ引数評価より前に深度を検査する。
+/// 128 個目の user frame は実行可能で、129 個目を作る直前に拒否する。
 ///
+/// ## current（現行の `LanguageRevision` の契約）
+/// user call では、step と深度の検査が callee 式の評価より前にある。検査に失敗すると
+/// callee 式も引数も評価しない（言語仕様「ユーザー定義関数の呼び出し順序」。tree-walk 版は
+/// `src/eval.rs` の user call の準備で `begin_user_call` が callee の評価より前に呼ばれ、
+/// VM 版も観測上同じ順になる）。
+///
+/// ## target（次の `LanguageRevision` で切り替える予定の契約）
+/// callee 先行へ切り替える（semantic-decisions §5.1・§17.5.2）。動的 callee を先に一度だけ
+/// 評価・分類し、user callable の場合だけ引数評価より前に深度を検査する。切り替えの commit
+/// でこの doc を target へ書き換える。それまでは上の current が実装の契約である。
+///
+/// ## 共通（current と target で変わらない）
 /// tree-walk 版は user frame だけを積む `call_stack` の長さで、VM 版は root frame を
 /// 除いた active user frame 数（`frames.len() - 1`）で、同じ境界を判定する。
 pub(crate) const MAX_USER_CALL_DEPTH: usize = 128;

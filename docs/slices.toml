@@ -201,11 +201,12 @@ order      = 8
 [[slice]]
 id         = "fix-limits-call-order-doc"
 title      = "src/limits.rs の MAX_USER_CALL_DEPTH の doc comment を current（深度検査が先）と target（callee 先行）に分けて書く（semantic-decisions §17.5.2、loop:drift #302 D-21）"
-status     = "ready"
+status     = "done"
 parent     = "REV-012"
 spec       = { doc = "docs/execution-control.md", section = "fix-limits-call-order-doc 実装スライス（`MAX_USER_CALL_DEPTH` の doc を current と target に分ける）" }
 acceptance = ["LCD-AT-01..02"]
 design_pr  = 309
+impl_pr    = 331
 order      = 5
 
 # issue #291（kamonabe）から作った不具合の fix 2 本。仕分けの判断待ち Q1=A・Q2=A（返信なしのため推奨案で確定）を
@@ -226,11 +227,12 @@ order      = 6
 [[slice]]
 id         = "fix-legacy-sandbox-empty-list"
 title      = "legacy profile の区切り文字だけの TSUMUGI_SANDBOX を空の許可リスト（filesystem grant 無し）にし警告を出す（capability-model §14.3、issue #291）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-legacy-sandbox-empty-list 実装スライス（区切り文字だけの `TSUMUGI_SANDBOX` を空の許可リストにする）" }
 acceptance = ["LSE-AT-01..03"]
 design_pr  = 303
+impl_pr    = 333
 order      = 7
 
 # loop:drift #318 の D-39（判断済み Q1=A）と D-41（機械的）から作った fix 2 本と、D-38（判断済み Q1=A）から作った fix 1 本。

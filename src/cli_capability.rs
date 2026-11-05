@@ -620,6 +620,8 @@ pub struct LegacyBuild {
 
 /// 空 sandbox 警告（§7.3）。
 pub const WARN_EMPTY_SANDBOX: &str = "警告: TSUMUGI_SANDBOX が未設定のため、legacy profile はファイルシステム全体へのアクセスを許可します";
+/// 区切り文字と空白だけの `TSUMUGI_SANDBOX` の警告（§14.3、fix-legacy-sandbox-empty-list）。
+pub const WARN_EMPTY_SANDBOX_LIST: &str = "警告: TSUMUGI_SANDBOX にパスが含まれていないため、legacy profile はファイルシステム操作をすべて拒否します";
 /// 空 env-allow 警告（§7.3）。
 pub const WARN_EMPTY_ENV_ALLOW: &str = "警告: TSUMUGI_ENV_ALLOW が未設定のため、legacy profile は TSUMUGI_ 以外の全環境変数を公開します";
 
@@ -667,30 +669,65 @@ pub fn build_legacy_capabilities() -> Result<LegacyBuild, CliUsageError> {
         .environment(snapshot)
         .expect("single grant never duplicates");
 
-    // filesystem: TSUMUGI_SANDBOX 設定 → mount 構築、未設定/空 → unrestricted + 警告。
-    let sandbox = std::env::var("TSUMUGI_SANDBOX")
-        .ok()
-        .filter(|v| !v.is_empty());
-    match sandbox {
-        Some(spec) => {
-            let fs = build_legacy_sandbox_fs(&spec)?;
-            builder = builder
-                .filesystem(fs)
-                .expect("single grant never duplicates");
-        }
-        None => {
-            warnings.push(WARN_EMPTY_SANDBOX.to_string());
-            let fs = build_legacy_unrestricted_fs()?;
-            builder = builder
-                .filesystem(fs)
-                .expect("single grant never duplicates");
-        }
+    // filesystem: TSUMUGI_SANDBOX の値から grant と警告を決める（値の解釈は legacy_filesystem_for）。
+    let sandbox = std::env::var("TSUMUGI_SANDBOX").ok();
+    let decision = legacy_filesystem_for(sandbox.as_deref())?;
+    if let Some(warning) = decision.warning {
+        warnings.push(warning.to_string());
+    }
+    if let Some(fs) = decision.filesystem {
+        builder = builder
+            .filesystem(fs)
+            .expect("single grant never duplicates");
     }
 
     Ok(LegacyBuild {
         capabilities: builder.build(),
         warnings,
     })
+}
+
+/// `TSUMUGI_SANDBOX` の値から決めた legacy の filesystem grant と警告。
+struct LegacyFilesystemDecision {
+    /// `None` は filesystem capability を grant しない（全 filesystem 操作が拒否される）。
+    filesystem: Option<FilesystemCapability>,
+    warning: Option<&'static str>,
+}
+
+/// `TSUMUGI_SANDBOX` の値（未設定は `None`）から legacy の filesystem grant と警告を決める（§14.3）。
+///
+/// - 未設定・空文字列: unrestricted + [`WARN_EMPTY_SANDBOX`]
+/// - comma 区切りの各要素を trim して空しか残らない値: grant 無し + [`WARN_EMPTY_SANDBOX_LIST`]
+/// - path を 1 つ以上含む値: mount 構築、警告無し
+fn legacy_filesystem_for(spec: Option<&str>) -> Result<LegacyFilesystemDecision, CliUsageError> {
+    match spec.filter(|v| !v.is_empty()) {
+        None => Ok(LegacyFilesystemDecision {
+            filesystem: Some(build_legacy_unrestricted_fs()?),
+            warning: Some(WARN_EMPTY_SANDBOX),
+        }),
+        Some(spec) => {
+            if legacy_sandbox_hosts(spec).is_empty() {
+                Ok(LegacyFilesystemDecision {
+                    filesystem: None,
+                    warning: Some(WARN_EMPTY_SANDBOX_LIST),
+                })
+            } else {
+                Ok(LegacyFilesystemDecision {
+                    filesystem: Some(build_legacy_sandbox_fs(spec)?),
+                    warning: None,
+                })
+            }
+        }
+    }
+}
+
+/// `TSUMUGI_SANDBOX` を comma で分け、trim して空要素を除いた host root 一覧。
+fn legacy_sandbox_hosts(spec: &str) -> Vec<String> {
+    spec.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// legacy の env snapshot を作る。`TSUMUGI_` 除外 + allow-list 適用（未設定なら全 key）。
@@ -736,15 +773,12 @@ fn legacy_env_snapshot(env_allow: Option<&str>) -> EnvironmentSnapshot {
 /// comma 区切りの host root を CWD 基準で絶対化（lexical）し、`legacy{N}` mount（root 1 個なら
 /// `default` alias も）を `FollowWithinRoot` で open する。
 fn build_legacy_sandbox_fs(spec: &str) -> Result<FilesystemCapability, CliUsageError> {
-    let hosts: Vec<String> = spec
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect();
+    let hosts = legacy_sandbox_hosts(spec);
     if hosts.is_empty() {
-        // comma のみ等で実質空 → unrestricted へは倒さず error 回避のため unrestricted を使う。
-        return build_legacy_unrestricted_fs();
+        // 呼び出し側（legacy_filesystem_for）が 0 個を先に分けるので到達しない。
+        return Err(CliUsageError::new(
+            "エラー: TSUMUGI_SANDBOX にパスが含まれていません",
+        ));
     }
 
     let all_fs_ops = [
@@ -1249,5 +1283,48 @@ mod import_root_tests {
         let resolver = tsumugi::FilesystemModuleResolver::new(pid, handles)
             .expect("resolver from import roots");
         assert_eq!(resolver.policy_id(), pid);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fix-legacy-sandbox-empty-list: TSUMUGI_SANDBOX の値から決める grant と警告（LSE-AT-03）
+// ---------------------------------------------------------------------------
+//
+// LSE-AT-03。値を引数で注入するので process env を書き換えない（並列テストに敵対的なため）。
+#[cfg(any(unix, windows))]
+#[cfg(test)]
+mod legacy_sandbox_value_tests {
+    use super::*;
+
+    #[test]
+    fn separator_only_values_grant_no_filesystem_and_warn_once() {
+        for value in [",", " , ", " ", ",,", " ,\t, "] {
+            let d = legacy_filesystem_for(Some(value)).expect("decision");
+            assert!(d.filesystem.is_none(), "grant 無し: {value:?}");
+            assert_eq!(d.warning, Some(WARN_EMPTY_SANDBOX_LIST), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn unset_and_empty_stay_unrestricted_with_existing_warning() {
+        for value in [None, Some("")] {
+            let d = legacy_filesystem_for(value).expect("decision");
+            assert!(d.filesystem.is_some(), "unrestricted: {value:?}");
+            assert_eq!(d.warning, Some(WARN_EMPTY_SANDBOX), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn value_with_path_builds_mount_without_warning() {
+        for value in ["/tmp/a", " , /tmp/a ,", "/tmp/a,/tmp/b"] {
+            let d = legacy_filesystem_for(Some(value)).expect("decision");
+            assert!(d.filesystem.is_some(), "mount 構築: {value:?}");
+            assert_eq!(d.warning, None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn warning_texts_are_distinct() {
+        assert_ne!(WARN_EMPTY_SANDBOX, WARN_EMPTY_SANDBOX_LIST);
     }
 }

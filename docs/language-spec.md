@@ -32,7 +32,6 @@
 両engine共通の仕様違反（[Capability Model仕様](capability-model.md) の目標との差）:
 
 - REPL の import の実行時の読み込みは、profile にかかわらず `TSUMUGI_SANDBOX` を読み、許可範囲外のパスをサンドボックス違反にする。目標は「safe profile では `TSUMUGI_SANDBOX` を読まない」である（同 §14.3・§14.4）。REPL の import が評価器内蔵の module loader を経由していることによる。ファイル・標準入力から実行するスクリプトの import は、link 時に resolver が import root の下で確かめた内容だけを実行し、`TSUMUGI_SANDBOX` を読まない
-- `--profile legacy` で `TSUMUGI_SANDBOX` の値が区切り文字（カンマ）と空白だけ（`,`・` , ` など）のとき、CLI は未設定と同じに扱い、ファイルシステム全体を警告なしで許可する。目標は「許可するパスが 0 個の設定として、ファイル操作をすべてサンドボックス違反エラーにし、警告を 1 件出す」である（「ファイルI/Oサンドボックス」、同 §14.3。issue #291 で修正予定）
 - ファイルシステムの root が 1 つも許可されていないとき、ファイルシステム関数はパスの形式にかかわらず `sandbox` エラーになる。目標は「パスの形式を許可より先に検査し、形式の誤りは許可の有無にかかわらず `argument` エラーにする」である（「組み込み関数」、同 §8.2・§8.5。loop:drift #318 D-38 で修正予定）
 
 本書の文法どおり、複数行lambdaの終端`end`は必須である。
