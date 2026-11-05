@@ -6813,7 +6813,8 @@ mod tests {
         assert_eq!(run("read_file(\"../x\")"), "sandbox");
         assert_eq!(run("read_file(\"a\u{0}b\")"), "argument");
         assert_eq!(run("read_file(\"\")"), "argument");
-        assert_eq!(run("read_file(\"a:b\")"), "argument");
+        // 先頭 component の `a:` は Windows では drive prefix（§5.5 は Normal component 内の `:` だけを拒否する）。
+        assert_eq!(run("read_file(\"d/a:b\")"), "argument");
         assert_ne!(run("read_file()"), "sandbox");
         assert_ne!(run("read_file(1)"), "sandbox");
     }
