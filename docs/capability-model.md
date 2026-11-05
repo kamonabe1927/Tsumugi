@@ -23,6 +23,7 @@ issue #263 Q2=A）。理由: spec が実装の正本であり、adapter の cont
 | 同期 adapter のメソッドが `&mut CapabilityCallContext` を取らない。実装（`src/capability.rs`）の `Clock::now_utc(&self)` は `Result<SystemTime, AdapterError>` でなく `SystemTime` を返し、`Input::read_line(&self)`・`Output::write_all(&self, bytes)`・`Output::flush(&self)`・`DirectoryHandle` と `FileHandle` の各メソッドも context 引数を持たない。`ReadLimit` 型は無く、`read_line` は上限引数を取らない | §6・§7・§8.3 | C3（Clock）、C4（Input/Output）、C5（DirectoryHandle/FileHandle） |
 | host function の呼び出し境界が目標と違う。実装（`src/host_function.rs`）に `HostCallContext` と `charge_external` は無く、`HostFunction::call(&self, arguments)` は context を取らない。`HostCallError` は `Host { category: String }` の 1 variant だけで（`#[non_exhaustive]`、derive は `Debug`）、`Control(ControlStop)` が無い | §11.1 | C8 |
 | scheduler の handle 経路（`src/engine.rs` の `Engine::compile` / `create_execution` / `start`）は `Engine::link` と resolver を経ない。初回 poll の `Evaluator::begin_execution` で評価器内蔵 `ModuleLoader` が `ExecutionContext::set_script_path` のディレクトリ（未設定なら CWD）を基準にファイルを読み、import に `module_resolver` の grant を要さない（`TSUMUGI_SANDBOX` の検査だけを受ける）。`&LinkedScript` を取らない差は [実行予算・協調実行仕様](execution-control.md) の逸脱一覧（§9.1）にある | §10 | exec-control Slice 3 PR-a |
+| REPL（tree・VM）の import は Engine resolver gate を通らない。tree REPL（`src/main.rs` の `run_repl`）は `link_for_repl`（`src/embedding.rs`。import の有無によらず空 graph を返し `module_resolver` の grant を見ない）と `run_for_repl` を通り、import は評価器内蔵 `ModuleLoader` が CWD 相対で読む。VM REPL（`src/main.rs` の `run_repl_vm`）は `ModuleLoader::link` を直接呼ぶ。どちらも `--allow-import-root` なしで import でき、`TSUMUGI_SANDBOX`（`src/sandbox.rs`）の検査だけを受け、失敗は file/stdin と違う固定のエラー文字列になる。issue #327 | §10・§14.1 | E7（tree）、E9 の VM file/stdin 統合で据え置いた VM REPL |
 | Filesystem の grant が無いとき、script のファイルシステム操作はパスの形式を検査せずに `sandbox` error を返す（`src/builtin_core.rs` の `dispatch_fs` の `None => filesystem_denied`）。目標は lexical なパスの形式検査を capability の有無より先に行い、`PathError` を catch 可能な `argument` error にすることである。grant があるときは形式検査が先に行われる（`fs_route`）。順序を固定するテストは無い。loop:drift #318 D-38 | §8.2・§8.5・§13 | C5 |
 | builtin の `rename` は常に上書き版（`replace=true`）で adapter を呼ぶが、移動元の `Delete` と移動先の `Create` だけを検査し、移動先の `Delete` を要求しない（`src/builtin_core.rs` の `rename`）。OS adapter は root をまたぐ rename を fail closed にする（`src/capability.rs` の `OsDirectoryHandle` の rename）ので CLI では移動先の `Delete` 不足で上書きされることは無いが、root をまたげる埋め込み host の adapter では移動先の `Delete` なしで上書きできる。loop:drift #318 D-39 | §8.4 | C5 |
 | 有限の byte 上限 N で N+1 byte を溜める前に止める規定が、file の読み込みと module source では未実装である。`read_file` / `read_lines` は `read_to_end` で全部読んでから課金し（`src/builtin_core.rs`）、link 時の module source も上限を見ずに全部読む（`src/embedding.rs` の `read_module_source`、`src/capability.rs` の OS の `ModuleSource::read_chunk`）。CAP-AT-15 と CAP-AT-17 の byte の境界のテストは無い（CAP-AT-17 のテストは module の本数の境界だけ）。loop:drift #318 D-40 | §7・§10・§19 | C11 |
@@ -571,9 +572,11 @@ ModuleIdは同じlogical moduleへ同じIDを返す。同ID/異hashのlink error
 - 展開の規則は[言語仕様](language-spec.md)「モジュール / import」に従う。`import`文の位置にmoduleのtop-level文を置き、同じ`ModuleId`は1つの`ExecutionContext`の中で（contextの再利用をまたいでも）1回だけ展開する。展開済みかどうかは`ModuleId`ごとに展開したsourceのhash（[組み込みAPI仕様](embedding-api.md) §5.1の`ImportNode.source_hash`）と組で覚えて判定する。同じ`ModuleId`で同じhashなら展開しない。同じ`ModuleId`でhashが違うsourceを展開しようとしたら（例: rootの違うresolverでlinkした2つの`LinkedScript`を同じcontextで順にrunした2回目）、後勝ちにも黙ったskipにもせず、runの`Link`フェーズで1文も実行せずに失敗にする（outcomeと診断は§18のfix-import-run-from-link-graph小節）。hashの照合は`LinkedScript`のgraphの全moduleに及ぶ。展開済みで展開しないmoduleについても、その中の`import`を照合のためだけにたどり（展開も課金もしない）、子孫の食い違い（例: 同じ内容の`a.tsg`の下にある`b.tsg`だけが違う）も同じ失敗にする（[組み込みAPI仕様](embedding-api.md) §5「違う`source_hash`のmoduleを含む`LinkedScript`」）。このたどりに上限が無いわけではない。1回のrunの中で同じ`ModuleId`は1回だけたどるので、たどる量はその`LinkedScript`のgraphのmodule数・import数を超えず、それらはlinkの時点で`BudgetUsage`のmodule/import count・bytesへ課金済みである（[組み込みAPI仕様](embedding-api.md) §5「Link、Module graph、link request」）。したがって照合のたどりを課金しないことは、[マニフェスト](manifesto.md)原則3（すべての実行に予算）に反しない（PR #303の事後点検の疑いへの回答）。同ID/異hashを後勝ちにしない上の規則を、runをまたぐ場合にも当てはめたものである。実行が完了しなかったexecutionが新しく展開したmoduleは未展開に戻し、次のexecutionで再び展開できる。
 - source・importの本数とbytes、imported module recordのheapは[実行予算・協調実行仕様](execution-control.md) §5.1・§5.3のとおり`ModuleId`単位で課金する（module recordは96 + `ModuleId`のUTF-8 byte長）。課金はこれまでどおりrunの`Link`フェーズ（最初の文を実行する前）で行う。
 - 展開中のどの`import`（rootにあるものもmoduleの中にあるものも）でも、specifierの正規化に失敗するか、`ModuleId`が`LinkedScript`の保持sourceに無いのは、linkを経ていない`LinkedScript`（例: `link_for_repl`の空graph）をrunへ渡した内部契約違反であり、scriptから見えるimport errorにせず`InternalFailure`にする。
-- REPLのimportは本段落の対象外で、評価器内蔵`ModuleLoader`が解決する既知の設計のまま（冒頭の設計ステータス段落、[組み込みAPI仕様](embedding-api.md) §12）。
+- REPL（tree・VM）のimportも本段落の規則に従う。各submissionをlink時のEngine resolver gateに通し、runはそのlinkが確かめたgraphから展開する。`module_resolver`が未grantでimportを含むsubmissionは、file/stdinと同じterminal `Denied`と同じactionable診断（`--allow-import-root NAME=PATH`を促す）になり、[組み込みAPI仕様](embedding-api.md) §12の結果表のとおり表示して次の入力へ進む。CWD相対のimportが欲しい利用者は`--allow-import-root default=.`を明示する。sessionは1つの`ExecutionContext`（VM REPLではsession）なので、上の「同じ`ModuleId`は1回だけ展開」「hashが違えば失敗」「完了しなかったexecutionが展開したmoduleは未展開に戻す」をsubmissionをまたいでそのまま当てはめる。REPL専用の`ModuleLoader`の経路と、`sandbox.rs`のimport用の検査はこれで使わなくなる。
 
 この段落はissue #291 のQ1=A（run層のimportはlinkで確認したmodule graphから読み、入れ子のimportもlink時にresolverの許可を通す。run層で`ModuleLoader`がファイルを読み直す経路をfile/stdinから無くす。REPLは範囲外）による。返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5）。採らなかった案B（`ModuleLoader`を残しrun層にもresolverと同じroot検査を足す）は、確認と読み込みが2経路のまま残り、確認後の差し替えを防げないため採らない。
+
+REPL（tree・VM）のimportを上の規則に含めることは、issue #327 のQ1=A（判断役が選択、issue #327）による。理由: 原則2「権限はホストが明示的に付与する」と優先順位の表「明示的なcapability ＞ ambient authorityによる利便性」、[脅威モデル](threat-model.md) TM-024（全importはlink時にresolver capabilityだけを使う）・TM-AT-24（execution中のresolver呼び出し0回）に実装を合わせ、file/stdinとREPLのimportの成否を`module_resolver`のgrantの有無という1つの規則に揃える（原則8）。使い勝手は1つの明示grant（`--allow-import-root default=.`）で今と同じ使い方に戻せる。採らなかった案B（REPL起動時にCWDを`default` mountとして自動grantする）は、求められていないfilesystemの読み取り権限を既定で与え、同じprofileでfile/stdinが`Denied`になるimportをREPLだけ通す経路差を残すため採らない。案C（REPLを目標から外す）は、ambientな読み込みを残しTM-024の目標を後退させるため採らない。上の段落のissue #291 Q1=Aの「REPLは範囲外」は、本判断（#327）で置き換えた。#291の記録は時点の記録として残す（issue #327 のQ3=A、判断役が選択。理由: 経緯を後からたどれるようにする、原則9）。scheduler の handle 経路（`Engine::compile` / `create_execution` / `start`）も link 済み graph から展開する（issue #327 のQ2=A、判断役が選択。理由: [実行予算・協調実行仕様](execution-control.md) §9.1の目標の形とTM-AT-24を handle 経路でも満たし、同じscript・権限から入口によらず同じ結果にする、原則5）。handle 経路の公開APIの形は、§18の小節が決まるまで逸脱一覧の行のままとする。
 
 展開済みの判定を`ModuleId → source_hash`で持ち、hashが違えば失敗にする規則は、PR #303 の判断待ちQ2=A（context再利用時の展開済みの判定）による。返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5）。理由: 同ID/異hashを後勝ちにしない[組み込みAPI仕様](embedding-api.md) §5.1と本節の規則をrunをまたぐ場合にも当てはめ、runが自分のlinkで確かめた内容を実行することを保つ（[マニフェスト](manifesto.md) 原則5「予測可能性」、原則6「失敗を制御可能な結果にする」）。採らなかった案B（キーを`(ModuleId, source_hash)`にし、hashが違えば別moduleとして展開する）は、同じ名前の再定義が黙って起きるため採らない。案C（`ModuleId`だけをキーにし、hashが違ってもskipする）は、runが自分のlinkで確かめた内容を実行しないことがあるため採らない。
 
@@ -766,7 +769,7 @@ OPTIONS:
 - `NAME`はMountName grammar。`OP`は`read|write|create|delete|metadata|list`。`import`は`--fs-op`では受理せずresolver optionだけで付与する。
 - `--fs-root NAME=PATH`と`--fs-op NAME=...`は1対1必須。CLIはroot directory handleをexecution作成前に開き、safe profileのsymlink policyを常に`DenyAll`とする。
 - scriptは`@NAME/...`でrootを選ぶ。unqualified pathにはNAME `default`が必要である。
-- `--allow-import-root NAME=PATH`はC6-cでfilesystem `ModuleResolver`を構築してsafe profileへgrantする（各NAMEをmount root、`SymlinkPolicy::DenyAll`で`OsDirectoryHandle`化）。これによりtree file/stdin経路のimportはlink時にEngine resolverで解決され、`@NAME/...`が実効化される（unqualified pathはmount `default`へrouting）。grantされるため`--allow-import-root`付きsafe setのCapabilitySetIdは`module_resolver` groupを含むように変わる。importがあるのに`--allow-import-root`を1つも渡さないtree実行は、resolver未grantでterminal `Denied`（exit 1、`--allow-import-root NAME=PATH`を促すactionable診断）になる——ambient相対パスimportは廃止した（原則2 明示的capability）。E9でVM file/stdinも同じlink層のEngine resolver gateへ統合され、未grant + importはtreeと同じくterminal `Denied`になる（`--allow-import-root`が`module_resolver`をgrantする経路もtree/VM共通）。run層はtree/VMともlinkが読んだsourceからimportを展開し、ファイルを読み直さない（§10）。したがって`@NAME/...`もrunまでend-to-endで効く。VM REPLは従来どおりalpha `ModuleLoader`（import root不要）でtree REPLと対称。tree/VMの「既知差」はfile/stdinについては解消され、REPLにのみ残る。
+- `--allow-import-root NAME=PATH`はC6-cでfilesystem `ModuleResolver`を構築してsafe profileへgrantする（各NAMEをmount root、`SymlinkPolicy::DenyAll`で`OsDirectoryHandle`化）。これによりtree file/stdin経路のimportはlink時にEngine resolverで解決され、`@NAME/...`が実効化される（unqualified pathはmount `default`へrouting）。grantされるため`--allow-import-root`付きsafe setのCapabilitySetIdは`module_resolver` groupを含むように変わる。importがあるのに`--allow-import-root`を1つも渡さないtree実行は、resolver未grantでterminal `Denied`（exit 1、`--allow-import-root NAME=PATH`を促すactionable診断）になる——ambient相対パスimportは廃止した（原則2 明示的capability）。E9でVM file/stdinも同じlink層のEngine resolver gateへ統合され、未grant + importはtreeと同じくterminal `Denied`になる（`--allow-import-root`が`module_resolver`をgrantする経路もtree/VM共通）。run層はtree/VMともlinkが読んだsourceからimportを展開し、ファイルを読み直さない（§10）。したがって`@NAME/...`もrunまでend-to-endで効く。REPL（tree・VM）もfile/stdinと同じくlink層のEngine resolver gateを通り、importには`--allow-import-root`が要る（§10、issue #327。現在の差は逸脱一覧）。
 - capability optionはsafe profileだけで受理し、legacyとの同時指定はusage error 1とする。
 - `--allow-env KEY`はCLI execution作成時にprocess envのOS上のkey同一性で完全一致する値をsnapshotする。不存在はsnapshotへ入れずwarningなし。protected runtime keyは第5節のOS-aware判定でusage error 1とする。
 - `--allow-clock`はsystem clock、`--allow-script-stdin`はscript Input、`--allow-exit`はProcessExitをprofile builderへ明示grantする。
@@ -1191,6 +1194,72 @@ loop:drift #318 の D-41 を直す。§7 は「grant時はUTF-8 bytes+改行をl
     `tests/vm_builtin_call_lowering.rs` など）は tree と VM の一致を見るもので、期待値が変わるものがあれば改行分を足して直す。
 - **想定の変更規模**: 本体は `src/builtin.rs` と `src/vm.rs` で +2〜10 行。テストは +40〜80 行程度。触る仕組みは print の output 課金 1 つ、受入基準は 2 項目。
   done にする実装 PR で、逸脱一覧の「`print` の output 課金に改行の 1 byte が入らない」の行を削除する。
+
+### fix-repl-import-gate-tree 実装スライス（tree REPL の import を resolver gate に通す）
+
+issue #327 の Q1=A を tree REPL に当てはめる（§10、逸脱一覧の REPL の行）。VM REPL は fix-repl-import-gate-vm、scheduler の handle 経路は
+fix-handle-import-from-link（`todo`。公開 API の形を判断にかけている）で扱う。3 本は触る仕組みが別（tree REPL の link/run の入口、
+VM REPL の session、alpha `Engine` の handle）なので分けた。
+
+- **実装範囲**:
+  1. `src/main.rs` の tree REPL（`run_repl` / `execute_repl_submission`）は、各 submission を `link_for_repl` でなく `Engine::link`
+     （`LinkRequest.capabilities` に session の frozen set）に通す。`LinkError` は file/stdin と同じ `print_link_error` で表示し、
+     language-state を変えずに次の入力へ進む（`Denied` なら `--allow-import-root NAME=PATH` を促す診断。[組み込みAPI仕様](embedding-api.md) §12 の結果表の
+     「表示し次入力へ」。`InternalFailure` だけは従来どおり session を終える）。
+  2. `src/embedding.rs` の `run_for_repl` は、`Engine::run` と同じく link が確かめた graph から import を展開する（§10 の展開の規則。
+     context をまたぐ `ModuleId → source_hash` の判定、完了しなかった submission が展開した module の巻き戻し、run の `Link` フェーズでの課金）。
+     REPL の budget のライフサイクル（session 累積・fuel だけ reset）は変えない。
+  3. `link_for_repl` を削除し、`run_for_repl` が評価器内蔵 `ModuleLoader` を使う分岐（`Evaluator` の loader を使う `begin_execution` の REPL 用の経路）を
+     使わなくする。`ModuleLoader` 本体と `sandbox.rs` は scheduler の handle 経路と VM REPL が使うので、このスライスでは残す。
+  4. tree REPL の import の固定エラー文字列を前提にする既存テスト（`tests/integration.rs` の `tree_repl_retries_failed_import`・
+     `repl_imported_names_resolve_across_submissions_in_both_engines`・`repl_resolves_imports_before_execution_in_both_engines`、
+     ILG-AT-04 の「REPL は不変」の部分）は、`--allow-import-root` を渡す形と file/stdin の診断に直す。VM の側の期待値は fix-repl-import-gate-vm まで変えない。
+- **範囲外**: VM REPL、scheduler の handle 経路、`ModuleLoader`・`sandbox.rs` の削除、REPL の起動時の既定 grant（Q1 の案 B。採らない）、
+  REPL のプロンプト・バナーの文言。
+- **観測される変化**: tree REPL で `--allow-import-root` なしの import は `Denied` の診断になり、session は続く。`--allow-import-root default=.` を渡せば
+  今までの CWD 相対の import と同じ使い方になる。import の失敗の文字列は file/stdin と同じになる。
+- **受入基準（fix-repl-import-gate-tree）**:
+  - **RIT-AT-01**（未 grant）: tree REPL を `--allow-import-root` なしで起動し、CWD にある `m.tsg` を `import "m.tsg"` すると、stderr に file/stdin と同じ
+    `Denied` の診断が出て、`m.tsg` の top-level の効果（`print`）が出ない。続く submission（`print(1)`）は実行され、EOF で exit 0。
+    確かめ方: `tests/integration.rs` の subprocess test。resolver を呼ばないことは埋め込み API の test（呼ばれたら数える resolver を grant しない
+    `Engine::link` が `Denied`）で確かめる。
+  - **RIT-AT-02**（grant あり・submission をまたぐ）: `--allow-import-root default=.` で `import "m.tsg"` した名前が後の submission から使え、
+    同じ `import` を 2 回目の submission に書いても top-level の効果は 1 回だけ出る。確かめ方: subprocess test。
+  - **RIT-AT-03**（巻き戻しと hash）: (a) import の後に未捕捉の runtime error で終わった submission の後、同じ import を書いた submission で
+    module が再び展開される（top-level の効果が出る）。(b) 展開済みの `m.tsg` の内容を submission の間に書き換えて再び import すると、
+    1 文も実行せずに §10 の hash の食い違いの失敗になり、session は続く。確かめ方: subprocess test。
+  - **RIT-AT-04**（run は graph だけを読む）: in-memory resolver（on-disk に無い module を返す）を grant した `Engine::link` の `LinkedScript` を
+    `run_for_repl` に渡すと、その module が展開されて実行される。import を含み graph に module の無い `LinkedScript` を渡すと `InternalFailure`
+    （§10 の内部契約違反）。確かめ方: `src/embedding.rs` か `tests/` の埋め込み API の test。
+- **想定の変更規模**: `src/main.rs` の REPL の link/表示 +30〜60 行、`src/embedding.rs` の `run_for_repl` の展開の切り替え +40〜100 行、
+  `link_for_repl` と REPL 用の loader 分岐の削除 −60〜120 行。合計 150〜300 行。テストは +100〜200 行と既存 3〜4 本の修正。
+  触る仕組みは tree REPL の link/run の入口 1 つ、受入基準は 4 項目。done にする実装 PR で、逸脱一覧の REPL の行から tree の部分を除く
+  （fix-repl-import-gate-vm が done なら行を削除する）。
+
+### fix-repl-import-gate-vm 実装スライス（VM REPL の import を resolver gate に通す）
+
+issue #327 の Q1=A を VM REPL（`src/main.rs` の `run_repl_vm`）に当てはめる。VM file/stdin（`execute_vm_with_path`）と同じく、gate 用の
+`Backend::TreeWalk` engine で `compile` → `link` を通し、link の graph から展開した program を `Compiler` + `Vm` で実行する。
+
+- **実装範囲**:
+  1. 各 submission を `EmbeddingEngine::compile`（`retain_source = true`）→ `Engine::link`（session の frozen set）に通す。`LinkError` は
+     `print_link_error` で表示して次の入力へ進む（tree REPL と同じ）。
+  2. link の graph から import を展開する。`expand_for_cli` は 1 回の実行用なので、session が `ModuleId → source_hash` の展開済みの表を持ち、
+     §10 の規則（同じ `ModuleId`・同じ hash は展開しない、hash が違えば 1 文も実行せずに失敗、子孫も照合）をそのまま当てはめる。
+     表は今の `compiler_checkpoint` と同じ transaction に入れ、compile error・runtime error で終わった submission が足した行は巻き戻す。
+     source/import の課金は今の `charge_link` と同じく Link フェーズで行う（`charge_link_graph` の形でよい）。
+  3. `run_repl_vm` から `ModuleLoader` を外す（`src/main.rs` の `ModuleLoader` の import も無くす）。
+- **範囲外**: tree REPL、scheduler の handle 経路、`ModuleLoader` 本体・`sandbox.rs` の削除（handle 経路が使う）、VM backend adapter（E9 残）。
+- **受入基準（fix-repl-import-gate-vm）**:
+  - **RIV-AT-01**（未 grant）: `--vm` の REPL で RIT-AT-01 と同じ入力を与えると、stderr・stdout・exit code が tree REPL と同じになる。
+    確かめ方: `tests/integration.rs` の subprocess test（tree と `--vm` の両方を同じ期待値で回す）。
+  - **RIV-AT-02**（grant あり・submission をまたぐ）: RIT-AT-02 と同じ入力で tree と同じ出力。確かめ方: 同上。
+  - **RIV-AT-03**（巻き戻しと hash）: RIT-AT-03 の (a)(b) と同じ入力で tree と同じ出力。compile error で終わった submission の import も
+    巻き戻される。確かめ方: 同上。
+  - **RIV-AT-04**（`ModuleLoader` を使わない）: `src/main.rs` に `ModuleLoader` の参照が無く、`TSUMUGI_SANDBOX` を import root と関係の無い
+    ディレクトリにしても `--vm` の REPL の import の成否が `--allow-import-root` だけで決まる。確かめ方: subprocess test と `grep` の確認を PR 本文に貼る。
+- **想定の変更規模**: `src/main.rs` の `run_repl_vm` の書き換え +100〜220 行・−60〜90 行（展開済みの表と transaction を含む）。
+  テストは +80〜150 行。触る仕組みは VM REPL の session 1 つ、受入基準は 4 項目。done にする実装 PR で、逸脱一覧の REPL の行から VM の部分を除く（fix-repl-import-gate-tree が done なら行を削除する）。
 
 ## 19. 受入基準
 
