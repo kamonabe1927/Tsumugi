@@ -45,7 +45,7 @@ class MergeCandidate(unittest.TestCase):
             c(LOOP, REVIEW_OK, "2026-11-01T10:30:00Z"), c(LOOP, GATE_OK, "2026-11-01T10:40:00Z")]))["merge_candidate"])
 
     def test_revert_skips_wait_and_limit(self):
-        merged = [{"merged_at": "2026-11-01T0%d:00:00Z" % i, "labels": [{"name": "loop:impl"}]} for i in range(4)]
+        merged = [{"merged_at": "2026-11-01T0%d:00:00Z" % i, "labels": [{"name": "loop:impl"}]} for i in range(s.DAILY_MERGES)]
         com = [c(LOOP, REVIEW_OK, "2026-11-01T11:10:00Z"), c(LOOP, GATE_OK, "2026-11-01T11:20:00Z")]
         p = pr(labels=("loop:revert",), head="2026-11-01T11:00:00Z", comments=com, ref="revert/300", commits=1)
         self.assertTrue(self.one(p, merged)["merge_candidate"])
@@ -54,7 +54,7 @@ class MergeCandidate(unittest.TestCase):
         self.assertFalse(self.one(fake, merged)["merge_candidate"])
 
     def test_daily_limit(self):
-        merged = [{"merged_at": "2026-11-01T0%d:00:00Z" % i, "labels": [{"name": "loop:impl"}]} for i in range(4)]
+        merged = [{"merged_at": "2026-11-01T0%d:00:00Z" % i, "labels": [{"name": "loop:impl"}]} for i in range(s.DAILY_MERGES)]
         self.assertFalse(self.one(pr(comments=ok_comments()), merged)["merge_candidate"])
 
     def test_review_must_name_head_commit(self):

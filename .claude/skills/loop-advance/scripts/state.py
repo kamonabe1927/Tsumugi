@@ -34,7 +34,7 @@ DECISION_HEAD = "🤖 Claude Code 判断:"
 JST = timezone(timedelta(hours=9))
 RUNNING_STALE = timedelta(hours=2)
 MERGE_WAIT = timedelta(hours=3)  # loop-guard §6 の 6
-DAILY_MERGES = 4  # loop-guard §7
+DAILY_MERGES = 6  # loop-guard §7
 
 
 # ---------------------------------------------------------------- 判定（純粋関数）
