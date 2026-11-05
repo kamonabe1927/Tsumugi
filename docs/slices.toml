@@ -258,11 +258,12 @@ order      = 18
 [[slice]]
 id         = "fix-print-newline-charge"
 title      = "print の output 課金に改行の 1 byte を含める（capability-model §7、loop:drift #318 D-41）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec       = { doc = "docs/capability-model.md", section = "fix-print-newline-charge 実装スライス（`print` の output 課金に改行を含める）" }
 acceptance = ["PNC-AT-01..02"]
 design_pr  = 332
+impl_pr    = 340
 order      = 19
 
 [[slice]]

@@ -1610,7 +1610,10 @@ impl Vm {
                 // tree engine（builtin.rs の print）と同じ論理位置で payload を host へ渡す
                 // 前に課金する。
                 self.budget
-                    .charge_output(payload.len() as u64, ExecutionPhase::Run)
+                    .charge_output(
+                        crate::builtin_core::print_charge_bytes(&payload),
+                        ExecutionPhase::Run,
+                    )
                     .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
                 // C4（CAP-AT-08）: Stdout authority を consult してから adapter へ write する。
                 // tree engine（builtin.rs の print）と同じ共有ロジックを通す。
