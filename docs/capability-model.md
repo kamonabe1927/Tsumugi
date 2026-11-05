@@ -12,7 +12,7 @@
 逸脱として載せる案（Q2=A）は、返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5、
 issue #263 Q2=A）。理由: spec が実装の正本であり、adapter の context 引数・`Control` は Phase 3/4 の予算・協調実行
 （[マニフェスト](manifesto.md) 原則 3・4）を受ける目標の形である。本文を実装に合わせるとその受け皿が spec から消える。載せたのは 2026-10-25 の整合点検で §3〜§11.1 を実装と照合して確かめた差であり、
-照合していない節（§12・§14.2 以降）の逸脱は、事実を確かめられたものから順に載せる。表は現時点で #263 D-3 の (a)〜(d) と、issue #291 の設計で事実を確かめた 1 行（scheduler の handle 経路の import）を持つ（(e) は fix-host-function-id-unique で、区切り文字だけの `TSUMUGI_SANDBOX` の行は fix-legacy-sandbox-empty-list で、file/stdin の run 層の import 展開の行は fix-import-run-from-link-graph で、`rename` の移動先の `Delete` の行は fix-rename-destination-delete で、`print` の改行の課金の行は fix-print-newline-charge で解消した）。loop:drift #318 の D-38〜D-41 で、パスの形式検査と grant の検査の順序、`rename` の移動先の `Delete`、byte 上限 N の境界、`print` の改行の課金の 4 行を足した。上の設計ステータス段落にある現在の状態のうち、§10 の範囲の REPL の resolver gate 迂回、REPL と scheduler の handle 経路の import 展開、E9 の残りなどと、§18「実装slice」の状態注記は、まだ表へ移していない。
+照合していない節（§12・§14.2 以降）の逸脱は、事実を確かめられたものから順に載せる。表は現時点で #263 D-3 の (a)〜(d) と、issue #291 の設計で事実を確かめた 1 行（scheduler の handle 経路の import）を持つ（(e) は fix-host-function-id-unique で、区切り文字だけの `TSUMUGI_SANDBOX` の行は fix-legacy-sandbox-empty-list で、file/stdin の run 層の import 展開の行は fix-import-run-from-link-graph で、`rename` の移動先の `Delete` の行は fix-rename-destination-delete で、`print` の改行の課金の行は fix-print-newline-charge で、パスの形式検査と grant の検査の順序の行は fix-fs-path-syntax-before-grant で解消した）。loop:drift #318 の D-38〜D-41 で、パスの形式検査と grant の検査の順序、`rename` の移動先の `Delete`、byte 上限 N の境界、`print` の改行の課金の 4 行を足した。上の設計ステータス段落にある現在の状態のうち、§10 の範囲の REPL の resolver gate 迂回、REPL と scheduler の handle 経路の import 展開、E9 の残りなどと、§18「実装slice」の状態注記は、まだ表へ移していない。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱）
 
@@ -1113,6 +1113,8 @@ grant が無くても `sandbox` のままになり、error の種類がパスの
 `CapabilitySetId`・filesystem policy encoding（§3.1・§8.6）に入れない。理由: 印は grant でなく、形式の誤りに返す error の種類だけを決める。
 ID に入れると filesystem を grant しない legacy の set の ID が「filesystem group を含まない」（LSE-AT-01）以外の形で変わり、CAP-AT-28 の
 golden bytes も変わる。legacy の set は env・clock・stdin・exit などの grant で safe の set と ID が既に異なるので、監査で profile を見分けられる。
+
+**印を付ける入口（判断役が選択、PR #341 の Q1=A）**: 印を付ける `src/cli_capability.rs` は bin crate（`src/main.rs` の `mod cli_capability`）にあり、lib の `pub(crate)` は見えない。上の「crate 内部の builder メソッド」は実装できない設計時の見落としだった。入口は `#[doc(hidden)] pub fn CapabilitySetBuilder::legacy_fs_syntax` とし、binary（別 crate）から使う CLI 内部の shim として扱う。外部 embedder 向けの公開契約にせず、§3 の builder の API 一覧にも足さない（`link_for_repl` と同じ扱い。fix-import-run-from-link-graph 小節の実装範囲 4）。理由: 印は authority を持たず、形式の正しいパスは印の有無にかかわらず `sandbox` のままで adapter・OS も呼ばないので、embedder が呼んでも権限は増えず deny-by-default（原則2）は弱まらない。`CapabilitySetId` にも入らず、同じ set・入力から同じ結果になる（原則5）。変更が最小で公開契約を増やさない（原則8）。採らなかった案: 印を付けた legacy の set 全体を組む `#[doc(hidden)] pub` の関数を lib に置く案は、embedder から見える入口が結局 1 つ増え（印 1 bit でなく legacy の組み立て全体）、`build_legacy_capabilities` の一部を lib へ移して差分が増え、§14.3 の CLI adapter の境界も曖昧になるため採らない。印を `pub` の安定した builder メソッドとして §3 に足す案は、§8.2「埋め込み host の構文は常に `FilesystemTarget::parse`」に反し公開契約を理由なく増やす（原則8）ため採らない。
 
 - **実装範囲**:
   1. `src/capability.rs`: `LegacyFsTranslator::translate` の root を引かない lexical 検査（空・NUL・component 内の `:`）を関数に切り出し、
