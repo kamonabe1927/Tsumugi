@@ -321,6 +321,8 @@ kamonabe に見てほしいこと: <方針を続けるか考える材料。無�
 
 結果は PR 本文にそのまま貼る。1 つでも落ちたら PR を出さず、直すか止める。
 
+1 と 2 は、`git push` の直前にも Claude Code のフック（[`.claude/settings.json`](../.claude/settings.json) から [`pre_push_hook.py`](../.github/scripts/pre_push_hook.py)）が走らせる。Rust の差分があってどちらかが落ちれば push は止まり、理由が返ってくる。main への push もこのフックが止める。フックは前段の守りで、PR 本文への結果の貼り付けは省かない。
+
 ### 14.3 時間と回数
 
 | 対象 | 上限 |
