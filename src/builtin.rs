@@ -211,6 +211,7 @@ impl Evaluator {
                 name,
                 &evaluated,
                 self.capabilities().filesystem(),
+                self.capabilities().is_legacy_fs_syntax(),
                 max_collection,
                 language_revision,
                 line,
