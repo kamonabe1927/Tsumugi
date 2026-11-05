@@ -1830,6 +1830,13 @@ pub fn dispatch_filesystem_capability(
                 fs_route(name, filesystem, from, FsOperation::Delete, line, label)?;
             let (to_root, to_target) =
                 fs_route(name, filesystem, to, FsOperation::Create, line, label)?;
+            // rename は上書き版（replace=true）なので移動先の `Delete` も要求する（第8.4節、
+            // D-39）。移動先の存在は調べない（§8.5）。Deny なので Upsert の Create 不足と同じく
+            // label を戻す。
+            if !to_root.operations.contains(&FsOperation::Delete) {
+                *label = None;
+                return Err(TsumugiError::filesystem_denied(line));
+            }
             from_root
                 .adapter
                 .rename(
