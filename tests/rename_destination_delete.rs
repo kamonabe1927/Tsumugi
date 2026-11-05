@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::num::{NonZeroU64, NonZeroU128};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tsumugi::capability::{
     DirectoryEntry, EntryKind, FileHandle, OpenFileRequest, PublicMetadata, RelativePath,
@@ -29,6 +29,10 @@ struct Counting {
     policy: NonZeroU128,
     renames: AtomicUsize,
     last_replace: AtomicUsize,
+    /// 移動先のファイルが「ある」か。false なら `metadata` は失敗する。
+    exists: AtomicBool,
+    /// 存在を調べる呼び出し（`metadata` / `open_file` / `list`）の回数。
+    probes: AtomicUsize,
 }
 
 impl Counting {
@@ -37,6 +41,8 @@ impl Counting {
             policy: NonZeroU128::new(policy).expect("non-zero"),
             renames: AtomicUsize::new(0),
             last_replace: AtomicUsize::new(usize::MAX),
+            exists: AtomicBool::new(true),
+            probes: AtomicUsize::new(0),
         })
     }
 }
@@ -56,6 +62,7 @@ impl DirectoryHandle for Shared {
         _path: &RelativePath,
         _request: OpenFileRequest,
     ) -> Result<Box<dyn FileHandle>, AdapterError> {
+        self.0.probes.fetch_add(1, Ordering::SeqCst);
         Err(AdapterError::Host("unused".into()))
     }
     fn create_dir(&self, _path: &RelativePath) -> Result<(), AdapterError> {
@@ -66,6 +73,10 @@ impl DirectoryHandle for Shared {
         _path: &RelativePath,
         _follow_final: bool,
     ) -> Result<PublicMetadata, AdapterError> {
+        self.0.probes.fetch_add(1, Ordering::SeqCst);
+        if !self.0.exists.load(Ordering::SeqCst) {
+            return Err(AdapterError::Host("not found".into()));
+        }
         Ok(PublicMetadata {
             kind: EntryKind::File,
             size_bytes: 0,
@@ -77,6 +88,7 @@ impl DirectoryHandle for Shared {
         _path: &RelativePath,
         _max_entries: Option<NonZeroU64>,
     ) -> Result<Vec<DirectoryEntry>, AdapterError> {
+        self.0.probes.fetch_add(1, Ordering::SeqCst);
         Ok(Vec::new())
     }
     fn remove(&self, _path: &RelativePath, _kind: RemoveKind) -> Result<(), AdapterError> {
@@ -164,12 +176,27 @@ fn rdd_at_01_destination_without_delete_is_denied_before_adapter() {
         assert_eq!(src.renames.load(Ordering::SeqCst), 0, "{label}");
         assert_eq!(dst.renames.load(Ordering::SeqCst), 0, "{label}");
 
-        // 移動先の有無で結果が変わらない: adapter の metadata は常に「ある」を返すが、
-        // 検査は存在を見ないので、script からは同じ error になる（存在 oracle を作らない）。
-        let err2 = run(MOVE, caps(&src, &[Delete], &dst, &[Create]))
-            .expect_err(&format!("{label}: 2 回目も sandbox error"));
-        assert_eq!(err.kind(), err2.kind(), "{label}");
-        assert_eq!(err.to_string(), err2.to_string(), "{label}");
+        // 移動先のファイルが有るときと無いときで同じ error になる。存在を調べる adapter 呼び出しも 0 回。
+        let src = Counting::new(1);
+        let dst = Counting::new(2);
+        dst.exists.store(false, Ordering::SeqCst);
+        let err_absent = run(MOVE, caps(&src, &[Delete], &dst, &[Create]))
+            .expect_err(&format!("{label}: 移動先が無くても sandbox error"));
+        let src = Counting::new(1);
+        let dst = Counting::new(2);
+        dst.exists.store(true, Ordering::SeqCst);
+        let err_present = run(MOVE, caps(&src, &[Delete], &dst, &[Create]))
+            .expect_err(&format!("{label}: 移動先が有っても sandbox error"));
+        assert_eq!(err_absent.kind(), Some(ErrorKind::Sandbox), "{label}");
+        assert_eq!(err_absent.kind(), err_present.kind(), "{label}");
+        assert_eq!(err_absent.to_string(), err_present.to_string(), "{label}");
+        for adapter in [&src, &dst] {
+            assert_eq!(
+                adapter.probes.load(Ordering::SeqCst),
+                0,
+                "{label}: 存在を調べない"
+            );
+        }
 
         // catch できる。
         let src = Counting::new(1);
