@@ -284,7 +284,8 @@ fn vlc_at_03_torn_down_handler_does_not_catch_later_errors() {
 
 #[test]
 fn vlc_at_04_repl_rolls_back_and_continues() {
-    let input = "let a = 1\nprint(a)\nif true\n  let c = 3\n  print(\"in\")\n  break\nend\nprint(a)\nprint(c)\nprint(\"end\")\n";
+    let input =
+        "let a = 1\nif true\n  a = 2\n  print(\"in\")\n  break\nend\nprint(a)\nprint(\"end\")\n";
     let tree = run_repl(input, false);
     let vm = run_repl(input, true);
     let tree_lines = visible_lines(&tree.stdout, false);
@@ -292,15 +293,13 @@ fn vlc_at_04_repl_rolls_back_and_continues() {
     assert_eq!(tree_lines, vm_lines, "{tree:?} {vm:?}");
     assert_eq!(tree.stderr, vm.stderr);
     assert_eq!(tree.code, vm.code);
-    assert!(tree_lines.iter().any(|l| l == "in"), "{tree_lines:?}");
     assert!(
         tree.stderr.contains("4行目: break はループの中でのみ"),
         "{tree:?}"
     );
-    // 失敗した入力が加えた binding `c` は rollback されている。
-    assert!(
-        tree.stderr.contains("未定義の変数または関数: c"),
-        "{tree:?}"
-    );
+    // 失敗した入力が `a = 2` でトップレベルの状態を変えた後に break へ到達しても、rollback で `a` は 1 に戻る。
+    assert!(tree_lines.iter().any(|l| l == "in"), "{tree_lines:?}");
+    assert!(tree_lines.iter().any(|l| l == "1"), "{tree_lines:?}");
+    assert!(!tree_lines.iter().any(|l| l == "2"), "{tree_lines:?}");
     assert!(tree_lines.iter().any(|l| l == "end"), "{tree_lines:?}");
 }
