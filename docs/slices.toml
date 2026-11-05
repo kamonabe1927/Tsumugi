@@ -247,11 +247,12 @@ order      = 7
 [[slice]]
 id         = "fix-rename-destination-delete"
 title      = "builtin の rename で移動先の Delete も事前要求する（capability-model §8.4、loop:drift #318 D-39）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-rename-destination-delete 実装スライス（`rename` で移動先の `Delete` も要求する）" }
 acceptance = ["RDD-AT-01..02"]
 design_pr  = 332
+impl_pr    = 338
 order      = 18
 
 [[slice]]
