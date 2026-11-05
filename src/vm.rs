@@ -672,6 +672,21 @@ impl Vm {
                         self.try_handlers.pop();
                         Ok(())
                     }
+                    OpCode::BreakOutsideLoop | OpCode::ContinueOutsideLoop => {
+                        // tree は error を作る前に、この文を含む関数の Call frame を畳む
+                        // （call trace にその関数の行が入らない）。トップレベル（frame 1 段）は畳まない。
+                        if self.frames.len() > 1 {
+                            let f = self.take_frame(line)?;
+                            self.truncate_stack(f.base);
+                            self.try_handlers
+                                .retain(|h| h.frame_depth <= self.frames.len());
+                        }
+                        Err(if matches!(instruction, OpCode::BreakOutsideLoop) {
+                            TsumugiError::break_outside_loop(line)
+                        } else {
+                            TsumugiError::continue_outside_loop(line)
+                        })
+                    }
                     _ => self.dispatch(instruction, line),
                 },
             };
@@ -1826,7 +1841,10 @@ impl Vm {
                     "内部エラー: return命令がdispatchへ到達しました",
                 ));
             }
-            OpCode::SetupTry(_) | OpCode::TeardownTry => {
+            OpCode::SetupTry(_)
+            | OpCode::TeardownTry
+            | OpCode::BreakOutsideLoop
+            | OpCode::ContinueOutsideLoop => {
                 // 通常は run_frames() が処理する。不正な呼び出しでもpanicさせない。
                 return Err(internal_error(
                     line,

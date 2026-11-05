@@ -1242,6 +1242,37 @@ fn f1_fuel_parity_calls_and_callbacks() {
     }
 }
 
+/// fix-vm-loop-control-outside-loop VLC-AT-01: 到達しない / 関数の境界で catch される
+/// ループの外の `break` / `continue` でも、消費 fuel と N−1 の terminal が tree/VM で一致する。
+#[test]
+fn f1_fuel_parity_loop_control_outside_loop() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "到達しない break / continue",
+            "let s = 0\nfor x in range(0, 6)\n  s = s + x\nend\nif false\n  break\nend\nfn f()\n  continue\nend\nfn g()\n  break\nend\nlet h = fn()\n  continue\nend\nlet t = 0\nwhile t < 3\n  t = t + 1\nend\n",
+        ),
+        (
+            "関数の境界で catch される break",
+            "fn g()\n  break\nend\nlet n = 0\nfor i in range(0, 4)\n  try\n    g()\n  catch e\n    n = n + 1\n  end\nend\n",
+        ),
+        (
+            "関数の境界で catch される continue",
+            "fn g()\n  try\n    continue\n  catch e\n    let z = 0\n  end\nend\nlet n = 0\nfor i in range(0, 4)\n  try\n    g()\n  catch e\n    n = n + 1\n  end\nend\n",
+        ),
+        (
+            "callback の break を catch",
+            "let n = 0\nfor i in range(0, 3)\n  try\n    map([1, 2], fn(x)\n      break\n    end)\n  catch e\n    n = n + 1\n  end\nend\n",
+        ),
+        (
+            "callback の continue を catch",
+            "let n = 0\nfor i in range(0, 3)\n  try\n    map([1, 2], fn(x)\n      continue\n    end)\n  catch e\n    n = n + 1\n  end\nend\n",
+        ),
+    ];
+    for (label, source) in cases {
+        assert_fuel_parity(label, source);
+    }
+}
+
 // =============================================================================
 // ILG-AT-05: link が確かめた graph から展開する新しい 2 経路の source/import 会計が tree/VM で一致する
 // （capability-model §10、fix-import-run-from-link-graph）

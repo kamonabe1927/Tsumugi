@@ -157,6 +157,29 @@ fn try_opcode_reaching_dispatch_does_not_panic() {
     let _ = Vm::new(unverified(chunk)).run();
 }
 
+/// fix-vm-loop-control-outside-loop（VLC-AT-04）: ループの外の `break` / `continue` の専用命令を
+/// 手組みの chunk（余分な `TeardownTry`・ハンドラ無し・top-level の frame 1 段）で実行しても
+/// panic せず、`control_flow` の runtime error になる。
+#[test]
+fn loop_control_outside_loop_opcodes_do_not_panic() {
+    for (op, message) in [
+        (OpCode::BreakOutsideLoop, "break"),
+        (OpCode::ContinueOutsideLoop, "continue"),
+    ] {
+        let mut chunk = Chunk::new();
+        chunk.emit(OpCode::TeardownTry, 3);
+        chunk.emit(OpCode::TeardownTry, 3);
+        chunk.emit(op, 3);
+        chunk.emit(OpCode::Return, 3);
+        let error = Vm::new(unverified(chunk))
+            .run()
+            .expect_err("専用命令が error にならなかった");
+        assert_eq!(error.error_type(), "control_flow", "{}", error.message());
+        assert_eq!(error.line(), 3);
+        assert!(error.message().contains(message), "{}", error.message());
+    }
+}
+
 /// REV-006 層1 / F1-AT-06: `Jump(0)` 自己ループが instruction watchdog で有限停止する。
 ///
 /// `Jump` は fuel を課金しない（fuel の課金点は back-edge `Loop`・`PrepareCall`・callback だけ。

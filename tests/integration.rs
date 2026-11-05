@@ -463,6 +463,7 @@ fixture_tests!(
         index_read_lowering,
         let_redeclaration_fresh_cell,
         list_dict,
+        loop_control_outside_loop_try,
         local_utils,
         logic,
         map_recursion_limit,

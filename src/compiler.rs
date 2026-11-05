@@ -66,6 +66,9 @@ pub struct Compiler {
     scope_depth: usize,
     /// ループのネスト管理
     loops: Vec<LoopState>,
+    /// この関数本体で開いている `try` の数。ループの外の `break` / `continue` が
+    /// 同じ関数本体の handler を外すために使う（ループの中は `LoopState.try_depth`）。
+    try_depth: usize,
     /// この関数がキャプチャする upvalue のリスト
     upvalues: Vec<Upvalue>,
     /// 親コンパイラのローカル変数（クロージャ用）
@@ -83,6 +86,7 @@ impl Compiler {
             locals: Vec::new(),
             scope_depth: 0,
             loops: Vec::new(),
+            try_depth: 0,
             upvalues: Vec::new(),
             enclosing_locals: None,
             enclosing_upvalues: None,
@@ -97,6 +101,7 @@ impl Compiler {
             locals: Vec::new(),
             scope_depth: 0,
             loops: Vec::new(),
+            try_depth: 0,
             upvalues: Vec::new(),
             enclosing_locals: Some(enclosing_locals),
             enclosing_upvalues: Some(enclosing_upvalues),
@@ -317,6 +322,7 @@ impl Compiler {
         // SetupTry: catch ブロックの先頭アドレスを後でパッチ
         let setup_offset = self.chunk.len();
         self.chunk.emit(OpCode::SetupTry(0), line);
+        self.try_depth += 1;
 
         // ループ内の try_depth をインクリメント（break/continue の TeardownTry 発行用）
         if let Some(loop_state) = self.loops.last_mut() {
@@ -332,6 +338,7 @@ impl Compiler {
 
         // try 正常完了: ハンドラを解除して catch をスキップ
         self.chunk.emit(OpCode::TeardownTry, line);
+        self.try_depth -= 1;
 
         // ループ内の try_depth をデクリメント
         if let Some(loop_state) = self.loops.last_mut() {
@@ -547,10 +554,10 @@ impl Compiler {
 
     /// break のコンパイル
     fn compile_break(&mut self, line: usize) -> Result<(), TsumugiError> {
-        let loop_state = self
-            .loops
-            .last()
-            .ok_or_else(|| TsumugiError::break_outside_loop(line))?;
+        let Some(loop_state) = self.loops.last() else {
+            self.emit_loop_control_outside(OpCode::BreakOutsideLoop, line);
+            return Ok(());
+        };
 
         // break 時にアクティブな try ハンドラを解除する
         let try_depth = loop_state.try_depth;
@@ -571,12 +578,21 @@ impl Compiler {
         Ok(())
     }
 
+    /// ループの外の break / continue。compile error にせず、到達したときの runtime error を出す。
+    /// tree と同じく、同じ関数本体の `try` は catch しないので、先に handler をすべて外す。
+    fn emit_loop_control_outside(&mut self, op: OpCode, line: usize) {
+        for _ in 0..self.try_depth {
+            self.chunk.emit(OpCode::TeardownTry, line);
+        }
+        self.chunk.emit(op, line);
+    }
+
     /// continue のコンパイル
     fn compile_continue(&mut self, line: usize) -> Result<(), TsumugiError> {
-        let loop_state = self
-            .loops
-            .last()
-            .ok_or_else(|| TsumugiError::continue_outside_loop(line))?;
+        let Some(loop_state) = self.loops.last() else {
+            self.emit_loop_control_outside(OpCode::ContinueOutsideLoop, line);
+            return Ok(());
+        };
         let continue_target = loop_state.continue_target;
         let continue_resolved = loop_state.continue_resolved;
         let loop_line = loop_state.line;

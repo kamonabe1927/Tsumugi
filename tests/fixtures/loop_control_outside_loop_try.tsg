@@ -1,0 +1,97 @@
+# ループの外の break / continue は、同じ関数本体の try では catch されず、
+# 関数の境界の外（呼び出し元）の try で control_flow として catch される
+
+# --- 同じ本体の try は通り抜ける（呼び出し元の try が catch する） ---
+fn same_body_break()
+    try
+        break
+    catch e
+        print("unexpected catch in same body")
+    end
+    print("not reached")
+end
+
+try
+    same_body_break()
+catch e
+    print("caller caught: " + e["type"] + " line " + to_str(e["line"]))
+end
+
+# --- catch ブロックの中の continue も同じ ---
+fn in_catch_continue()
+    try
+        let x = 1 / 0
+    catch e
+        continue
+    end
+    print("not reached")
+end
+
+try
+    in_catch_continue()
+catch e
+    print("caller caught: " + e["type"])
+end
+
+# --- 入れ子の try ---
+fn nested()
+    try
+        try
+            break
+        catch e
+            print("unexpected inner catch")
+        end
+    catch e
+        print("unexpected outer catch")
+    end
+end
+
+try
+    nested()
+catch e
+    print("caller caught: " + e["type"])
+end
+
+# --- ループの中の try で捕まえ、続行する ---
+fn stop()
+    continue
+end
+
+let n = 0
+for i in [1, 2, 3]
+    try
+        stop()
+    catch e
+        n = n + 1
+    end
+end
+print("continued: " + to_str(n))
+
+# --- 外した handler は後の error を誤って catch しない ---
+fn leak_check()
+    try
+        break
+    catch e
+        print("unexpected catch")
+    end
+end
+
+try
+    try
+        leak_check()
+    catch e
+        print("first: " + e["type"])
+    end
+    let y = 1 / 0
+catch e
+    print("second: " + e["type"])
+end
+
+# --- 到達しない break / continue は実行を止めない ---
+if false
+    break
+end
+fn never_called()
+    continue
+end
+print("done")

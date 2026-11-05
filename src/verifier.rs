@@ -293,6 +293,36 @@ mod tests {
             .into_inner()
     }
 
+    /// ループの外の `break` / `continue` の compiler 出力（専用命令）は verify を通る
+    /// （fix-vm-loop-control-outside-loop、VLC-AT-04）。
+    #[test]
+    fn accepts_loop_control_outside_loop_output() {
+        let source = r#"
+            try
+                break
+            catch e
+                continue
+            end
+            fn f()
+                try
+                    try
+                        continue
+                    catch a
+                        break
+                    end
+                catch b
+                    print(b)
+                end
+            end
+            let g = fn()
+                break
+            end
+        "#;
+        let chunk = compile(source);
+        assert!(chunk.code.contains(&OpCode::BreakOutsideLoop));
+        assert!(verify(chunk).is_ok());
+    }
+
     /// V1〜V9 を通る正規 compiler 出力（if/while/for/関数/closure/try/f-string/builtin）。
     #[test]
     fn accepts_normal_compiler_output() {
