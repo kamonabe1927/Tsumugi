@@ -577,6 +577,7 @@ status     = "ready"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-repl-import-gate-tree 実装スライス（tree REPL の import を resolver gate に通す）" }
 acceptance = ["RIT-AT-01..04"]
+design_pr  = 339
 order      = 90
 
 [[slice]]
@@ -586,6 +587,7 @@ status     = "ready"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-repl-import-gate-vm 実装スライス（VM REPL の import を resolver gate に通す）" }
 acceptance = ["RIV-AT-01..04"]
+design_pr  = 339
 order      = 91
 
 [[slice]]
