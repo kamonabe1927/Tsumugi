@@ -986,26 +986,7 @@ impl LegacyFsTranslator {
         &self,
         script_path: &str,
     ) -> Result<Option<FilesystemTarget>, PathError> {
-        if script_path.is_empty() {
-            return Err(PathError::Empty);
-        }
-        if script_path.contains('\0') {
-            return Err(PathError::ContainsNul);
-        }
-        let abs = absolutize_lexical(std::path::Path::new(script_path));
-        let abs_components: Vec<String> = abs
-            .components()
-            .filter_map(|c| match c {
-                std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-                _ => None,
-            })
-            .collect();
-        // Windows ADS / stream 指定を拒否する（§5.5）。drive prefix は `Component::Prefix`
-        // として上の filter_map で既に除外されているため、`Component::Normal` 内に残る `:`
-        // だけを拒否すればよい（Finding 7）。
-        if abs_components.iter().any(|c| c.contains(':')) {
-            return Err(PathError::ColonInComponent);
-        }
+        let (abs, abs_components) = legacy_lexical_check(script_path)?;
         for (mount, root) in &self.entries {
             let root_components: Vec<String> = root
                 .components()
@@ -1035,6 +1016,36 @@ impl LegacyFsTranslator {
         }
         Ok(None)
     }
+}
+
+/// legacy profile の script path の lexical 検査（root を引かない部分、§14.3）。
+///
+/// 空・NUL・component 内の `:`（Windows ADS / stream 指定、§5.5）を [`PathError`] にし、通れば CWD 基準で
+/// lexical 絶対化した path とその normal component 列を返す。[`LegacyFsTranslator::translate`] と、
+/// filesystem を grant しない legacy の set の形式検査（fix-fs-path-syntax-before-grant）が共有する。
+pub(crate) fn legacy_lexical_check(
+    script_path: &str,
+) -> Result<(std::path::PathBuf, Vec<String>), PathError> {
+    if script_path.is_empty() {
+        return Err(PathError::Empty);
+    }
+    if script_path.contains('\0') {
+        return Err(PathError::ContainsNul);
+    }
+    let abs = absolutize_lexical(std::path::Path::new(script_path));
+    let abs_components: Vec<String> = abs
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    // drive prefix は `Component::Prefix` として上の filter_map で除外済みなので、
+    // `Component::Normal` 内に残る `:` だけを拒否すればよい（Finding 7）。
+    if abs_components.iter().any(|c| c.contains(':')) {
+        return Err(PathError::ColonInComponent);
+    }
+    Ok((abs, abs_components))
 }
 
 /// path を CWD 基準で lexical に絶対化する（symlink 非追従・canonicalize しない、Finding 3）。
@@ -1339,6 +1350,8 @@ struct FrozenCapabilities {
     process_exit: Option<ProcessExit>,
     module_resolver: Option<Arc<dyn ModuleResolver>>,
     host_functions: BTreeSet<HostFunctionId>,
+    /// grant の無い filesystem の形式検査が legacy の構文か（authority でも ID の入力でもない）。
+    legacy_fs_syntax: bool,
     id: CapabilitySetId,
 }
 
@@ -1409,6 +1422,11 @@ impl CapabilitySet {
         self.0.filesystem.as_ref()
     }
 
+    /// filesystem を grant しないときの形式検査が legacy の構文か（crate 内部限定）。
+    pub(crate) fn is_legacy_fs_syntax(&self) -> bool {
+        self.0.legacy_fs_syntax
+    }
+
     /// module resolver authority（crate 内部限定。C6-c で link 層が import を解決する）。
     pub(crate) fn module_resolver(&self) -> Option<&Arc<dyn ModuleResolver>> {
         self.0.module_resolver.as_ref()
@@ -1458,6 +1476,7 @@ pub struct CapabilitySetBuilder {
     process_exit: Option<ProcessExit>,
     module_resolver: Option<Arc<dyn ModuleResolver>>,
     host_functions: BTreeSet<HostFunctionId>,
+    legacy_fs_syntax: bool,
 }
 
 impl CapabilitySetBuilder {
@@ -1471,7 +1490,18 @@ impl CapabilitySetBuilder {
             process_exit: None,
             module_resolver: None,
             host_functions: BTreeSet::new(),
+            legacy_fs_syntax: false,
         }
+    }
+
+    /// legacy の構文の印を付ける。authority ではなく `CapabilitySetId` にも入れない。
+    ///
+    /// `tsumugi` CLI（別 crate）の legacy profile が使うためだけに可視にしており、外部 embedder 向けの
+    /// 安定した公開契約ではない（`#[doc(hidden)]`、fix-fs-path-syntax-before-grant）。
+    #[doc(hidden)]
+    pub fn legacy_fs_syntax(mut self) -> Self {
+        self.legacy_fs_syntax = true;
+        self
     }
 
     /// Environment authority を grant する。二重設定は error。
@@ -1542,6 +1572,7 @@ impl CapabilitySetBuilder {
             process_exit: self.process_exit,
             module_resolver: self.module_resolver,
             host_functions: self.host_functions,
+            legacy_fs_syntax: self.legacy_fs_syntax,
             id,
         }))
     }
