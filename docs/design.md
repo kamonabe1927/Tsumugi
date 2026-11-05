@@ -1,6 +1,6 @@
 # Tsumugi — 設計ドキュメント
 
-最終更新: 2026-10-26
+最終更新: 2026-11-05
 
 ## 目的と位置づけ
 
@@ -22,7 +22,7 @@ Tsumugiは、言語処理系の開発を入り口から理解するための個�
 - **観測・監査可能性:** script identity、言語version、付与権限、予算消費、外部効果、終了理由を構造化してホストへ通知する
 - **小さく理解可能な中核:** 純粋な計算を中核に保ち、外部効果をhost boundaryの後ろへ移す
 
-これらは目標であり、現在のalpha実装に対する保証ではない。Phase 1 の最初の縦切りとして、`src/engine.rs` はツリーウォーク用の `Engine`、パース済み `CompiledScript`、状態保持用 `ExecutionContext`、`ExecutionOutcome` を crate root から公開し、CLIもこの入口を利用する。compile は構文解析までで、import は context に依存するため、execute開始時に最初のscript文を実行する前に共有`ModuleLoader`で全件を解決する。実行は caller の同一スレッドで同期的に行われるため、context は十分なスタックを持つスレッド内で生成・利用する必要がある。
+これらは目標であり、現在のalpha実装に対する保証ではない。Phase 1 の最初の縦切りとして、`src/engine.rs` はツリーウォーク用の `Engine`、パース済み `CompiledScript`、状態保持用 `ExecutionContext`、`ExecutionOutcome` を crate root から公開する。compile は構文解析までで、import は context に依存するため、execute開始時に最初のscript文を実行する前に全件を解決する。この `Engine` の経路（scheduler の handle 経路）と REPL は評価器内蔵の `ModuleLoader` で解決し、CLI の file・stdin の実行は tree・VM とも、次段落の埋め込みAPIの link（resolver capability）が確かめた graph から展開する（[Capability Model仕様](capability-model.md)第10節）。実行は caller の同一スレッドで同期的に行われるため、context は十分なスタックを持つスレッド内で生成・利用する必要がある。
 
 埋め込みAPI（`src/embedding.rs`。crate rootでは `EmbeddingEngine` / `EmbeddingOutcome` などとして公開）は、実行単位のdeny-by-defaultな `CapabilitySet`（`src/capability.rs`。`ExecutionRequest` の既定は全authorityを拒否する `CapabilitySet::empty`）、論理サイズによるlive heap上限（`BudgetResource::HeapBytes`、超過は `ErrorKind::HeapLimit`）を含む実行予算（`BudgetConfig`、`src/budget.rs`）、host I/Oを注入するcapability adapter（`Input` / `Output` / `Clock` / filesystem / host function）、協調キャンセル（`CancellationToken`、`ErrorKind::Cancelled`）とdeadline（`ErrorKind::DeadlineExceeded`）、`exit()` を構造化terminalとして返す `ExecutionOutcome::Exited` を実装している。従来の環境変数（`TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`・`TSUMUGI_MAX_*`）による制限は、CLIが起動時に読む互換入口（legacy profileのcapability構築と上限の上書き。[実行予算・協調実行仕様](execution-control.md)第13節）と `ModuleLoader` のimport検査に残る。VM（`Backend::VmExperimental`）は埋め込みAPIのrun経路にまだ統合されていない（[組み込みAPI仕様](embedding-api.md)のE9）。領域ごとの逸脱・未実装範囲は各領域別正本の逸脱一覧、現在地と実現順序は[ロードマップ](roadmap.md)で管理する。
 
@@ -455,7 +455,7 @@ let f = fn(x) x * 2 end
 
 `import` はプログラムのトップレベルでのみ有効とし、関数・条件分岐・ループ・`try` / `catch`・複数行ラムダのブロック内ではパースエラーにする。
 
-ツリーウォーク版・VM版とも共有`ModuleLoader`で、最初のscript文を実行する前に全importを解決する。読み込み・パース・sandbox検査・深度検査のいずれかが失敗した場合は、プログラムを1文も実行しない。正常時はlink済みのモジュール文を`import`文の位置で実行するため、source上の副作用順を維持する。実行中のdynamic importはなく、実行中に生成したmoduleを読み込むこともできない（AUD-030完了）。
+ツリーウォーク版・VM版とも、最初のscript文を実行する前に全importを解決する。file・stdinの実行はlink（resolver capability）が確かめたgraphから展開し、REPLとschedulerのhandle経路は評価器内蔵の`ModuleLoader`で解決する（下の「link済みProgramを両backendへ渡す」、[Capability Model仕様](capability-model.md)第10節）。どちらの経路でも、読み込み・パース・権限検査・深度検査のいずれかが失敗した場合は、プログラムを1文も実行しない。正常時はlink済みのモジュール文を`import`文の位置で実行するため、source上の副作用順を維持する。実行中のdynamic importはなく、実行中に生成したmoduleを読み込むこともできない（AUD-030完了）。
 
 Parserはプログラム直下とblock内の文を区別し、block内のimportをファイルI/O前に `import はトップレベルでのみ使用できます` で拒否する。これによりtree版・VM版でエラーフェーズとメッセージが一致し、到達不能branch内でもimport先へアクセスしない。
 
@@ -487,10 +487,12 @@ Parserはプログラム直下とblock内の文を区別し、block内のimport�
 - active depthと一時的な`base_dir`はinner処理の成否にかかわらず呼び出し元の値へ復元する
 - Python の挙動に近い（部分的に実行済みのモジュールオブジェクトを返す）
 
-#### 共有ローダーから両backendへ渡す
+#### link済みProgramを両backendへ渡す
 
-- `src/module.rs`の`ModuleLoader`がファイルを読み込み、パースし、import文をmodule文へ置換したlink済みProgramを作る
-- ツリーウォーク版は`Evaluator::run`の実行前、VM版はCompilerへProgramを渡す前に同じlink処理を使う
+- file・stdinの実行（埋め込みAPIのtree `Engine::run`・`run_audited`、VMの`src/main.rs`の`execute_vm_with_path`）は、`Engine::link`がresolver capabilityで読んで検証したsourceのgraphから、`src/module.rs`の`expand_from_graph`（CLIは`src/embedding.rs`の`expand_for_cli`経由）がimport文をmodule文へ置換したlink済みProgramを作る。展開時にfilesystemを読み直さない
+- REPLとschedulerのhandle経路は、評価器内蔵の`ModuleLoader`（`src/module.rs`）がファイルを読み込み、パースし、同じ形のlink済みProgramを作る。この経路はresolver gateを通らず、`TSUMUGI_SANDBOX`で検査する（[Capability Model仕様](capability-model.md)の逸脱一覧）
+- どちらの経路でも、ツリーウォーク版は実行前、VM版はCompilerへProgramを渡す前にlink済みProgramを受け取る
+- 経路ごとの詳細の正本は[Capability Model仕様](capability-model.md)第10節とする（判断役が選択、issue #318 D-48 Q1=A。理由: 本書は現行実装の記録であり、「両backendとも共有`ModuleLoader`」はfile・stdinのimportがresolver capabilityのgateを通るという現行の権限境界を誤って伝えるため）
 - Compiler固有の`compile_import`、`base_dir`、`imported`、`import_depth`はAUD-030で削除済みであり、両backendは実行中にimportを解決しない
 
 ### 制約・トレードオフ
@@ -510,7 +512,7 @@ Parserはプログラム直下とblock内の文を区別し、block内のimport�
 ### 概要
 
 ツリーウォークインタプリタに加え、バイトコードコンパイラ + スタックVMを並行実装する。
-`--vm`フラグで実行方式を切り替え可能。Lexer・Parser・ASTは共有し、両方式が同じ規範仕様を満たすことを目標とする。比較（AUD-014）、index代入（AUD-013）、context依存builtin（AUD-012）、import解決時点（AUD-030）、error kind・message・line（AUD-019）、関数値の同一性（AUD-048）、同一scopeの`let`再宣言でのcell identity（AUD-016）はいずれも統一済みである。ただし意味解析以降は別実装のため、未捕捉エラー後のREPL状態（AUD-024）に既知の差が残る。現時点のVMは互換性・性能ともに実験的backendとして扱い、非適合は`roadmap.md`で管理する。
+`--vm`フラグで実行方式を切り替え可能。Lexer・Parser・ASTは共有し、両方式が同じ規範仕様を満たすことを目標とする。比較（AUD-014）、index代入（AUD-013）、context依存builtin（AUD-012）、import解決時点（AUD-030）、error kind・message・line（AUD-019）、関数値の同一性（AUD-048）、同一scopeの`let`再宣言でのcell identity（AUD-016）、未捕捉エラー後のREPL状態の巻き戻し（AUD-024）はいずれも統一済みである。ただし意味解析以降は別実装である。現時点のVMは互換性・性能ともに実験的backendとして扱い、非適合は`roadmap.md`で管理する。
 
 ### 動機
 
@@ -626,17 +628,25 @@ VmFn {
 
 ```
 builtin_core.rs
-├── dispatch(name, &[Value], line) → Result<Option<Value>>   # public名46アーム（__pop_updateは含まず、OpCode::PopUpdate/tree pop が builtin_pop_update を直接呼ぶ）
-├── builtin_len, builtin_push, ...（builtin_* が47個）
-│   ├── 副作用なしの値変換: 32個
-│   └── filesystem / env / clock に触るもの: 15個
-│       （read_file, read_lines, write_file, append_file, path_exists,
-│         mkdir, remove, remove_dir, rename, list_dir, file_size,
-│         is_file, is_dir, env, now）
-├── check_arity, check_arity_count, check_collection_size_public,
-│   is_context_builtin, type_error, assign_index, write_stdout_line（共通検査・共有処理）
-└── format_unix_timestamp, is_leap_year, remove_symlink_entry（ヘルパー）
+├── dispatch(name, args, max_collection, line) → Result<Option<Value>>
+│   # 副作用なしの値変換だけを扱う（未知の名前は Ok(None)）。__pop_update は含まず、
+│   # OpCode::PopUpdate / tree の pop が builtin_pop_update を直接呼ぶ
+├── builtin_len, builtin_push, builtin_range, ...（副作用なしの値変換）
+│   └── builtin_sort_budgeted, builtin_join_budgeted, builtin_to_str_budgeted,
+│       builtin_contains_budgeted（実行予算を受け取る版。dispatch を経ず、
+│       tree/VM の dispatch 境界が直接呼ぶ）
+├── dispatch_fs → dispatch_filesystem_capability（filesystem builtin。
+│   is_filesystem_builtin で判定し、tree/VM の dispatch 境界が capability 経路へ回す。
+│   Filesystem 未 grant なら adapter/OS call なしで sandbox error）
+├── resolve_env, resolve_now, resolve_input, resolve_print, resolve_exit
+│   （env / clock / 標準入出力 / exit。注入された capability だけを使い、未 grant なら capability error）
+├── is_host_call_builtin, host_call_triple, ...（host function 呼び出しの共有処理）
+├── check_arity, check_arity_count, is_context_builtin,
+│   validate_context_builtin_call, assign_index（共通検査・共有処理）
+└── format_unix_timestamp, is_leap_year（ヘルパー）
 ```
+
+関数の数は書かない（増減のたびに古くなるため。正本は `src/builtin_core.rs`）。
 
 設計方針:
 - **引数は評価済み `&[Value]`** — 引数評価自体は各engineが担当し、共通モジュールは評価済みの値だけ受け取る
@@ -668,19 +678,22 @@ builtin_core.rs
 
 ## 実行安全性の設計
 
-この節は、現在のalpha実装が提供するdefense-in-depth機構を記録する。マニフェストが目標とする実行単位のcapability、包括的な実行予算、エンジン全体の負荷制御とは区別する。
+この節は、現行実装の実行安全性の機構を記録する。外部効果の権限は実行単位の`CapabilitySet`でdeny-by-defaultに付与し、CLIの既定は`--profile safe`である（上の「目的と位置づけ」）。権限・profileの契約の正本は[Capability Model仕様](capability-model.md)（CLIは第14節）、実行予算の正本は[実行予算・協調実行仕様](execution-control.md)とし、本節では詳細を繰り返さない。
 
 現行機構は誤操作と過剰な資源消費を抑えるが、敵対的コードを隔離するsecurity sandboxではない。非信頼コードにはOS・コンテナ側の権限、CPU、メモリ、filesystem、実行時間制限を併用する。
-実行量・collection・I/Oの制御は環境変数で設定し、構文・AST・call frame・import chainの構造的上限はコンパイル時定数で固定する。環境変数方式は未設定時に既定値または制限なしのfail-openとなる（開発時のUXを阻害しない）。deny-by-defaultへの移行は[ロードマップ](roadmap.md)で管理する。
+- **権限:** filesystem・環境変数・時刻・script stdin・exit・import resolver・host functionは、safe profileではoptionで明示したものだけをgrantする。未grantの操作はadapter・OSを呼ばずにcatch可能なerrorになる（filesystemは`sandbox`、それ以外は`capability`）。core evaluator/builtinは環境変数を読まない
+- **従来の環境変数:** `TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`は、`--profile legacy`でCLI adapterが起動時に1回だけ読んでcapabilityを構築する互換入口である（capability-model 第14.3節）。例外はREPLとschedulerのhandle経路のimportで、評価器内蔵の`ModuleLoader`が`TSUMUGI_SANDBOX`で検査する（`src/sandbox.rs`。capability-modelの逸脱一覧）
+- **実行予算:** `BudgetConfig`の上限で制御する。`TSUMUGI_MAX_*`はCLIが起動時に1回だけ読む非推奨の上書きである（execution-control 第13節）
+- **構造的上限:** 構文・AST・call frame・import chainの上限はコンパイル時定数で固定する
 
 ### 制御機構一覧
 
 | 設定 / 定数 | 対象 | 動作 |
 |---|---|---|
-| `TSUMUGI_MAX_STEPS` | ループ反復 + 関数呼び出し（CLIのみ・非推奨） | 上限超過でランタイムエラー |
-| `TSUMUGI_MAX_COLLECTION_SIZE` | List/Dictの生成・拡張とList生成builtin（CLIのみ・非推奨） | 要素数上限超過でランタイムエラー |
-| `TSUMUGI_SANDBOX` | 全ファイル操作（read/write/import） | 許可パス外へのアクセスをブロック |
-| `TSUMUGI_ENV_ALLOW` | `env()` 関数 | 許可リスト外のキーは null を返す |
+| `--profile safe`（CLIの既定） | 外部効果のcapability | optionで明示したものだけをgrantする。未grantの操作はadapter・OSを呼ばずにcatch可能なerror |
+| `--profile legacy` | 互換用のcapability | CLI adapterが`TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`を1回読んで構築する。未設定時はunrestrictedのfilesystem・全環境変数（`TSUMUGI_`を除く）をgrantし、警告をstderrへ1件出す |
+| `TSUMUGI_SANDBOX`（REPL・schedulerのhandle経路） | `ModuleLoader`のimport | 許可パス外のimportを拒否する |
+| `TSUMUGI_MAX_STEPS` / `TSUMUGI_MAX_COLLECTION_SIZE` ほか`TSUMUGI_MAX_*` | `BudgetConfig`の各上限（CLIのみ・非推奨） | CLIが起動時に1回読み、同名の上限へ設定して非推奨の警告を出す |
 | `MAX_USER_CALL_DEPTH = 128` | ユーザー関数のcall frame（root除く） | 129個目の直前で`StackOverflow` |
 | `MAX_AST_DEPTH = 256` | Parser生成物と公開AST | Parser生成時とCompiler/Evaluator入口で拒否 |
 | `MAX_IMPORT_DEPTH = 128` | rootを除くactive import chain | 129段目を`Import`エラーで拒否 |
@@ -709,7 +722,7 @@ builtin_core.rs
 
 ### TSUMUGI_* 環境変数の保護
 
-`env()` 組み込み関数は `TSUMUGI_` プレフィックスで始まるキーへのアクセスを常に `null` で返す。`TSUMUGI_ENV_ALLOW` 許可リストの設定に関わらず適用される。WindowsではキーをUnicode uppercaseへ変換してからprefixを照合し、ASCII大小文字違いとASCII名へ別名解決され得るUnicode case variantを保護する。その他のOSではcase-sensitiveに照合する。
+`TSUMUGI_` プレフィックスで始まるキーは、CLIのprofile builder（`src/cli_capability.rs`）がenvironment snapshotから常に除く。legacy profileは`TSUMUGI_ENV_ALLOW`の設定に関わらず除外し、safe profileは`--allow-env`に保護されたキーを指定するとusage errorにする。`env()` 組み込み関数はsnapshotだけを引くため、これらのキーは `null` になる。WindowsではキーをUnicode uppercaseへ変換してからprefixを照合し、ASCII大小文字違いとASCII名へ別名解決され得るUnicode case variantを保護する。その他のOSではcase-sensitiveに照合する（capability-model 第5節）。
 
 理由: `TSUMUGI_SANDBOX`, `TSUMUGI_MAX_STEPS`, `TSUMUGI_ENV_ALLOW` 等のランタイム制御用環境変数の値がスクリプトに漏洩すると、サンドボックスの許可パスリストや実行上限が攻撃者に見えてしまう。
 
@@ -723,12 +736,13 @@ REPLではtree版・VM版とも入力開始時にステップカウンタを0へ
 
 REPLの未捕捉エラーは、外部I/Oを含む完全なACID transactionではない。ただし、次入力を安全に処理するための内部構造状態は入力開始時点へ戻す。
 
-- Compiler: `locals`、scope/loop、import集合、base directoryをcheckpointし、compile errorまたはVM runtime errorで復元
+- Compiler: `locals`、scope/loopをcheckpointし、compile errorまたはVM runtime errorで復元
+- ModuleLoader: import集合とbase directoryは`ModuleLoader`が持つ（AUD-030でCompilerから削除済み）。VM REPLはCompilerと同じ入力単位で`ModuleLoader`をcheckpoint（clone）し、link・compile・runtimeのいずれかのerrorで復元する（`src/main.rs`のVM REPL）
 - VM: value stack、call frame、try handler、step状態、runtime global registryのname→slot対応をcheckpointし、未捕捉runtime errorで復元
 - top-levelの`locals_cells`は正常入力間で引き継ぎ、既存closureとの参照同一性を維持
 - try/catchは開始時の有効local slot数を保存し、unwind時はtry-local cellだけを破棄する。既存localがtry中に初めてcell化された場合は昇格を維持する
 - catch済みエラーは通常の制御フローとしてcommitする
-- 現行実装ではエラー前の共有cell代入のcommit/rollbackがengine間で未統一である。次期契約は[次期意味論・実装決定](semantic-decisions.md)第7節と[実行予算・協調実行仕様](execution-control.md)第10節で確定済みだが未実装である
+- エラー前の共有cell代入も、両engineとも入力単位のundo journal（tree=`src/env.rs`の`SubmissionJournal`、VM=`src/vm.rs`の`ReplStackCheckpoint`）で入力開始時点へ戻す（AUD-024）。契約の正本は[次期意味論・実装決定](semantic-decisions.md)第7節と[実行予算・協調実行仕様](execution-control.md)第10節
 
 ### コレクションサイズ上限
 
@@ -738,10 +752,11 @@ REPLの未捕捉エラーは、外部I/Oを含む完全なACID transactionでは
 
 ### 設計判断
 
-- **エラーにするか null を返すか**: ファイルI/O のサンドボックス違反はランタイムエラー（意図せぬアクセスを即座に検出するため）。env() の許可リスト外は null を返す（「存在しないキー」と同じ挙動にして、スクリプト側に漏洩情報を与えない）
-- **OnceLock による初期化**: 許可リストはプロセス起動時に一度だけ読み込む。テスト時に動的に切り替えたい場合の課題が残っている（ロードマップ「サンドボックスの OnceLock テスタビリティ」参照）
-- **import のサンドボックス対応**: canonicalize 後に check_path を呼ぶ。ファイルが存在しない場合は canonicalize が先に失敗するため、存在しないパスへの import は「ファイルが見つかりません」エラーになる（サンドボックス違反ではない）
-- **破壊的操作のdirectory entry検査**: `remove` / `remove_dir` / `rename`は中間componentをcanonicalizeしつつfinal componentを保持する`check_entry_path`を使う。final symlinkが許可範囲内ならlink entry自体だけを操作し、targetの場所は認可・操作対象にしない。中間symlinkは従来どおり解決し、許可範囲外への迂回を拒否する
+- **エラーにするか null を返すか**: filesystemの許可外の操作はcatch可能な`sandbox` error（意図せぬアクセスを即座に検出するため）。environment snapshotに無いキーの`env()`は null を返す（「存在しないキー」と同じ挙動にして、スクリプト側に漏洩情報を与えない）。Environment自体が未grantなら`capability` errorになる
+- **環境変数を読む時点**: legacy profileの`TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`と`TSUMUGI_MAX_*`は、CLI adapterが起動時に1回だけ読み、executionごとのcapabilityとconfigへ写す。プロセス全体の`OnceLock`に残るのは、REPL・schedulerのhandle経路のimportが使う`src/sandbox.rs`の許可パスリストだけである
+- **import のサンドボックス対応（`ModuleLoader`経路）**: canonicalize 後に`sandbox::check_path`を呼ぶ。ファイルが存在しない場合は canonicalize が先に失敗するため、存在しないパスへの import は「ファイルが見つかりません」エラーになる（サンドボックス違反ではない）。file・stdinのimportはresolver capabilityが扱う（capability-model 第10節）
+- **破壊的操作のdirectory entry検査**: filesystem builtinはC10以降`sandbox.rs`を通らず、`FilesystemCapability`のroot拘束handleとsymlink policyで検査する（`src/builtin_core.rs`の`dispatch_fs`。capability-model 第8節）
+- 判断役が選択（issue #318 D-47 Q1=A）: 本節は、env変数中心・未設定時fail-openの記述から、safe profileが既定のcapabilityモデルの記録へ書き直した。詳細は capability-model 第14節・execution-control 第13節を参照させて再掲しない。理由: 本書は現行実装の正本であり、既定がfail-openと読める記述は現在の保証範囲を誤って伝える（[マニフェスト](manifesto.md) 原則2・原則9、documentation-guide「状態の正本は粒度ごとに1箇所だけ」）
 
 ### 未対応の既知の制約
 
@@ -752,6 +767,12 @@ REPLの未捕捉エラーは、外部I/Oを含む完全なACID transactionでは
 
 
 ## 変更履歴
+
+### 2026-11-05: 現行実装の記述を実装に合わせる（loop:drift #318 の D-44〜D-48）
+
+**問題:** 現行実装の記録である本書の5か所が実装より古かった。AUD-024（REPL状態の巻き戻し）を未統一とし（D-44）、Compilerがimport集合とbase directoryをcheckpointするとし（D-45。AUD-030で`ModuleLoader`へ移った）、`builtin_core.rs`の構成図がC10より前の形だった（D-46）。「実行安全性の設計」はenv変数中心・未設定時fail-openの時代のままで（D-47）、importは両backendとも共有`ModuleLoader`で解決するとしていた（D-48。file・stdinはlinkのgraphから展開する）。
+
+**決定:** 本書の役割は変えず、`src/env.rs`・`src/vm.rs`・`src/main.rs`・`src/compiler.rs`・`src/builtin_core.rs`・`src/cli_capability.rs`・`src/sandbox.rs`・`src/module.rs`・`src/embedding.rs`で確かめた現在の実装に合わせて直す。D-47・D-48は判断役が選択した（issue #318、D-47 Q1=A・D-48 Q1=A）。どちらも詳細を領域別正本（capability-model 第10節・第14節、execution-control 第13節）に任せ、本書では参照にとどめる。
 
 ### 2026-10-26: 現行実装の記述を実装に合わせる（loop:drift #263 の D-7）
 
