@@ -74,6 +74,20 @@ class MergeCandidate(unittest.TestCase):
         out = self.one(pr(comments=[c(LOOP, REVIEW_OK, "2026-11-01T07:00:00Z"), c(LOOP, both, "2026-11-01T07:10:00Z")]))
         self.assertEqual(out["gate"], "ng")
 
+    def test_later_ok_does_not_override_ng_on_same_commit(self):
+        com = [c(LOOP, REVIEW_OK, "2026-11-01T07:00:00Z"), c(LOOP, GATE_NG, "2026-11-01T07:10:00Z"),
+               c(LOOP, GATE_OK, "2026-11-01T07:20:00Z")]
+        out = self.one(pr(comments=com))
+        self.assertEqual(out["gate"], "ng")
+        self.assertFalse(out["merge_candidate"])
+
+    def test_ng_on_older_commit_does_not_carry_over(self):
+        com = [c(LOOP, REVIEW_OK, "2026-11-01T07:00:00Z"),
+               c(LOOP, GATE_NG.replace("abc1234", "0000000"), "2026-11-01T06:50:00Z"),
+               c(LOOP, GATE_OK, "2026-11-01T07:10:00Z")]
+        self.assertEqual(self.one(pr(comments=com))["gate"], "ok")
+
+
     def test_sample_line_is_not_ok(self):
         sample = "🤖 Claude Code manifesto-gate abc1234\n判定: 適合 ／ 判定: 疑いあり"
         out = self.one(pr(comments=[c(LOOP, REVIEW_OK, "2026-11-01T07:00:00Z"), c(LOOP, sample, "2026-11-01T07:10:00Z")]))
@@ -169,6 +183,26 @@ class Stuck(unittest.TestCase):
                   {"labels": [{"name": "loop:stuck"}], "head": {"ref": "fix/e4"}},
                   {"labels": [], "head": {"ref": "feat/e4"}}]
         self.assertEqual(s.judge([], [], [], NOW, closed)["stuck_counts"], {"e4": 2})
+
+    def test_collect_reads_all_stuck_prs_not_only_recent_100(self):
+        calls = []
+
+        def fake_gh(path, paginate=True):
+            calls.append(path)
+            if "labels=loop:stuck" in path:
+                return [{"number": n, "pull_request": {}} for n in range(1, 151)] + [{"number": 999}]
+            if "/pulls/" in path and path.split("/pulls/")[1].isdigit():
+                return {"labels": [{"name": "loop:stuck"}], "head": {"ref": "feat/e4"}}
+            return []
+
+        orig = s.gh
+        s.gh = fake_gh
+        try:
+            _, _, _, stuck_closed = s.collect("o/r", NOW)
+        finally:
+            s.gh = orig
+        self.assertEqual(len(stuck_closed), 150)  # issue（#999）は数えない
+        self.assertEqual(s.stuck_counts(stuck_closed), {"e4": 150})
 
 
 class MergedToday(unittest.TestCase):
