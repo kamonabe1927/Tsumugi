@@ -576,7 +576,7 @@ ModuleIdは同じlogical moduleへ同じIDを返す。同ID/異hashのlink error
 
 この段落はissue #291 のQ1=A（run層のimportはlinkで確認したmodule graphから読み、入れ子のimportもlink時にresolverの許可を通す。run層で`ModuleLoader`がファイルを読み直す経路をfile/stdinから無くす。REPLは範囲外）による。返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5）。採らなかった案B（`ModuleLoader`を残しrun層にもresolverと同じroot検査を足す）は、確認と読み込みが2経路のまま残り、確認後の差し替えを防げないため採らない。
 
-REPL（tree・VM）のimportを上の規則に含めることは、issue #327 のQ1=A（判断役が選択、issue #327）による。理由: 原則2「権限はホストが明示的に付与する」と優先順位の表「明示的なcapability ＞ ambient authorityによる利便性」、[脅威モデル](threat-model.md) TM-024（全importはlink時にresolver capabilityだけを使う）・TM-AT-24（execution中のresolver呼び出し0回）に実装を合わせ、file/stdinとREPLのimportの成否を`module_resolver`のgrantの有無という1つの規則に揃える（原則8）。使い勝手は1つの明示grant（`--allow-import-root default=.`）で今と同じ使い方に戻せる。採らなかった案B（REPL起動時にCWDを`default` mountとして自動grantする）は、求められていないfilesystemの読み取り権限を既定で与え、同じprofileでfile/stdinが`Denied`になるimportをREPLだけ通す経路差を残すため採らない。案C（REPLを目標から外す）は、ambientな読み込みを残しTM-024の目標を後退させるため採らない。上の段落のissue #291 Q1=Aの「REPLは範囲外」は、本判断（#327）で置き換えた。#291の記録は時点の記録として残す（issue #327 のQ3=A、判断役が選択。理由: 経緯を後からたどれるようにする、原則9）。scheduler の handle 経路（`Engine::compile` / `create_execution` / `start`）も link 済み graph から展開する（issue #327 のQ2=A、判断役が選択。理由: [実行予算・協調実行仕様](execution-control.md) §9.1の目標の形とTM-AT-24を handle 経路でも満たし、同じscript・権限から入口によらず同じ結果にする、原則5）。handle 経路の公開APIの形は、§18の小節が決まるまで逸脱一覧の行のままとする。
+REPL（tree・VM）のimportを上の規則に含めることは、issue #327 のQ1=A（判断役が選択、issue #327）による。理由: 原則2「権限はホストが明示的に付与する」と優先順位の表「明示的なcapability ＞ ambient authorityによる利便性」、[脅威モデル](threat-model.md) TM-024（全importはlink時にresolver capabilityだけを使う）・TM-AT-24（execution中のresolver呼び出し0回）に実装を合わせ、file/stdinとREPLのimportの成否を`module_resolver`のgrantの有無という1つの規則に揃える（原則8）。使い勝手は1つの明示grant（`--allow-import-root default=.`）で今と同じ使い方に戻せる。採らなかった案B（REPL起動時にCWDを`default` mountとして自動grantする）は、求められていないfilesystemの読み取り権限を既定で与え、同じprofileでfile/stdinが`Denied`になるimportをREPLだけ通す経路差を残すため採らない。案C（REPLを目標から外す）は、ambientな読み込みを残しTM-024の目標を後退させるため採らない。上の段落のissue #291 Q1=Aの「REPLは範囲外」は、本判断（#327）で置き換えた。#291の記録は時点の記録として残す（issue #327 のQ3=A、判断役が選択。理由: 経緯を後からたどれるようにする、原則9）。scheduler の handle 経路（`Engine::compile` / `create_execution` / `start`）も link 済み graph から展開する（issue #327 のQ2=A、判断役が選択。理由: [実行予算・協調実行仕様](execution-control.md) §9.1の目標の形とTM-AT-24を handle 経路でも満たし、同じscript・権限から入口によらず同じ結果にする、原則5）。handle 経路の形は、alpha `Engine`のsignatureを変えずに初回pollのLinkフェーズでembeddingと同じlinkを通し、同期wrapper（`execute` / `execute_repl_submission`）も含める（PR #339 のQ1=A・Q2=A、判断役が選択（PR #339）。理由は§18のfix-handle-import-from-link小節）。
 
 展開済みの判定を`ModuleId → source_hash`で持ち、hashが違えば失敗にする規則は、PR #303 の判断待ちQ2=A（context再利用時の展開済みの判定）による。返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5）。理由: 同ID/異hashを後勝ちにしない[組み込みAPI仕様](embedding-api.md) §5.1と本節の規則をrunをまたぐ場合にも当てはめ、runが自分のlinkで確かめた内容を実行することを保つ（[マニフェスト](manifesto.md) 原則5「予測可能性」、原則6「失敗を制御可能な結果にする」）。採らなかった案B（キーを`(ModuleId, source_hash)`にし、hashが違えば別moduleとして展開する）は、同じ名前の再定義が黙って起きるため採らない。案C（`ModuleId`だけをキーにし、hashが違ってもskipする）は、runが自分のlinkで確かめた内容を実行しないことがあるため採らない。
 
@@ -1234,7 +1234,7 @@ VM REPL の session、alpha `Engine` の handle）なので分けた。
 - **想定の変更規模**: `src/main.rs` の REPL の link/表示 +30〜60 行、`src/embedding.rs` の `run_for_repl` の展開の切り替え +40〜100 行、
   `link_for_repl` と REPL 用の loader 分岐の削除 −60〜120 行。合計 150〜300 行。テストは +100〜200 行と既存 3〜4 本の修正。
   触る仕組みは tree REPL の link/run の入口 1 つ、受入基準は 4 項目。done にする実装 PR で、逸脱一覧の REPL の行から tree の部分を除く
-  （fix-repl-import-gate-vm が done なら行を削除する）。
+  （fix-repl-import-gate-vm が done なら行を削除する）。[脅威モデル](threat-model.md) の逸脱一覧の REPL・handle 経路の行も同じく自分の部分を除く。
 
 ### fix-repl-import-gate-vm 実装スライス（VM REPL の import を resolver gate に通す）
 
@@ -1259,7 +1259,44 @@ issue #327 の Q1=A を VM REPL（`src/main.rs` の `run_repl_vm`）に当ては
   - **RIV-AT-04**（`ModuleLoader` を使わない）: `src/main.rs` に `ModuleLoader` の参照が無く、`TSUMUGI_SANDBOX` を import root と関係の無い
     ディレクトリにしても `--vm` の REPL の import の成否が `--allow-import-root` だけで決まる。確かめ方: subprocess test と `grep` の確認を PR 本文に貼る。
 - **想定の変更規模**: `src/main.rs` の `run_repl_vm` の書き換え +100〜220 行・−60〜90 行（展開済みの表と transaction を含む）。
-  テストは +80〜150 行。触る仕組みは VM REPL の session 1 つ、受入基準は 4 項目。done にする実装 PR で、逸脱一覧の REPL の行から VM の部分を除く（fix-repl-import-gate-tree が done なら行を削除する）。
+  テストは +80〜150 行。触る仕組みは VM REPL の session 1 つ、受入基準は 4 項目。done にする実装 PR で、逸脱一覧の REPL の行から VM の部分を除く（fix-repl-import-gate-tree が done なら行を削除する）。[脅威モデル](threat-model.md) の逸脱一覧の REPL・handle 経路の行も同じく自分の部分を除く。
+
+### fix-handle-import-from-link 実装スライス（scheduler の handle 経路の import を link 済み graph から展開）
+
+issue #327 の Q2=A を scheduler の handle 経路（alpha `Engine`、`src/engine.rs` の `compile` / `create_execution` / `start`）に当てはめる。
+形は PR #339 の Q1=A・Q2=A（判断役が選択、PR #339）による。
+
+- **決定記録**:
+  - Q1=A: alpha `Engine::create_execution` / `start` の signature は変えず、handle の初回 poll の Link フェーズ（`Created` / `Linked`、`Running` より前）で、
+    context に grant された `module_resolver` を使う embedding と同じ link を通し、その graph から import を展開する。理由: [実行予算・協調実行仕様](execution-control.md)
+    §9.2 の「Created --pollでlink成功--> Linked」と §1.1 の「link を同じ handle で進める」がこの形を目標に定めており、TM-AT-24（execution 中の resolver
+    呼び出し 0 回）を handle 経路で満たし、import の読み込み経路を link 1 つに減らす（[マニフェスト](manifesto.md) 原則 2・5・8）。`start(&LinkedScript)`・`LinkOptions`
+    の形の差は execution-control の逸脱一覧（§9.1）のまま E10 に残す。採らなかった案 B（alpha `start` だけが embedding の `LinkedScript` を取る）は、2 つの `Engine`・
+    `CompiledScript` を E10 より前に部分的に結ぶ中間の形を公開 API に固定し（§1.1 の「旧型と最終型を併存させない」）、`create_execution` の扱いが決まらないため採らない。
+    案 C（E10 を先に行う）は、未設計の大きな仕事の後ろまで ambient な読み込みを残すため採らない（優先順位の表「明示的な capability ＞ ambient authority による利便性」）。
+  - Q2=A: alpha の同期 wrapper（`Engine::execute` / `execute_repl_submission`）も `create_execution` を通るので同じ gate に含め、`module_resolver` を grant していない
+    alpha 利用者の import は `Denied` にする。理由: 入口によらず同じ規則にし（原則 2・5、TM-024 の「load 経路差で policy を迂回する」）、[組み込みAPI仕様](embedding-api.md)
+    §13（Release N-1 の 3「旧 wrapper は ambient 権限を付与しない」）とも一致する。alpha の後方互換性はマニフェストの「目指さないもの」。採らなかった案 B
+    （wrapper だけ `ModuleLoader` を残す）は ambient な読み込みを残し原則 2 と TM-024 に反しうるため採らない。
+- **実装範囲**:
+  1. `src/engine.rs` の handle の Link フェーズ（初回 poll、`Evaluator::begin_execution` を呼ぶところ）で、context の `CapabilitySet` の `module_resolver` を使い、
+     embedding の `Engine::link` と同じ規則（cancel の観測 → resolver 未 grant + import は resolver 呼び出し 0 回の terminal `Denied` → graph の解決・UTF-8 検証・module 単体 compile）
+     で graph を作る。失敗の outcome は §1.1（execution-control）の写像（`Denied` / `HostError` / `BudgetExceeded` / … / `LinkError`）に従う。
+  2. 展開は §10 の規則のまま `Evaluator::begin_execution_from_graph`（`expand_from_graph`）で行い、評価器の `ModuleLoader` を使う `begin_execution` の経路を無くす。
+  3. `src/module.rs` の `ModuleLoader` と、`src/sandbox.rs` の import 用の検査（`check_path` ほか）を削除する。`TSUMUGI_SANDBOX` は CLI の legacy profile（§14.3）が読むだけになる。
+  4. `ModuleLoader` を前提にする既存テスト（`tests/engine_api.rs`・`tests/scheduler_api.rs` の import を含むもの、`src/eval.rs`・`src/module.rs` のテスト）は、resolver を grant する形に直すか削除する。
+- **範囲外**: `start(&LinkedScript)`・`LinkOptions` の導入と 2 つの `Engine` の統合（E10）、REPL（fix-repl-import-gate-tree / -vm）。
+- **受入基準（fix-handle-import-from-link）**:
+  - **HIL-AT-01**（未 grant）: `module_resolver` を grant しない context で、import を含む script を `create_execution` → `poll` すると、`Running` に入らず resolver 呼び出し 0 回の
+    terminal `Denied` になる（1 文も実行しない）。`start` と同期 wrapper の `execute` / `execute_repl_submission` も同じ。確かめ方: `tests/scheduler_api.rs` と `tests/engine_api.rs`。
+  - **HIL-AT-02**（grant あり・execution 中の resolver 0 回、TM-AT-24）: 呼ばれた回数を数える resolver を grant し、import を 2 本含む script を 1 slice ずつ poll すると、resolver は
+    Link フェーズで import の数だけ呼ばれ、`Running` 以降は 0 回で、module の top-level が実行される。確かめ方: `tests/scheduler_api.rs`。
+  - **HIL-AT-03**（読み直さない）: on-disk に無い module を返す in-memory resolver で handle 経路の import が実行され、CWD に同名のファイルがあっても読まれない。確かめ方: 同上。
+  - **HIL-AT-04**（経路の削除）: `src/` に `ModuleLoader` の定義・参照が無く、`src/sandbox.rs` に import 用の検査が無い。確かめ方: `grep` の結果を PR 本文に貼る。
+- **想定の変更規模**: `src/engine.rs`・`src/eval.rs` の Link フェーズの切り替え +80〜200 行、`src/module.rs` の `ModuleLoader` と `src/sandbox.rs` の import 検査の削除 −300〜500 行。
+  合計 400〜700 行。触る仕組みは handle の Link フェーズ 1 つ（削除はその結果）、受入基準 4 項目。done にする実装 PR で、逸脱一覧の handle 経路の行（§10）と、
+  [脅威モデル](threat-model.md) の逸脱一覧の REPL・handle 経路の行のうち handle の部分を削除する（REPL の 2 本が done なら行ごと削除する）。execution-control の逸脱一覧（§9.1）の行は形の差として残す。
+- **依存**: REPL の 2 本（fix-repl-import-gate-tree / -vm）が `ModuleLoader` を使わなくなってから削除するので、その 2 本に依存する。2 本が done になったら、設計 PR（`design_pr` を記入）で `ready` にする。
 
 ## 19. 受入基準
 
