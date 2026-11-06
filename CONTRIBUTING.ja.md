@@ -82,6 +82,7 @@ cargo test                                     # テスト
 
 補足:
 
+- Claude Code で作業するときは、`git push` の直前にフック（`.claude/settings.json` → `.github/scripts/pre_push_hook.py`）が走る。main への push を止め、Rust の差分があれば `cargo fmt --check` と clippy を先に通す。落ちたら push は止まる。`cargo test` はフックでは走らないので、上のとおり自分で走らせる
 - CI の clippy は `--all-targets --all-features` を付けてテストやベンチも含めて検査する。上記のとおりローカルでも同じフラグで実行すると CI との差分が出にくい
 - CI の test は `cargo test --all-features --locked` を実行する。`--locked` は `Cargo.lock` の変更を許さないため、依存を更新した場合は lock も併せてコミットする
 - CI には MSRV（`Cargo.toml` の `rust-version`、現状 Rust 1.97）での退行を検出する `msrv` ジョブがある。MSRV を意図せず上げる依存更新は避ける

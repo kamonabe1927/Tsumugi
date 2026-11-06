@@ -12,7 +12,7 @@
 逸脱として載せる案（Q2=A）は、返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5、
 issue #263 Q2=A）。理由: spec が実装の正本であり、adapter の context 引数・`Control` は Phase 3/4 の予算・協調実行
 （[マニフェスト](manifesto.md) 原則 3・4）を受ける目標の形である。本文を実装に合わせるとその受け皿が spec から消える。載せたのは 2026-10-25 の整合点検で §3〜§11.1 を実装と照合して確かめた差であり、
-照合していない節（§12・§14.2 以降）の逸脱は、事実を確かめられたものから順に載せる。表は現時点で #263 D-3 の (a)〜(d) と、issue #291 の設計で事実を確かめた 1 行（scheduler の handle 経路の import）を持つ（(e) は fix-host-function-id-unique で、区切り文字だけの `TSUMUGI_SANDBOX` の行は fix-legacy-sandbox-empty-list で、file/stdin の run 層の import 展開の行は fix-import-run-from-link-graph で、`rename` の移動先の `Delete` の行は fix-rename-destination-delete で解消した）。loop:drift #318 の D-38〜D-41 で、パスの形式検査と grant の検査の順序、`rename` の移動先の `Delete`、byte 上限 N の境界、`print` の改行の課金の 4 行を足した。上の設計ステータス段落にある現在の状態のうち、E9 の残りなどと、§18「実装slice」の状態注記は、まだ表へ移していない。
+照合していない節（§12・§14.2 以降）の逸脱は、事実を確かめられたものから順に載せる。表は現時点で #263 D-3 の (a)〜(d) と、issue #291 の設計で事実を確かめた 1 行（scheduler の handle 経路の import）を持つ（(e) は fix-host-function-id-unique で、区切り文字だけの `TSUMUGI_SANDBOX` の行は fix-legacy-sandbox-empty-list で、file/stdin の run 層の import 展開の行は fix-import-run-from-link-graph で、`rename` の移動先の `Delete` の行は fix-rename-destination-delete で、`print` の改行の課金の行は fix-print-newline-charge で解消した）。loop:drift #318 の D-38〜D-41 で、パスの形式検査と grant の検査の順序、`rename` の移動先の `Delete`、byte 上限 N の境界、`print` の改行の課金の 4 行を足した。上の設計ステータス段落にある現在の状態のうち、E9 の残りなどと、§18「実装slice」の状態注記は、まだ表へ移していない。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱）
 
@@ -26,7 +26,6 @@ issue #263 Q2=A）。理由: spec が実装の正本であり、adapter の cont
 | REPL（tree・VM）の import は Engine resolver gate を通らない。tree REPL（`src/main.rs` の `run_repl`）は `link_for_repl`（`src/embedding.rs`。import の有無によらず空 graph を返し `module_resolver` の grant を見ない）と `run_for_repl` を通り、import は評価器内蔵 `ModuleLoader` が CWD 相対で読む。VM REPL（`src/main.rs` の `run_repl_vm`）は `ModuleLoader::link` を直接呼ぶ。どちらも `--allow-import-root` なしで import でき、`TSUMUGI_SANDBOX`（`src/sandbox.rs`）の検査だけを受け、失敗は file/stdin と違う固定のエラー文字列になる。issue #327 | §10・§14.1 | E7（tree）、E9 の VM file/stdin 統合で据え置いた VM REPL |
 | Filesystem の grant が無いとき、script のファイルシステム操作はパスの形式を検査せずに `sandbox` error を返す（`src/builtin_core.rs` の `dispatch_fs` の `None => filesystem_denied`）。目標は lexical なパスの形式検査を capability の有無より先に行い、`PathError` を catch 可能な `argument` error にすることである。grant があるときは形式検査が先に行われる（`fs_route`）。順序を固定するテストは無い。loop:drift #318 D-38 | §8.2・§8.5・§13 | C5 |
 | 有限の byte 上限 N で N+1 byte を溜める前に止める規定が、file の読み込みと module source では未実装である。`read_file` / `read_lines` は `read_to_end` で全部読んでから課金し（`src/builtin_core.rs`）、link 時の module source も上限を見ずに全部読む（`src/embedding.rs` の `read_module_source`、`src/capability.rs` の OS の `ModuleSource::read_chunk`）。CAP-AT-15 と CAP-AT-17 の byte の境界のテストは無い（CAP-AT-17 のテストは module の本数の境界だけ）。loop:drift #318 D-40 | §7・§10・§19 | C11 |
-| `print` の output 課金に改行の 1 byte が入らない。tree（`src/builtin.rs` の `apply_print`）と VM（`src/vm.rs`）はどちらも `parts.join(" ")` の byte 長だけを `charge_output` へ渡し、adapter へは改行を足した bytes を書く。`TSUMUGI_MAX_OUTPUT_BYTES=2` で `print("ab")` が成功する。loop:drift #318 D-41 | §7 | REV-015 Slice 2 |
 
 ## 1. 目的と規範範囲
 
