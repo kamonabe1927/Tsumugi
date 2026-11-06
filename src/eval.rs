@@ -6791,4 +6791,32 @@ mod tests {
             assert_eq!(audit_yield_reason_for_pause(), AuditYieldReason::HostPaused);
         }
     }
+
+    /// FPS-AT-03（tree）: legacy の印を付けて filesystem を grant しない set。形式の正しい host path は
+    /// `sandbox`、NUL・空・component 内の `:` は `argument`、arity・型の誤りは arity・型の error。
+    #[test]
+    fn fps_at_03_tree_legacy_mark_without_grant() {
+        let run = |source: &str| {
+            let tokens = Lexer::new(source).tokenize();
+            let program = Parser::new(tokens).parse().expect("parse");
+            let mut eval = Evaluator::new();
+            eval.set_capabilities(
+                crate::capability::CapabilitySet::builder()
+                    .legacy_fs_syntax()
+                    .build(),
+            );
+            eval.run(&program, source.len() as u64)
+                .expect_err("must fail")
+                .error_type()
+        };
+        assert_eq!(run("read_file(\"/etc/passwd\")"), "sandbox");
+        assert_eq!(run("read_file(\"../x\")"), "sandbox");
+        assert_eq!(run("read_file(\"a\u{0}b\")"), "argument");
+        assert_eq!(run("read_file(\"\")"), "argument");
+        // Windows の drive prefix になるのは `<ASCII 1 文字>:` の component だけなので、`a:b` ではなく
+        // `foo.txt:stream`（ADS、§5.5）で確かめる。`a:b` の穴は別 slice の範囲（小節の決定記録）。
+        assert_eq!(run("read_file(\"d/foo.txt:stream\")"), "argument");
+        assert_ne!(run("read_file()"), "sandbox");
+        assert_ne!(run("read_file(1)"), "sandbox");
+    }
 }

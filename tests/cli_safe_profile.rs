@@ -689,3 +689,74 @@ fn ilg_at_04_file_import_ignores_tsumugi_sandbox() {
         assert_eq!(r.stdout, "42", "[vm={use_vm}]");
     }
 }
+
+/// 例外を catch して `type|message` を 1 行で出す script 片。
+fn probe(call: &str) -> String {
+    format!("try\n  {call}\n  print(\"ok\")\ncatch e\n  print(e[\"type\"])\nend\n")
+}
+
+/// FPS-AT-01: filesystem を grant しない safe profile でも、形式の誤りは `argument`、整った形式は `sandbox`。
+#[test]
+fn fps_at_01_syntax_error_is_argument_without_grant() {
+    for use_vm in [false, true] {
+        for call in [
+            "read_file(\"/etc/passwd\")",
+            "read_file(\"../x\")",
+            "rename(\"../a\", \"b\")",
+        ] {
+            let r = run_safe(use_vm, &[], &probe(call));
+            assert!(r.status_ok, "[vm={use_vm}] {call}: {}", r.stderr);
+            assert_eq!(r.stdout, "argument", "[vm={use_vm}] {call}");
+        }
+        for call in ["read_file(\"x.txt\")", "read_file(\"@data/x.txt\")"] {
+            let r = run_safe(use_vm, &[], &probe(call));
+            assert_eq!(r.stdout, "sandbox", "[vm={use_vm}] {call}");
+        }
+        // 未捕捉の形式の誤りは message を stderr に出し、非 0 終了する。
+        let (code, _out, err) = run_safe_code(use_vm, &[], "read_file(\"/etc/passwd\")");
+        assert_ne!(code, Some(0), "[vm={use_vm}]");
+        assert!(
+            err.contains("ファイルパスの形式が不正です"),
+            "[vm={use_vm}] stderr: {err}"
+        );
+        // arity・型の誤りは grant が無くても sandbox にならない。
+        for call in ["read_file()", "read_file(1)"] {
+            let r = run_safe(use_vm, &[], &probe(call));
+            assert_ne!(r.stdout, "sandbox", "[vm={use_vm}] {call}");
+        }
+        // rename は path 引数の型を両方検査してから形式を検査する（grant 済み経路と同じ順）。
+        let dir = TestDir::new("fps01");
+        let root = format!("data={}", dir.as_str());
+        let extra = [
+            "--fs-root",
+            root.as_str(),
+            "--fs-op",
+            "data=read,create,delete",
+        ];
+        let call = "rename(\"../a\", 1)";
+        let ungranted = run_safe(use_vm, &[], &probe(call));
+        let granted = run_safe(use_vm, &extra, &probe(call));
+        assert_eq!(ungranted.stdout, "builtin_type", "[vm={use_vm}] {call}");
+        assert_eq!(granted.stdout, ungranted.stdout, "[vm={use_vm}] {call}");
+    }
+}
+
+/// FPS-AT-02: root `data` だけを grant しても、形式の誤りの 2 パスは grant 無しと同じ `argument`。
+#[test]
+fn fps_at_02_syntax_error_matches_with_and_without_grant() {
+    for use_vm in [false, true] {
+        let dir = TestDir::new("fps02");
+        let root = format!("data={}", dir.as_str());
+        let extra = ["--fs-root", root.as_str(), "--fs-op", "data=read"];
+        for call in ["read_file(\"/etc/passwd\")", "read_file(\"../x\")"] {
+            let granted = run_safe(use_vm, &extra, &probe(call));
+            let ungranted = run_safe(use_vm, &[], &probe(call));
+            assert_eq!(granted.stdout, "argument", "[vm={use_vm}] {call}");
+            assert_eq!(granted.stdout, ungranted.stdout, "[vm={use_vm}] {call}");
+        }
+        let r = run_safe(use_vm, &extra, &probe("read_file(\"x.txt\")"));
+        assert_eq!(r.stdout, "sandbox", "[vm={use_vm}] mount default 未登録");
+        let r = run_safe(use_vm, &extra, &probe("read_file(\"@data/x.txt\")"));
+        assert_eq!(r.stdout, "host", "[vm={use_vm}] root 内の not-found");
+    }
+}

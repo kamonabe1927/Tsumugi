@@ -632,7 +632,8 @@ pub const WARN_EMPTY_ENV_ALLOW: &str = "警告: TSUMUGI_ENV_ALLOW が未設定�
 /// 応じて filesystem を構築する。
 pub fn build_legacy_capabilities() -> Result<LegacyBuild, CliUsageError> {
     let mut warnings = Vec::new();
-    let mut builder = CapabilitySet::builder();
+    // filesystem を grant しない場合も形式検査は legacy の構文（fix-fs-path-syntax-before-grant）。
+    let mut builder = CapabilitySet::builder().legacy_fs_syntax();
 
     // clock / stdin / stdout / exit を grant（safe と同じ adapter）。
     builder = builder
