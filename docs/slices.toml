@@ -269,11 +269,12 @@ order      = 19
 [[slice]]
 id         = "fix-fs-path-syntax-before-grant"
 title      = "Filesystem の grant が無いときもパスの形式を先に検査し、形式の誤りを argument error にする（capability-model §8.5、loop:drift #318 D-38）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-fs-path-syntax-before-grant 実装スライス（Filesystem の grant が無いときもパスの形式を先に検査する）" }
 acceptance = ["FPS-AT-01..03"]
 design_pr  = 332
+impl_pr    = 345
 order      = 21
 
 # issue #290（kamonabe、「優先」）から作った不具合の fix 2 本と、その設計で見つかった関連の 1 本。

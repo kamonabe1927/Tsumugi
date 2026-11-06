@@ -2177,6 +2177,7 @@ impl Vm {
                     name,
                     &args,
                     self.capabilities.filesystem(),
+                    self.capabilities.is_legacy_fs_syntax(),
                     max_collection,
                     language_revision,
                     line,
@@ -3354,5 +3355,40 @@ mod tests {
                 err.message()
             );
         }
+    }
+
+    /// FPS-AT-03（VM）: legacy の印は filesystem を grant しない set の形式検査の構文だけを変え、
+    /// `CapabilitySetId` を変えない。
+    #[test]
+    fn fps_at_03_vm_legacy_mark_without_grant() {
+        let err_type = |set: CapabilitySet, path: &str| {
+            let mut vm = vm_with(set);
+            vm.exec_builtin("read_file", vec![Value::str_constant(path.into())], 1)
+                .expect_err("must fail")
+                .error_type()
+        };
+        let marked = || CapabilitySet::builder().legacy_fs_syntax().build();
+        assert_eq!(err_type(marked(), "/etc/passwd"), "sandbox");
+        assert_eq!(err_type(marked(), "../x"), "sandbox");
+        assert_eq!(err_type(marked(), "a\0b"), "argument");
+        // 印なし（safe の構文）では同じパスが形式の誤り。
+        assert_eq!(err_type(CapabilitySet::empty(), "/etc/passwd"), "argument");
+        assert_eq!(err_type(CapabilitySet::empty(), "x.txt"), "sandbox");
+        // arity・型の誤りは grant の有無に依らず sandbox にならない。
+        let mut vm = vm_with(marked());
+        assert_ne!(
+            vm.exec_builtin("read_file", vec![], 1)
+                .expect_err("arity")
+                .error_type(),
+            "sandbox"
+        );
+        assert_ne!(
+            vm.exec_builtin("read_file", vec![Value::Int(1)], 1)
+                .expect_err("type")
+                .error_type(),
+            "sandbox"
+        );
+        // 印は CapabilitySetId に入らない。
+        assert_eq!(marked().id(), CapabilitySet::empty().id());
     }
 }

@@ -1622,6 +1622,7 @@ pub fn dispatch_fs(
     name: &str,
     args: &[Value],
     filesystem: Option<&crate::capability::FilesystemCapability>,
+    legacy_fs_syntax: bool,
     max_collection: u64,
     revision: crate::embedding::LanguageRevision,
     line: usize,
@@ -1638,9 +1639,58 @@ pub fn dispatch_fs(
             &mut label,
         ),
         // 未 grant（Deny、label 確定前）。label は None のまま。
-        None => Err(TsumugiError::filesystem_denied(line)),
+        // arity・型・path の形式は grant がある場合と同じ順に先に検査する（§8.5、D-38）。
+        None => fs_syntax_before_grant(name, args, legacy_fs_syntax, line)
+            .and_then(|()| Err(TsumugiError::filesystem_denied(line))),
     };
     FsDispatch { outcome, label }
+}
+
+/// 未 grant のときの arity・型・path 形式の検査（adapter/OS を呼ばない、§8.5）。
+///
+/// 検査の順は grant 済み経路（[`dispatch_filesystem_capability`]）と同じ。構文は
+/// `legacy_fs_syntax` に従い、safe / 埋め込み host は `FilesystemTarget::parse`、legacy は
+/// `legacy_lexical_check`。形式の誤りは `fs_route` と同じ `argument` error。
+fn fs_syntax_before_grant(
+    name: &str,
+    args: &[Value],
+    legacy_fs_syntax: bool,
+    line: usize,
+) -> Result<(), TsumugiError> {
+    let path_count = if name == "rename" { 2 } else { 1 };
+    let arity = if matches!(name, "write_file" | "append_file" | "rename") {
+        2
+    } else {
+        1
+    };
+    check_arity(name, args, arity, line)?;
+    // 型の検査を path 引数すべてについて済ませてから形式を検査する（grant 済み経路の
+    // `rename` arm も from/to の型 → route の順）。
+    let mut paths = Vec::with_capacity(path_count);
+    for (index, arg) in args.iter().take(path_count).enumerate() {
+        paths.push(require_str(arg, name, index + 1, line)?);
+    }
+    for path in paths {
+        let valid = if legacy_fs_syntax {
+            crate::capability::legacy_lexical_check(path).is_ok()
+        } else {
+            crate::capability::FilesystemTarget::parse(path).is_ok()
+        };
+        if !valid {
+            return Err(fs_invalid_path_error(line));
+        }
+    }
+    Ok(())
+}
+
+/// path の形式の誤り（catch 可能な `argument` error。host path を含めない）。
+fn fs_invalid_path_error(line: usize) -> TsumugiError {
+    TsumugiError::runtime_with_message_id(
+        line,
+        crate::error::ErrorKind::Argument,
+        crate::stable_error::message_id::ARGUMENT_INVALID_PATH,
+        "ファイルパスの形式が不正です",
+    )
 }
 
 /// [`dispatch_fs`] の戻り値（Phase 6 R-1、§9.1）。outcome に加えて canonical resource label を運ぶ。
