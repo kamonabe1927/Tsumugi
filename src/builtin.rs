@@ -165,6 +165,10 @@ impl Evaluator {
         // request byte 数は課金と、Phase 6 の host-call lifecycle 監査（HostCallStarted /
         // request payload）で共有する。非 host-call は 0。
         let request_bytes_for_audit = if is_host_call {
+            // §7.3: host call の開始前に accumulator を flush する。host call より前の消費の
+            // `BudgetCharged` が、この host call の `HostCallStarted` より前に出る。host call 自身の
+            // 課金（以降の request・response）は次の flush 点で出る。
+            self.flush_charges_into_audit_events();
             let request_bytes = crate::builtin_core::host_call_request_bytes(name, &evaluated);
             self.budget
                 .charge_host_call_request(request_bytes, ExecutionPhase::Run)

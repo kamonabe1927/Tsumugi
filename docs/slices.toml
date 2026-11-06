@@ -283,13 +283,14 @@ order      = 21
 [[slice]]
 id         = "fix-audit-flush-before-host-call"
 title      = "host call の開始前に BudgetCharged の accumulator を flush し、host call より前の消費を HostCallStarted より前に出す（determinism-and-audit §7.3、loop:drift #342 D-50）"
-status     = "ready"
+status     = "done"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 spec       = { doc = "docs/determinism-and-audit.md", section = "fix-audit-flush-before-host-call 実装スライス（host call 開始前に `BudgetCharged` を flush する）" }
 acceptance = ["FBH-AT-01..03"]
 design_pr  = 347
 depends_on = ["A-1"]
+impl_pr    = 348
 order      = 22
 
 [[slice]]

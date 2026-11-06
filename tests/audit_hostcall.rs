@@ -240,27 +240,18 @@ fn granted_fs_calls_emit_ordered_triples_with_correlated_ids() {
         other => panic!("triple2 末尾は HostCallFinished のはず: {other:?}"),
     }
 
-    // host-call triple 群は BudgetCharged より前に来る（stream 順序 FIX、§8）。
-    let first_charged = envelopes
+    // §7.3 の順序: host call より前の消費の BudgetCharged は 1 つ目の HostCallStarted より前、
+    // 1 つ目の host call 自身の課金は 2 つ目の HostCallStarted より前に出る（FBH-AT-03）。
+    let first_started = envelopes
         .iter()
-        .position(|e| matches!(e.event, AuditEvent::BudgetCharged { .. }));
-    let last_hostcall = envelopes
-        .iter()
-        .rposition(|e| {
-            matches!(
-                e.event,
-                AuditEvent::HostCallStarted { .. }
-                    | AuditEvent::CapabilityDecision { .. }
-                    | AuditEvent::HostCallFinished { .. }
-            )
-        })
-        .expect("host-call event exists");
-    if let Some(fc) = first_charged {
-        assert!(
-            last_hostcall < fc,
-            "host-call triple 群は BudgetCharged より前（固定順序）"
-        );
-    }
+        .position(|e| matches!(e.event, AuditEvent::HostCallStarted { .. }))
+        .expect("started exists");
+    assert!(
+        envelopes[..first_started]
+            .iter()
+            .any(|e| matches!(e.event, AuditEvent::BudgetCharged { .. })),
+        "1 つ目の HostCallStarted より前に BudgetCharged がある（§7.3）"
+    );
 
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -415,4 +406,177 @@ fn sink_presence_does_not_change_observable_fs_result() {
 
     let _ = std::fs::remove_dir_all(&base_a);
     let _ = std::fs::remove_dir_all(&base_b);
+}
+
+// -----------------------------------------------------------------------------
+// fix-audit-flush-before-host-call: host call の開始前に BudgetCharged を flush する（§7.3）
+// -----------------------------------------------------------------------------
+
+fn run_fs_script(tag: &str, text: &'static str) -> Vec<tsumugi::AuditEnvelope> {
+    let base = temp_dir(tag);
+    let sink = Arc::new(InMemoryAuditSink::new());
+    let engine = EmbeddingEngine::builder()
+        .audit_sink(sink.clone() as Arc<dyn AuditSink>)
+        .build()
+        .expect("build");
+    let script = link_source(&engine, "m", text);
+    let linked = engine.link(&script, link_request()).expect("link");
+    let mut ctx = EmbeddingContext::new(&engine);
+    let audited = engine.run_audited(&linked, &mut ctx, run_request(9, fs_capabilities(&base)));
+    assert!(
+        matches!(audited.outcome(), Some(EmbeddingOutcome::Completed { .. })),
+        "Completed のはず: {:?}",
+        audited.outcome()
+    );
+    let _ = std::fs::remove_dir_all(&base);
+    sink.snapshot()
+}
+
+fn is_charged(e: &tsumugi::AuditEnvelope) -> bool {
+    matches!(e.event, AuditEvent::BudgetCharged { .. })
+}
+
+/// FBH-AT-01: host call 前の消費が HostCallStarted より前、Started〜Finished の間に BudgetCharged が無い。
+#[test]
+fn fbh_at_01_pre_host_call_fuel_is_charged_before_started() {
+    let envelopes = run_fs_script(
+        "fbh1",
+        "let i = 0\nwhile i < 3\n    i = i + 1\nend\nwrite_file(\"@data/out.txt\", \"x\")\n",
+    );
+    let started = envelopes
+        .iter()
+        .position(|e| matches!(e.event, AuditEvent::HostCallStarted { .. }))
+        .expect("started");
+    let finished = envelopes
+        .iter()
+        .position(|e| matches!(e.event, AuditEvent::HostCallFinished { .. }))
+        .expect("finished");
+    assert!(
+        envelopes[..started].iter().any(|e| matches!(
+            e.event,
+            AuditEvent::BudgetCharged {
+                resource: tsumugi::BudgetResource::Fuel,
+                ..
+            }
+        )),
+        "Started より前に Fuel の BudgetCharged がある"
+    );
+    assert!(
+        !envelopes[started..finished].iter().any(is_charged),
+        "Started から Finished の間に BudgetCharged は無い"
+    );
+}
+
+/// FBH-AT-02: 2 回の host call。2 つ目の Started より前に 1 つ目の host call 自身の課金が出る。
+#[test]
+fn fbh_at_02_second_host_call_sees_first_calls_charges() {
+    let envelopes = run_fs_script(
+        "fbh2",
+        "let i = 0\nwhile i < 3\n    i = i + 1\nend\nwrite_file(\"@data/out.txt\", \"hello\")\nlet c = read_file(\"@data/out.txt\")\n",
+    );
+    let started: Vec<usize> = envelopes
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e.event, AuditEvent::HostCallStarted { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(started.len(), 2);
+    let first_finished = envelopes
+        .iter()
+        .position(|e| matches!(e.event, AuditEvent::HostCallFinished { .. }))
+        .expect("finished");
+    assert!(
+        envelopes[first_finished..started[1]]
+            .iter()
+            .any(|e| matches!(
+                e.event,
+                AuditEvent::BudgetCharged {
+                    resource: tsumugi::BudgetResource::HostCalls
+                        | tsumugi::BudgetResource::HostCallBytes
+                        | tsumugi::BudgetResource::HostRequestBytes,
+                    ..
+                }
+            )),
+        "1 つ目の host call 自身の課金が 2 つ目の Started より前に出る"
+    );
+    let terminal_usage = match &envelopes.last().expect("non-empty").event {
+        AuditEvent::Terminal { usage, .. } => *usage,
+        other => panic!("Terminal のはず: {other:?}"),
+    };
+    // 全 cumulative resource について、BudgetCharged の committed_delta の合計が Terminal の
+    // committed と一致する（§7.3）。
+    use tsumugi::BudgetResource as R;
+    let c = terminal_usage.committed;
+    let cumulative = [
+        (R::Fuel, c.fuel),
+        (R::StringAllocations, c.string_allocations),
+        (R::StringBytes, c.string_bytes),
+        (R::SourceCount, u64::from(c.source_count)),
+        (R::SourceBytes, c.source_bytes),
+        (R::ImportCount, u64::from(c.import_count)),
+        (R::ImportBytes, c.import_bytes),
+        (R::InputCalls, c.input_calls),
+        (R::InputBytes, c.input_bytes),
+        (R::OutputCalls, c.output_calls),
+        (R::OutputBytes, c.output_bytes),
+        (R::HostCalls, c.host_calls),
+        (R::HostRequestBytes, c.host_request_bytes),
+        (R::HostResponseBytes, c.host_response_bytes),
+        (R::HostCallBytes, c.host_call_bytes),
+    ];
+    assert!(c.fuel > 0, "Fuel の突合が 0 == 0 にならない script のはず");
+    for (resource, expected) in cumulative {
+        let sum: u64 = envelopes
+            .iter()
+            .filter_map(|e| match &e.event {
+                AuditEvent::BudgetCharged {
+                    resource: r,
+                    committed_delta,
+                    ..
+                } if *r == resource => Some(*committed_delta),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            sum, expected,
+            "{resource:?} の delta 総和は Terminal と一致"
+        );
+    }
+}
+
+/// FBH-AT-03: sink 無しの経路は変わらない（outcome（usage を含む）とファイル byte が sink ありと一致）。
+#[test]
+fn fbh_at_03_sinkless_path_unchanged() {
+    let text = "let i = 0\nwhile i < 3\n    i = i + 1\nend\nwrite_file(\"@data/out.txt\", \"hello\")\nlet c = read_file(\"@data/out.txt\")\n";
+    let run = |with_sink: bool| {
+        let base = temp_dir("fbh3");
+        let mut b = EmbeddingEngine::builder();
+        if with_sink {
+            b = b.audit_sink(Arc::new(InMemoryAuditSink::new()) as Arc<dyn AuditSink>);
+        }
+        let engine = b.build().expect("build");
+        let script = link_source(&engine, "m", text);
+        let linked = engine.link(&script, link_request()).expect("link");
+        let mut ctx = EmbeddingContext::new(&engine);
+        let request = run_request(3, fs_capabilities(&base));
+        let outcome = if with_sink {
+            let a = engine.run_audited(&linked, &mut ctx, request);
+            format!("{:?}", a.outcome().expect("outcome"))
+        } else {
+            format!("{:?}", engine.run(&linked, &mut ctx, request))
+        };
+        let bytes = std::fs::read(base.join("out.txt")).expect("written file");
+        let _ = std::fs::remove_dir_all(&base);
+        (outcome, bytes)
+    };
+    let (with, with_bytes) = run(true);
+    let (without, without_bytes) = run(false);
+    assert!(with.contains("Completed"), "{with}");
+    assert!(
+        with.contains("committed: BudgetCounters { fuel: 3,"),
+        "fuel が非 0: {with}"
+    );
+    assert_eq!(with, without, "usage を含む outcome が sink 有無で一致");
+    assert_eq!(with_bytes, without_bytes);
+    assert_eq!(with_bytes, b"hello");
 }
