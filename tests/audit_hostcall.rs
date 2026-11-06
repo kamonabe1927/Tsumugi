@@ -472,7 +472,7 @@ fn fbh_at_01_pre_host_call_fuel_is_charged_before_started() {
 fn fbh_at_02_second_host_call_sees_first_calls_charges() {
     let envelopes = run_fs_script(
         "fbh2",
-        "write_file(\"@data/out.txt\", \"hello\")\nlet c = read_file(\"@data/out.txt\")\n",
+        "let i = 0\nwhile i < 3\n    i = i + 1\nend\nwrite_file(\"@data/out.txt\", \"hello\")\nlet c = read_file(\"@data/out.txt\")\n",
     );
     let started: Vec<usize> = envelopes
         .iter()
@@ -503,42 +503,51 @@ fn fbh_at_02_second_host_call_sees_first_calls_charges() {
         AuditEvent::Terminal { usage, .. } => *usage,
         other => panic!("Terminal のはず: {other:?}"),
     };
-    let fuel: u64 = envelopes
-        .iter()
-        .filter_map(|e| match &e.event {
-            AuditEvent::BudgetCharged {
-                resource: tsumugi::BudgetResource::Fuel,
-                committed_delta,
-                ..
-            } => Some(*committed_delta),
-            _ => None,
-        })
-        .sum();
-    assert_eq!(
-        fuel, terminal_usage.committed.fuel,
-        "Fuel の delta 総和は Terminal と一致"
-    );
-    let calls: u64 = envelopes
-        .iter()
-        .filter_map(|e| match &e.event {
-            AuditEvent::BudgetCharged {
-                resource: tsumugi::BudgetResource::HostCalls,
-                committed_delta,
-                ..
-            } => Some(*committed_delta),
-            _ => None,
-        })
-        .sum();
-    assert_eq!(
-        calls, terminal_usage.committed.host_calls,
-        "HostCalls の delta 総和は Terminal と一致"
-    );
+    // 全 cumulative resource について、BudgetCharged の committed_delta の合計が Terminal の
+    // committed と一致する（§7.3）。
+    use tsumugi::BudgetResource as R;
+    let c = terminal_usage.committed;
+    let cumulative = [
+        (R::Fuel, c.fuel),
+        (R::StringAllocations, c.string_allocations),
+        (R::StringBytes, c.string_bytes),
+        (R::SourceCount, u64::from(c.source_count)),
+        (R::SourceBytes, c.source_bytes),
+        (R::ImportCount, u64::from(c.import_count)),
+        (R::ImportBytes, c.import_bytes),
+        (R::InputCalls, c.input_calls),
+        (R::InputBytes, c.input_bytes),
+        (R::OutputCalls, c.output_calls),
+        (R::OutputBytes, c.output_bytes),
+        (R::HostCalls, c.host_calls),
+        (R::HostRequestBytes, c.host_request_bytes),
+        (R::HostResponseBytes, c.host_response_bytes),
+        (R::HostCallBytes, c.host_call_bytes),
+    ];
+    assert!(c.fuel > 0, "Fuel の突合が 0 == 0 にならない script のはず");
+    for (resource, expected) in cumulative {
+        let sum: u64 = envelopes
+            .iter()
+            .filter_map(|e| match &e.event {
+                AuditEvent::BudgetCharged {
+                    resource: r,
+                    committed_delta,
+                    ..
+                } if *r == resource => Some(*committed_delta),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            sum, expected,
+            "{resource:?} の delta 総和は Terminal と一致"
+        );
+    }
 }
 
-/// FBH-AT-03: sink 無しの経路は変わらない（出力・fuel は sink ありと一致）。
+/// FBH-AT-03: sink 無しの経路は変わらない（outcome（usage を含む）とファイル byte が sink ありと一致）。
 #[test]
 fn fbh_at_03_sinkless_path_unchanged() {
-    let text = "let a = 1\nwrite_file(\"@data/out.txt\", \"hello\")\nlet c = read_file(\"@data/out.txt\")\n";
+    let text = "let i = 0\nwhile i < 3\n    i = i + 1\nend\nwrite_file(\"@data/out.txt\", \"hello\")\nlet c = read_file(\"@data/out.txt\")\n";
     let run = |with_sink: bool| {
         let base = temp_dir("fbh3");
         let mut b = EmbeddingEngine::builder();
@@ -549,22 +558,25 @@ fn fbh_at_03_sinkless_path_unchanged() {
         let script = link_source(&engine, "m", text);
         let linked = engine.link(&script, link_request()).expect("link");
         let mut ctx = EmbeddingContext::new(&engine);
+        let request = run_request(3, fs_capabilities(&base));
         let outcome = if with_sink {
-            let a = engine.run_audited(&linked, &mut ctx, run_request(3, fs_capabilities(&base)));
-            format!("{:?}", a.outcome())
+            let a = engine.run_audited(&linked, &mut ctx, request);
+            format!("{:?}", a.outcome().expect("outcome"))
         } else {
-            format!(
-                "{:?}",
-                engine.run(&linked, &mut ctx, run_request(3, fs_capabilities(&base)))
-            )
+            format!("{:?}", engine.run(&linked, &mut ctx, request))
         };
+        let bytes = std::fs::read(base.join("out.txt")).expect("written file");
         let _ = std::fs::remove_dir_all(&base);
-        outcome
+        (outcome, bytes)
     };
-    let with = run(true);
-    let without = run(false);
+    let (with, with_bytes) = run(true);
+    let (without, without_bytes) = run(false);
+    assert!(with.contains("Completed"), "{with}");
     assert!(
-        with.contains("Completed") && without.contains("Completed"),
-        "{with} / {without}"
+        with.contains("committed: BudgetCounters { fuel: 3,"),
+        "fuel が非 0: {with}"
     );
+    assert_eq!(with, without, "usage を含む outcome が sink 有無で一致");
+    assert_eq!(with_bytes, without_bytes);
+    assert_eq!(with_bytes, b"hello");
 }
