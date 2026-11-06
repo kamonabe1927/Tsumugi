@@ -296,13 +296,14 @@ order      = 22
 [[slice]]
 id         = "fix-terminal-host-effects-may-remain"
 title      = "Terminal の host_effects_may_remain を、effect_status が Committed か Unknown の host call があれば outcome にかかわらず true にする（determinism-and-audit §13 AUD-024、loop:drift #342 D-51）"
-status     = "ready"
+status     = "done"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 spec       = { doc = "docs/determinism-and-audit.md", section = "fix-terminal-host-effects-may-remain 実装スライス（Terminal の `host_effects_may_remain` を host call の `effect_status` から決める）" }
 acceptance = ["HEM-AT-01..04"]
 design_pr  = 347
 depends_on = ["A-1"]
+impl_pr    = 350
 order      = 23
 
 [[slice]]
