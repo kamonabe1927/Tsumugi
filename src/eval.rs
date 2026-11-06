@@ -1375,7 +1375,10 @@ impl Evaluator {
     }
 
     /// accumulator を flush して確定した `BudgetCharged` を `audit_events` へ移す（§8 規則7）。
-    fn flush_charges_into_audit_events(&mut self) {
+    ///
+    /// yield 境界・backpressure・終了時に加え、fs host call の開始前（request 課金より前）にも
+    /// 呼ぶ（§7.3、fix-audit-flush-before-host-call）。
+    pub(crate) fn flush_charges_into_audit_events(&mut self) {
         for charge in self.drain_budget_charges() {
             self.push_audit_event(charge);
         }
