@@ -277,6 +277,42 @@ design_pr  = 332
 impl_pr    = 345
 order      = 21
 
+# loop:drift #342 の D-50（判断済み Q1=A）・D-51（判断済み Q1=A）・D-53（機械的）から作った fix 3 本。
+# order は loop-runbook §12.3・§8 の「不具合の報告」の既定（今ある ready（90・91）より前の空いている値）。
+# parent は determinism-and-audit の実行時監査の Phase 6 残。3 本とも監査付き経路（tree）だけを触る。
+[[slice]]
+id         = "fix-audit-flush-before-host-call"
+title      = "host call の開始前に BudgetCharged の accumulator を flush し、host call より前の消費を HostCallStarted より前に出す（determinism-and-audit §7.3、loop:drift #342 D-50）"
+status     = "ready"
+parent     = "Phase 6 残"
+spec_slice = "determinism Slice 5"
+spec       = { doc = "docs/determinism-and-audit.md", section = "fix-audit-flush-before-host-call 実装スライス（host call 開始前に `BudgetCharged` を flush する）" }
+acceptance = ["FBH-AT-01..03"]
+depends_on = ["A-1"]
+order      = 22
+
+[[slice]]
+id         = "fix-terminal-host-effects-may-remain"
+title      = "Terminal の host_effects_may_remain を、effect_status が Committed か Unknown の host call があれば outcome にかかわらず true にする（determinism-and-audit §13 AUD-024、loop:drift #342 D-51）"
+status     = "ready"
+parent     = "Phase 6 残"
+spec_slice = "determinism Slice 5"
+spec       = { doc = "docs/determinism-and-audit.md", section = "fix-terminal-host-effects-may-remain 実装スライス（Terminal の `host_effects_may_remain` を host call の `effect_status` から決める）" }
+acceptance = ["HEM-AT-01..04"]
+depends_on = ["A-1"]
+order      = 23
+
+[[slice]]
+id         = "fix-heap-charge-audit-notify"
+title      = "charge_heap の課金を BudgetCharged の accumulator へ通知し、heap の Allocation を突合できるようにする（determinism-and-audit §7.3・§15.3、loop:drift #342 D-53）"
+status     = "ready"
+parent     = "Phase 6 残"
+spec_slice = "determinism Slice 5"
+spec       = { doc = "docs/determinism-and-audit.md", section = "fix-heap-charge-audit-notify 実装スライス（heap の課金を `BudgetCharged` の accumulator へ通知する）" }
+acceptance = ["HCN-AT-01..03"]
+depends_on = ["A-1"]
+order      = 24
+
 # issue #290（kamonabe、「優先」）から作った不具合の fix 2 本と、その設計で見つかった関連の 1 本。
 # order は loop-runbook §8.1 の「優先」の既定（今ある ready・todo のすべてより前の空いている値）。
 # parent は共有 DAG の比較・表示を有限化する REV-001（値を再帰でたどる処理の有限化として同じ項目に置いた）。
@@ -532,6 +568,17 @@ parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 depends_on = ["R-1a"]
 order      = 50
+
+# loop:drift #342 の D-52（機械的）で逸脱一覧に載せた「fs 以外の host call は triple を出さない」の延期先。未設計。
+# order は fs builtin の監査範囲（50）の次に置いた（同じ監査の host-call 範囲の拡張のため）。
+[[slice]]
+id         = "audit-host-boundary-scope"
+title      = "fs 以外の host call（stdout・stdin・clock・env・exit・登録 host function・import resolver）へ監査 triple を広げる（determinism-and-audit §5・§8 規則3）"
+status     = "todo"
+parent     = "Phase 6 残"
+spec_slice = "determinism Slice 5"
+depends_on = ["R-1a"]
+order      = 55
 
 [[slice]]
 id         = "audit-yield-emission-engine-poll"

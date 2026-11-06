@@ -32,8 +32,16 @@
 | Path の HMAC-SHA-256 の入力が canonical label の UTF-8 生 byte（`src/audit.rs::RedactionPolicy::hmac_path`）。§9.1/§9.2 の「redaction 前 subtree の canonical encoding」（label を値とする `AuditValue` の deterministic CBOR）ではないため、digest 値が目標仕様と異なる（秘匿性・決定性は保たれる）。strict CBOR スライスで揃える | §9.1/§9.2 | R-1a |
 | `AuditFrame.module_id` / `AuditError.module_id` が §7.2 の `AuditField`（Identifier/Path policy 適用済み）ではなく plain `String`（`Option<String>`）。現在は常に空文字列 / `None` で埋めており（`src/embedding.rs` の Terminal error 構築）module 情報を記録しない。§9.2 の encoding も `AuditField` ではなく text / `Option` になる | §7.2/§9.1 | A-1 |
 | 公開 `ExecutionOutcome`（`src/embedding.rs`、crate root では `EmbeddingOutcome`）は `Completed` / `Exited` / `RuntimeError` / `BudgetExceeded` / `DeadlineExceeded` / `Cancelled` / `InternalFailure` の 7 variant だけで、§7.2 の `TerminalOutcome` と 1 対 1 に対応しない。link 時の拒否と resolver の host 失敗は `Engine::link` の `Result<_, LinkError>`（`LinkError::Denied` / `LinkError::Resolve(HostError)` ほか）で返し、run 中の capability 拒否と host function の失敗は `RuntimeError`（`ErrorKind::Capability` / `ErrorKind::Host`）に含める。監査失敗は監査付き経路だけの別型 `AuditedOutcome::AuditFailed` で返す。`RecordFailure` / `ReplayMismatch` は record/replay が未実装のため無い | §7.2 | A-1（7 variant の構成は [組み込みAPI仕様](embedding-api.md) の E 系スライス由来） |
+| `BudgetCharged` の accumulator を host call 開始前に flush しない。flush は yield 境界・backpressure・終了時だけで（`src/eval.rs` の `push_host_call_events` は triple を積むだけ）、host call より前の消費の `BudgetCharged` が host-call triple より後に出る。`tests/audit_hostcall.rs` はこの順序（triple 群が `BudgetCharged` より前）を固定している（fix-audit-flush-before-host-call スライスで解消予定） | §7.3/§8 | A-1 |
+| Terminal の `host_effects_may_remain` が常に `false`（`src/embedding.rs` の Terminal を作る 2 か所とも literal）。`write_file` のあと未捕捉 runtime error で終わり `HostCallFinished` の `effect_status` が `Committed` でも `false` になる（fix-terminal-host-effects-may-remain スライスで解消予定） | §7.2/§13 | A-1 |
+| fs 以外の host call（stdout の `print`、stdin の `input`、clock の `now`、`env`、`exit`、登録 host function、import resolver）は host-call triple を出さない。§5 の `HostBoundary` の各 request と §8 規則3（import resolver を含む host request）に対し、triple を出すのは上の行の fs 4 builtin だけ（audit-host-boundary-scope スライスへ延期） | §5/§8 | A-1 |
+| `Budget::charge_heap`（`src/budget.rs`）が `BudgetCharged` の accumulator へ通知しない（通知は `release_heap` と cumulative の commit だけ）。heap の `Allocation` の `BudgetCharged` が出ず、Terminal の live heap と `BudgetCharged` の delta を突合できない（fix-heap-charge-audit-notify スライスで解消予定） | §7.3/§15.3 | A-1 |
 
 上の表の `ExecutionOutcome` が 7 variant だけである行（D-8）は、loop:drift #263 を受けて載せた。本文（§7.2 の 1 対 1 対応）を実装に合わせて後退させず、逸脱として記録する案を選んだ（issue #263 Q1=A。返信なしのため推奨案で確定、[開発ループ手順書](loop-runbook.md) §7.5）。理由: spec が実装の正本であり、現在の逸脱は事実を確かめて逸脱一覧に置く（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。D-8 の `ExecutionOutcome` は `#[non_exhaustive]` で、後続 Phase で variant を足す前提になっている。[組み込みAPI仕様](embedding-api.md) の `ExecutionOutcome`（13 variant）との差は、同 spec が逸脱一覧を作るときに載せる（ドキュメント運用ガイドの移行中注記）。
+
+host call 開始前に `BudgetCharged` を flush しない行（loop:drift #342 の D-50）は、§7.3 を正とし、本文を実装に合わせて後退させず逸脱として載せ、fix スライスで HostCallStarted の前に flush する案を選んだ（issue #342 の D-50 Q1=A。判断役が選択（issue #342））。理由: host call の前の資源消費を Started と対応づけられ、監査で説明できる（[マニフェスト](manifesto.md) 原則 5・原則 7）。A-1 小節の deferred drain モデルは buffer 内の順序を決めていないため、buffer 内の flush は A-1 の逸脱を増やさない。採らなかった案 B（§7.3 から「host call開始前」を外す）は、目標を実装へ後退させ、host call 前の消費を監査上 Started と対応づけられなくなる（原則 7 に反しうる）。
+
+`host_effects_may_remain` が常に `false` の行（D-51）は、逸脱として載せ、fix スライスで §13 AUD-024 に書いた規則（`effect_status` が `Committed` または `Unknown` の host call が 1 件でもあれば outcome にかかわらず `true`）を実装する案を選んだ（issue #342 の D-51 Q1=A。判断役が選択（issue #342））。理由は AUD-024 の該当段落に書く。
 
 ## 未実装範囲（目標仕様 §1〜§13 のうち未着手・延期中）
 
@@ -46,6 +54,10 @@
 | record/replay | §6 | — |
 | record/replay での redaction 再適用（record 済み redacted payload を盲目コピーせず現行 policy を適用） | §12 | record/replay スライスへ延期 |
 | VM の audit triple 対応（監査 wiring） | §2.1 | Slice 6（VM conformance）へ延期 |
+| VM 適合 gate のうち audit 以外（全規範 fixture の differential matrix、limit 境界・REPL 継続・pause/resume の差分 0 件の CI gate、fuzz gate） | §2.1 | Slice 6（VM conformance）へ延期 |
+| `normalize_for_conformance`（backend 間比較の前の envelope 正規化） | §3 | Slice 6（VM conformance）へ延期 |
+| `DeterminismInput` tuple と `ContextSnapshot` | §3.1 | record/replay スライスへ延期 |
+| `HostBoundary` dispatcher と `FakeHost` | §5 | Slice 2（HostBoundaryとFakeHost）へ延期 |
 | engine 全体の audit drain queue byte 上限（16 MiB）。per-execution 上限（`max_pending_bytes`）は B-2 で実装済み | §10.2 | 複数 execution 共有の queue 会計と wake 経路が scheduler（E10 統合）と不可分なため延期 |
 | sink callback 中の再入検出は facade の 6 入口（`compile` / `link` / `link_for_repl` / `run` / `run_for_repl` / `run_audited`）だけが対象。scheduler の `ExecutionHandle` の操作（§10 の start/poll/pause/resume）の再入検出と、拒否に返す値は未実装（scheduler の `Engine` は sink を持たない） | §10 | sink を持つ scheduler 経路は E10 統合のスライスで扱う |
 
@@ -192,7 +204,7 @@ slice量だけを変えるmetamorphic testは別入力間の強い追加性質�
 importは[言語仕様](language-spec.md)どおり、最初のscript statementより前に全件解決する。module resolverは[Capability仕様](capability-model.md)の注入adapterだけを使い、次を固定する。
 
 - source内のimport specifierは正規化せずresolverへ渡す。filesystem resolverの相対path検査はCapability仕様の`RelativePath`規則に従う。
-- resolverが返す`ModuleId`はopaqueで安定なUTF-8 identifierであり、同じlogical moduleには同じIDを返す。engineはpathとして再解釈・case fold・Unicode normalizeしない。このno-normalization契約（§4.4のlocale/Unicode非正規化と一致）はSlice 1でshared primitiveの実装doc comment（`ModuleId`）に明文化済み。
+- resolverが返す`ModuleId`はopaqueで安定なUTF-8 identifierであり、同じlogical moduleには同じIDを返す。engineはpathとして再解釈・case fold・Unicode normalizeしない。このno-normalization契約（§4.4のlocale/Unicode非正規化と一致）は`ModuleId`の型のdoc commentにも書く。
 - `ModuleId`にabsolute local path、credential、query secretを含めない。
 - 同一execution中のmodule graphはimmutable snapshotであり、host filesystemやresolver登録の後続変更を観測しない。
 - 解決・parse・capability・budget失敗時は1文も実行しない。
@@ -222,7 +234,7 @@ pathの表示順・比較はproviderが返すpublic UTF-8 labelのbyte順とす�
 - `-0.0 == 0.0`は`true`。deterministic binary encodingではsign bitを保持し、表示規則は言語仕様に従う。
 - host responseからFloatを受け取る時もNaNをcanonicalizeし、Infinity・NaNをIntへ変換する規則は安定error codeで固定する。
 - Floatのparse、format、serializeはlocale非依存の同一algorithmをtree/VM/record-replayで共有する。
-- 上記のNaN canonicalization・parse・format・deterministic bit化はSlice 1でshared helper（`src/determinism.rs`）へ集約済みであり、意味論・表示規則は不変のまま実装位置だけを1本化している。
+- 上記のNaN canonicalization・parse・format・deterministic bit化はbackend間で1つのshared helperを共有し、backendごとに別実装を持たない。
 
 ### 4.6 error
 
@@ -245,7 +257,7 @@ pub struct StableError {
 
 budget、deadline、cancel、audit failure、internal invariant、replay mismatchはhost control-plane terminalであり、script-visible `Value::Error`へ変換しない。
 
-> 実装メモ（Slice 1）: この`StableError`は`src/stable_error.rs`に実装している。`ErrorCode`は独立enumを作らず`error::ErrorKind`を正本として型エイリアス再利用し（`embedding::ExecutionError.code`の前例に倣う）、`ErrorMessageId`はper-template（canonical messageテンプレート1個に1 ID）で採番する。射影は内部`TsumugiError`/`ErrorKind`から単一関数`StableError::project`で行い、安定型文字列・canonical message・traceを二重管理しない。uncatchable terminalは`ErrorKind::is_uncatchable`を唯一の判定正本として射影しない（`None`）。これらは§4.6の意味を変えない実装上の決定であり、normative structは上記のまま。
+`ErrorCode`は独立enumを作らず`ErrorKind`の別名とする（`ExecutionError.code`と同じ型）。`ErrorMessageId`はcanonical messageのtemplate 1個に1 IDを採番する（per-template）。内部errorからの射影は1つの関数で行い、安定型文字列・canonical message・traceを二重管理しない。uncatchable terminal（`ErrorKind::is_uncatchable`が判定の正本）は`StableError`へ射影しない。
 
 ### 4.7 function identity
 
@@ -796,6 +808,8 @@ Phase 5のproduction gateで解消する。StableErrorのcode、script type、me
 ### AUD-024: import・REPLの状態commit
 
 [実行予算・協調実行仕様](execution-control.md)で方針を確定した。Completed/Exitedで終了したexecutionだけscript stateをcommitし、`Denied`、未捕捉runtime error、`HostError`、budget、deadline、cancel、audit/record/replay/internal failureはexecution開始時点へrollbackする。execution中にcatchされ最終的にCompleted/Exitedへ到達した通常errorはcommit側である。既にcommitした外部host effectはrollbackせず、Terminalへ`host_effects_may_remain`を記録する。tree/VMは同じmutation journal契約を使う。
+
+`host_effects_may_remain`は、そのexecutionに`HostCallFinished.effect_status`が`Committed`または`Unknown`のhost callが1件でもあれば、outcomeにかかわらず（Completed/Exitedでもrollbackする終了でも）`true`とし、無ければ`false`とする。`context_committed`とは独立のflagであり（[組み込みAPI仕様](embedding-api.md) §10の6）、Startedのack失敗などscript workを行わずに終わるTerminalは`false`である。loop:drift #342 の D-51 Q1=A（判断役が選択（issue #342））。理由: 規則が1つでjournal（`HostCallFinished.effect_status`）だけから決まり（[マニフェスト](manifesto.md) 原則 8）、Completed・runtime error・host callなしの3系でテストでき（原則 9）、どの外部操作を行いどう終わったかをTerminal単体で読める（原則 7）。`Unknown`を含めるのは、§6.1が外部call後の`finish`失敗を`host_effects_may_remain: true`とするfail-closedの向きに合わせるためである。採らなかった案B（`context_committed = false`のときだけ`true`）は、Completedのときの意味を別に決める判断が残り、CompletedのTerminalから外部効果の有無が読めなくなる。
 
 ### AUD-048: function identity
 
@@ -1963,6 +1977,81 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
   - **RG-AT-04（guard の後始末）**: 再入で fail-closed になった実行・sink が `Failed` を返した実行・sink が panic した実行の後で、同じ thread から同じ Engine の `compile`・`run_audited` を（callback の外で）呼ぶと通常どおり成功する。2 つの Engine の callback が入れ子になった場合（PR #281 の Q2=A）: Engine A（sink あり）の callback の中で Engine B（sink あり）の `run_audited` を呼び、B の callback から A の `run_audited` を呼ぶと、A への呼び出しは `AuditedOutcome::Outcome(InternalFailure)` で拒否される。B の実行は通常どおり完了し（B の sink が受け取る envelope 列は、B の callback が A を呼ばない場合と一致する）、A の実行は `AuditFailed { failure: AuditFailure::Sink }` になる。B の callback を出たあとも A の callback の中では A への再入は引き続き拒否され、A の callback を出たあとは許される。確かめ方: 統合テストと `src/audit.rs` の guard の unit test（列の要素ごとの印、入れ子の下の要素への印、RAII での取り外し）。
   - **RG-AT-05（deadlock しない・非破壊）**: RG-AT-01〜04 の各テストを別 thread で回し、上限時間（例: 10 秒）以内に戻ることを `recv_timeout` で確かめる。既存の `tests/audit_*.rs` は無改変で緑。sink なしの経路と、再入しない sink ありの経路は観測結果（envelope 列・`committed_bytes`・yield 位置・出力 byte・exit code）が変わらない。
 - **想定の変更規模**: `src/audit.rs` に約 50〜70 行（thread-local の guard・RAII・入口用の判定関数・doc comment）、`src/embedding.rs` に約 50〜80 行（submit 3 か所を helper へ通す・6 入口の先頭の検査と拒否の値）。合わせて約 100〜150 行。テストは新しい `tests/audit_reentrancy.rs`（約 250〜350 行）と `src/audit.rs` の unit test。触る仕組みは監査の sink 配送の境界 1 つ、受入基準は 5 項目。
+
+#### fix-audit-flush-before-host-call 実装スライス（host call 開始前に `BudgetCharged` を flush する）
+
+> 状態: **未実装**（設計のみ）。loop:drift #342 の D-50（Q1=A、判断役が選択（issue #342））で足した `fix` スライス。§7.3 の「host call開始前…にflushする」と §8 規則7 を、監査付き経路（tree）の fs host call で満たす。
+
+設計時点（main `d665a98`）の事実:
+
+- `src/builtin.rs` の fs host call は、request 側の課金（`charge_host_call_request`）→ `dispatch_fs` → triple の構築 → `src/eval.rs` の `push_host_call_events` の順に進む。`push_host_call_events` は `push_audit_event` へ積むだけで、`flush_charges_into_audit_events` を呼ばない。flush は yield 境界・backpressure・終了時だけである。
+- このため、host call より前の文で生じた消費（fuel など）の `BudgetCharged` が、その host call の triple より後に出る。`tests/audit_hostcall.rs` の「host-call triple 群は BudgetCharged より前」の主張（`last_hostcall < first_charged`）はこの順序を固定している。
+
+- **実装範囲**:
+  - fs host call の処理の先頭（request 側の課金より前）で accumulator を flush し、確定した `BudgetCharged` を `audit_events` へ移す。これにより、host call より前の消費の `BudgetCharged` は同じ host call の `HostCallStarted` より前に出る。host call 自身の課金（request・response の byte、host call 回数）は flush の後に accumulator へ積まれ、次の flush 点（次の host call の開始前・yield 前・terminal 前）で出る。§7.3 の「host call開始前」を文字どおりに読んだ位置であり、`BudgetCharged` の集約の単位（同 resource・同 reason）は変えない。
+  - flush は sink のある経路だけで観測される（sink 無しの経路は drain しないので、出力・課金・exit code は変わらない）。flush で積む event は既存の `push_audit_event` を通し、B-2 の audit drain queue の計上に乗せる。
+  - `tests/audit_hostcall.rs` の順序の主張を、§7.3 の順序（host call より前の消費の `BudgetCharged` → triple）に直す。
+- **範囲外**:
+  - fs 以外の host call（逸脱一覧の audit-host-boundary-scope の行）。triple を出さない host call では flush 点も作らない。
+  - 256 charge ごとの flush、pause 前の flush（このスライスでは確かめず、変えない）。
+  - §8 規則5/6 の timing（逸脱一覧の A-1 の行）。flush は評価器 buffer の中の操作で、sink round-trip を足さない。
+  - VM（監査 sink と VM の同時設定は build で拒否される）。
+- **受入基準**:
+  - **FBH-AT-01（host call 前の消費が Started より前）**: sink ありで、fuel を消費する文を 3 つ実行してから `write_file` を呼ぶ script の envelope 列で、`HostCallStarted` より前に fuel の `BudgetCharged` が 1 件以上あり、`HostCallStarted` から `HostCallFinished` までの間に `BudgetCharged` が無い。確かめ方: `tests/audit_hostcall.rs` に足すテスト。
+  - **FBH-AT-02（2 回の host call）**: `write_file` と `read_file` を続けて呼ぶ script で、2 つ目の `HostCallStarted` より前に、1 つ目の host call 自身の課金を含む `BudgetCharged` が出る。全 `BudgetCharged` の delta の合計は Terminal の usage と一致する（cumulative resource）。確かめ方: 同ファイルのテスト。
+  - **FBH-AT-03（既存の主張の更新と非破壊）**: `tests/audit_hostcall.rs` の「triple 群は BudgetCharged より前」の主張を §7.3 の順序に直し、他の `tests/audit_*.rs` は無改変で緑。sink 無しの経路の出力 byte・exit code・fuel は変わらない。
+- **done PR で行う逸脱一覧の更新**: 逸脱一覧の「`BudgetCharged` の accumulator を host call 開始前に flush しない」の行を削除する。表の下の D-50 の段落は判断の記録なので残す。
+- **想定の変更規模**: `src/builtin.rs` と `src/eval.rs` に約 10〜25 行（flush の呼び出しと、それを crate 内から呼べる入口）。テストは `tests/audit_hostcall.rs` に約 80〜150 行。触る仕組みは監査の host-call 経路 1 つ、受入基準は 3 項目。
+
+#### fix-terminal-host-effects-may-remain 実装スライス（Terminal の `host_effects_may_remain` を host call の `effect_status` から決める）
+
+> 状態: **未実装**（設計のみ）。loop:drift #342 の D-51（Q1=A、判断役が選択（issue #342））で足した `fix` スライス。§13 AUD-024 の `host_effects_may_remain` の規則を、監査付き経路（tree）で満たす。
+
+設計時点（main `d665a98`）の事実:
+
+- Terminal を作るのは `src/embedding.rs` の 2 か所で、どちらも `host_effects_may_remain: false` の literal である。1 つ目（Started の ack 失敗）は script work を行わない Terminal、2 つ目は run の終了の Terminal。
+- `HostCallFinished.effect_status` は `src/builtin_core.rs` の triple の構築で `Committed` / `None` / `Unknown` を決めている。
+
+- **実装範囲**:
+  - 監査付き実行の中で、`effect_status` が `Committed` または `Unknown` の `HostCallFinished` を積んだかを 1 つの flag で持つ（triple を積む箇所で立てる）。
+  - run の終了の Terminal は、その flag を `host_effects_may_remain` に使う。outcome（Completed / Exited / RuntimeError / BudgetExceeded / DeadlineExceeded / Cancelled / InternalFailure）と `context_committed` にかかわらず同じ規則である。
+  - Started の ack 失敗の Terminal は `false` のまま（script work が無い）。
+- **範囲外**:
+  - fs 以外の host call（audit-host-boundary-scope の行）。triple を出さない host call は flag に数えない。その host call だけを行った execution の Terminal は `false` のままになる（D-52 の逸脱に含まれる）。
+  - record/replay の `RecordFailure { host_effects_may_remain }`（§6.1、未実装）。
+  - 公開 `ExecutionOutcome` へ同じ flag を出すこと（逸脱一覧の D-8 の行の範囲）。
+  - VM。
+- **受入基準**:
+  - **HEM-AT-01（rollback する終了）**: `write_file` が成功（`Committed`）したあと `1 / 0` の未捕捉 runtime error で終わる script の Terminal が `context_committed = false`・`host_effects_may_remain = true`。確かめ方: `tests/audit_hostcall.rs` に足すテスト。
+  - **HEM-AT-02（Completed）**: `write_file` が成功して Completed で終わる script の Terminal が `context_committed = true`・`host_effects_may_remain = true`。
+  - **HEM-AT-03（外部効果なし）**: host call をしない script、`read_file` だけ（`effect_status = None`）の script、grant が無く `write_file` が拒否される script（`None`）の Terminal は `host_effects_may_remain = false`。Started の ack 失敗の Terminal も `false`。
+  - **HEM-AT-04（非破壊）**: 既存の `tests/audit_*.rs` は無改変で緑（Terminal の `host_effects_may_remain` を `false` と主張している既存テストが HEM-AT-01..02 の条件に当たる場合だけ、その主張を規則に合わせて直し、PR 本文に挙げる）。sink 無しの経路は変わらない。
+- **done PR で行う逸脱一覧の更新**: 逸脱一覧の「Terminal の `host_effects_may_remain` が常に `false`」の行を削除する。表の下の D-51 の段落は判断の記録なので残す。
+- **想定の変更規模**: `src/eval.rs`（flag と立てる箇所）と `src/embedding.rs`（Terminal の構築）に約 15〜30 行。テストは約 80〜140 行。触る仕組みは監査の Terminal の構築 1 つ、受入基準は 4 項目。
+
+#### fix-heap-charge-audit-notify 実装スライス（heap の課金を `BudgetCharged` の accumulator へ通知する）
+
+> 状態: **未実装**（設計のみ）。loop:drift #342 の D-53（機械的）で足した `fix` スライス。§7.3 の「Terminalのusageと全BudgetChargedのdeltaをcumulative/live resourceで突合」と §15.3 を、heap（live resource）で満たす。
+
+設計時点（main `d665a98`）の事実:
+
+- `src/budget.rs` の `charge_heap` は heap へ課金するだけで accumulator へ通知しない。通知は `release_heap`（`note_release`）と cumulative の commit（`note_charge`）だけである。
+- このため、heap を確保する script で Terminal の `live_heap_bytes` が 0 でなくても、HeapBytes の `BudgetCharged` が 0 件になる（loop:drift #342 で確かめた例: `live_heap_bytes=1489`）。
+
+- **実装範囲**:
+  - `charge_heap` の課金が成功したとき（`bytes > 0`）、課金後の live・peak を付けて accumulator へ `HeapBytes`・`Allocation` の charge として通知する。`BudgetCharged` の `committed_delta` は確保の合計、`usage_after` は flush 時の live heap、`peak_after` は peak heap（§7.3）。release 側（`released_delta`）の既存の通知は変えない。
+  - 課金が上限超過で失敗したときは通知しない（課金されていないため）。
+- **範囲外**:
+  - 256 charge ごとの flush（このスライスでは変えない）。
+  - per-item resource の `BudgetPeaks` の突合。
+  - heap 以外の resource の通知。
+  - VM。
+- **受入基準**:
+  - **HCN-AT-01（確保の通知）**: sink ありで List と String を作る script の envelope 列に、HeapBytes・`Allocation` の `BudgetCharged` が 1 件以上あり、`committed_delta` の合計から `released_delta` の合計を引いた値が Terminal の live heap と一致する。最後の HeapBytes の `BudgetCharged` の `peak_after` が Terminal の peak heap と一致する。確かめ方: `tests/audit_core.rs` に足すテスト。
+  - **HCN-AT-02（上限超過）**: heap 上限を超える確保で BudgetExceeded になる script で、超過した確保の分は `BudgetCharged` に含まれない（delta の突合が HCN-AT-01 と同じく成り立つ）。
+  - **HCN-AT-03（非破壊）**: 既存の `tests/audit_*.rs` は、`BudgetCharged` の件数・中身を固定している主張が HeapBytes の確保の行の追加に当たる場合だけ直し（PR 本文に挙げる）、それ以外は無改変で緑。sink 無しの経路の出力 byte・exit code・fuel・heap の課金は変わらない。
+- **done PR で行う逸脱一覧の更新**: 逸脱一覧の「`Budget::charge_heap` が `BudgetCharged` の accumulator へ通知しない」の行を削除する。
+- **想定の変更規模**: `src/budget.rs` に約 10〜20 行。テストは約 60〜120 行。触る仕組みは budget の accumulator への通知 1 つ、受入基準は 3 項目。
 
 ### Slice 6: VM conformance
 

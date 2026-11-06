@@ -1137,7 +1137,7 @@ fn reason_sort_key(reason: BudgetChargeReason) -> u8 {
 /// 監査 control-plane の予算（§11）。script の fuel/output/host-call budget へは課金しない。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuditBudget {
-    /// 最大 event 数（既定 100,000、実効 4 以上。§11）。
+    /// 最大 event 数（既定 100,000、2 以上。§11）。
     pub max_events: u64,
     /// 最大 encoded byte 数（既定 16 MiB）。
     pub max_encoded_bytes: u64,
