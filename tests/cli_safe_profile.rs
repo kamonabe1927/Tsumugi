@@ -724,6 +724,20 @@ fn fps_at_01_syntax_error_is_argument_without_grant() {
             let r = run_safe(use_vm, &[], &probe(call));
             assert_ne!(r.stdout, "sandbox", "[vm={use_vm}] {call}");
         }
+        // rename は path 引数の型を両方検査してから形式を検査する（grant 済み経路と同じ順）。
+        let dir = TestDir::new("fps01");
+        let root = format!("data={}", dir.as_str());
+        let extra = [
+            "--fs-root",
+            root.as_str(),
+            "--fs-op",
+            "data=read,create,delete",
+        ];
+        let call = "rename(\"../a\", 1)";
+        let ungranted = run_safe(use_vm, &[], &probe(call));
+        let granted = run_safe(use_vm, &extra, &probe(call));
+        assert_eq!(ungranted.stdout, "builtin_type", "[vm={use_vm}] {call}");
+        assert_eq!(granted.stdout, ungranted.stdout, "[vm={use_vm}] {call}");
     }
 }
 

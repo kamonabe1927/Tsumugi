@@ -1664,8 +1664,13 @@ fn fs_syntax_before_grant(
         1
     };
     check_arity(name, args, arity, line)?;
+    // 型の検査を path 引数すべてについて済ませてから形式を検査する（grant 済み経路の
+    // `rename` arm も from/to の型 → route の順）。
+    let mut paths = Vec::with_capacity(path_count);
     for (index, arg) in args.iter().take(path_count).enumerate() {
-        let path = require_str(arg, name, index + 1, line)?;
+        paths.push(require_str(arg, name, index + 1, line)?);
+    }
+    for path in paths {
         let valid = if legacy_fs_syntax {
             crate::capability::legacy_lexical_check(path).is_ok()
         } else {
