@@ -288,6 +288,7 @@ parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 spec       = { doc = "docs/determinism-and-audit.md", section = "fix-audit-flush-before-host-call 実装スライス（host call 開始前に `BudgetCharged` を flush する）" }
 acceptance = ["FBH-AT-01..03"]
+design_pr  = 347
 depends_on = ["A-1"]
 order      = 22
 
@@ -299,6 +300,7 @@ parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 spec       = { doc = "docs/determinism-and-audit.md", section = "fix-terminal-host-effects-may-remain 実装スライス（Terminal の `host_effects_may_remain` を host call の `effect_status` から決める）" }
 acceptance = ["HEM-AT-01..04"]
+design_pr  = 347
 depends_on = ["A-1"]
 order      = 23
 
@@ -310,6 +312,7 @@ parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 spec       = { doc = "docs/determinism-and-audit.md", section = "fix-heap-charge-audit-notify 実装スライス（heap の課金を `BudgetCharged` の accumulator へ通知する）" }
 acceptance = ["HCN-AT-01..03"]
+design_pr  = 347
 depends_on = ["A-1"]
 order      = 24
 
