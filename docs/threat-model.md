@@ -20,13 +20,14 @@ import も対象に含め、範囲を file/stdin に絞らない）、この 2 �
 file/stdin に絞る案（判断役の Q1=A）は、それを反映した PR #319 の審査で原則 2（明示的 capability ＞ ambient authority）の疑いと
 なった。目標を保ったまま逸脱として記録すれば、その疑いを避け、目標と逸脱一覧の食い違いもなくなる。REPL の import を塞ぐか
 どうか（[Capability Model仕様](capability-model.md) §10 の issue #291 Q1=A「REPL は範囲外」の見直しを含む）は、別の
-`needs-design` issue で決める。
+`needs-design` issue で決める。これは issue #327 で決まった（REPL と scheduler の handle 経路も link 時の resolver gate に揃える。Q1=A・Q2=A・Q3=A、
+判断役が選択。決定記録は [Capability Model仕様](capability-model.md) §10、実装は同書 §18 の fix-repl-import-gate-tree / -vm と fix-handle-import-from-link）。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱）
 
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
-| REPL（tree・`--vm`）と scheduler の handle 経路（`src/engine.rs` の `Engine::compile` / `create_execution` / `start`）の import は `Engine::link` と resolver を経ず、実行中に評価器内蔵 `ModuleLoader`（`src/module.rs`）がファイルを読む。`module_resolver` の grant を要さず（`TSUMUGI_SANDBOX` の検査だけを受ける）、この 2 経路では TM-024 の「全 import は link 時に resolver capability だけを使う。runtime import 禁止」と TM-AT-24 が成り立たない。例: CLI で `--allow-import-root` を渡さずに REPL へ `import "lib/m.tsg"` を入れると、tree・`--vm` とも module が実行される（同じ内容のファイルを実行すると terminal `Denied`、exit 1）。REPL の経路は [Capability Model仕様](capability-model.md) の冒頭の設計ステータス段落、scheduler の handle 経路は同書の逸脱一覧の行（§10）にある | §10 TM-024、§11 TM-AT-24 | E7（REPL の `ModuleLoader` 保全）、exec-control Slice 3 PR-a（scheduler の handle 経路） |
+| REPL（tree・`--vm`）と scheduler の handle 経路（`src/engine.rs` の `Engine::compile` / `create_execution` / `start`）の import は `Engine::link` と resolver を経ず、実行中に評価器内蔵 `ModuleLoader`（`src/module.rs`）がファイルを読む。`module_resolver` の grant を要さず（`TSUMUGI_SANDBOX` の検査だけを受ける）、この 2 経路では TM-024 の「全 import は link 時に resolver capability だけを使う。runtime import 禁止」と TM-AT-24 が成り立たない。例: CLI で `--allow-import-root` を渡さずに REPL へ `import "lib/m.tsg"` を入れると、tree・`--vm` とも module が実行される（同じ内容のファイルを実行すると terminal `Denied`、exit 1）。REPL の経路は [Capability Model仕様](capability-model.md) の逸脱一覧の REPL の行（§10・§14.1）、scheduler の handle 経路は同書の逸脱一覧の handle 経路の行（§10）にある | §10 TM-024、§11 TM-AT-24 | E7（REPL の `ModuleLoader` 保全）、exec-control Slice 3 PR-a（scheduler の handle 経路） |
 
 照合済みの節に残っている逸脱は上の行だけである（照合していない節に逸脱が無いことを意味しない）。
 
