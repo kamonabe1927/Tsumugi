@@ -2517,7 +2517,7 @@ impl Engine {
             usage: outcome_usage(&outcome),
             import_graph_hash: Some(import_graph_hash),
             context_committed,
-            host_effects_may_remain: false,
+            host_effects_may_remain: context.evaluator.host_effects_may_remain(),
         };
         let terminal_envelope = delivery.envelope(journal.next_sequence(), terminal_event);
         let audited = match journal.append_terminal(&terminal_envelope) {
