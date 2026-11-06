@@ -43,7 +43,7 @@ handle 経路を §3 の `ExecutionRequest` と組み込みAPI仕様 §8 の `Ex
 |---|---|---|
 | `map` / `filter` / `each` の要素境界と callback 本体の文/反復境界での slice yield（callback 本体は `can_yield = false` で完了まで実行する）。`map` / `filter` / `each` の引数に現れる呼び出しも、call 全体を従来の `eval_expr` で評価するため引数の境界で yield できない | §4.2/§9.3 | tree-expr-continuation-e4 |
 | closure の capture の連鎖（`f = fn() g() end` で前の関数値を capture し続ける）の破棄による host stack 枯渇の防止。関数値の深度は 0 と数える（[次期意味論・実装決定](semantic-decisions.md) §21.3）ため、値のネスト深度上限では防げず、20 万段の連鎖の破棄で tree-walk 版・VM 版とも abort する（exit 134） | [次期意味論・実装決定](semantic-decisions.md) §21 | fix-closure-capture-chain-stack |
-| List の最も深い要素の差し替え（`xs[0] = 0`）や `push` / `pop` の往復で、`settle_child_depth`（`src/value.rs`）が全要素を読み直し、時間が fuel に比例せず要素数の 2 乗になる（N = 50,000 で約 24 秒、main は 0.5 秒）。この読み直しは fuel に課金しない（[次期意味論・実装決定](semantic-decisions.md) §21.3）。直し方（深度ごとの子の数の histogram、または読み直しへの fuel 課金）は spec の判断を要するため [issue #304](https://github.com/kamonabe/Tsumugi/issues/304) で設計する | [次期意味論・実装決定](semantic-decisions.md) §21 | fix-value-nesting-depth-limit |
+| §4.1 の「List / Dict の深度の読み直し」の課金。List / Dict の最も深い子の差し替え（`xs[0] = 0`）や `push` / `pop` の往復で、`settle_child_depth`（`src/value.rs`）が全要素の保存済み深度を読み直すが、fuel に課金しないため、時間が fuel に比例せず要素数の 2 乗になる（N = 50,000 で約 24 秒、読み直しの無い場合は 0.5 秒。[issue #304](https://github.com/kamonabe/Tsumugi/issues/304)） | §4.1・[次期意味論・実装決定](semantic-decisions.md) §21.3 | fix-value-depth-settle-quadratic |
 | 関数本体・callback 本体の中での cooperative host-call の Pending yield と audit drain queue 上限の yield。どちらもトップレベル（driver 上の呼び出しの外）の文/反復境界だけで判定し、関数本体の中で Pending を返す adapter は `may_yield = false` の規約違反（catch 不能 `InternalControl`）になる | §4.2/§6.2 | §14「tree-expr-continuation 実装スライス」の逸脱（audit drain queue は [決定性・実行時監査仕様](determinism-and-audit.md) の逸脱一覧にも B-2 として記載） |
 | callback なし bulk builtin（`sort` / `join` / 文字列繰り返し / 大 collection コピー等）の chunk 境界での slice yield。現状は bulk builtin 1 回分を §4.2 の超過として扱い、chunk 前の確認は deadline / cancel だけ | §4.1/§4.2 | fuel-bulk-chunk-yield |
 | VM の式レベル continuation（VM の slice yield と continuation parity） | §9.3 | Slice 6（VM が experimental の間） |
@@ -297,6 +297,7 @@ per-item超過時の`BudgetExceeded`は`used = 0`、`reserved = 0`、`requested 
 | loop iteration開始 | 2 | condition・iterable・bodyのchargeとは別 |
 | host call attempt | 10 | 許可・拒否・host errorのいずれでも課金する |
 | collection elementを走査・copy・生成 | 1 / element | `map`、`filter`、`sort`、比較、serialize等 |
+| List / Dictの深度の読み直し | 1 / 読み直した子 | index代入・`pop`で最大深度の子がいなくなり、残った子（Listの要素・Dictの値）の保存済み深度を全部読み直すときだけ（[次期意味論・実装決定](semantic-decisions.md) §21.3）。値を変える前（COWの複製の前）に課金する。同じ深度の子が残る取り除きと、値を作るときの深度の要約・検査は0 |
 | UTF-8 payloadをscan・copy・encode/decode | `ceil(bytes / 64)` | 0 byteは0。string、source、I/O、host payloadに適用 |
 | AST node生成またはlinked node複製 | 1 / node | compile・import link中 |
 | VM `Charge` opcode dispatch | 0 | opcode payloadに上記論理chargeをencodeする |
@@ -2657,6 +2658,33 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
   - **PSW-AT-03（検査は評価済みの snapshot で）:** snapshot が List でない binding への `push` は、第 2 引数で List へ再代入しても、第 2 引数を評価した後に `builtin_type` の catch できるエラーになる（第 2 引数の副作用は起きる）。snapshot が List なら、第 2 引数で `5` へ再代入してもエラーにならず snapshot に足した List を書き戻す。未定義の binding は第 2 引数の副作用より前に catch できる name エラーになる（変更前と同じ）。第 2 引数の評価がエラーで終わったときは binding へ書き戻さない。いずれもエラーの kind・message・行が両 backend で一致する。確かめ方: golden fixture（`try` / `catch` で catch して出力を比べる）。
   - **PSW-AT-04（tree の式 frame 経路と REPL）:** 第 2 引数の関数の本体で slice yield が起きる実行（tree-expr-continuation-e3 の強制 yield フックを使う既存のテストの形）でも PSW-AT-01 と同じ結果になる。REPL で同じ入力の中の再代入を伴う `push` の結果が両 backend で一致し、エラーで終わった入力の後の rollback（AUD-024）で binding が入力の前の値に戻る。確かめ方: 既存の式 frame の yield テストと REPL テストへのケースの追加。
   - **PSW-AT-05（変更しない push の課金は不変）:** REV-015 Slice 6 の paired test（`tests/scaling.rs` の `push_peak_heap_has_no_full_clone_spike_across_engines`・`push_to_shared_backing_has_no_spike_across_engines`・`push_live_heap_is_linear_not_quadratic_across_engines`・`push_delta_charging_live_heap_is_linear_not_quadratic`）と、既存の `tests/differential.rs`・golden fixture・`tests/defensive_vm.rs` が期待値の変更なしで通る。push を含む differential test で fuel・step・heap / peak_heap が tree と VM で一致する。`src/verifier.rs` が変えた push の lowering を受け入れ、snapshot の無い手組みの不正な Chunk を VM が panic せず `internal` error にする。確かめ方: 既存テストと、verifier の unit test・`tests/defensive_vm.rs` への追加。
+
+### fix-value-depth-settle-quadratic 実装スライス（深度の読み直しへの fuel 課金）
+
+判断済みの `needs-design` [issue #304](https://github.com/kamonabe/Tsumugi/issues/304) から作ったスライス（`slices.toml` の `fix-value-depth-settle-quadratic`）。issue #304 は fix-value-nesting-depth-limit の実装 PR #301 の再レビューで見つかった件で、kamonabe の `判断:` で「読み直しへの fuel 課金」に決まった。目標の規範は[次期意味論・実装決定](semantic-decisions.md) §21.3 の「課金」と本書 §4.1 の「List / Dict の深度の読み直し」の行で、どちらもこのスライスの設計 PR で改訂した（決定記録と採らなかった histogram の理由は §21.3）。
+
+- **現状の不具合:** List / Dict の backing（`src/value.rs` の `Tracked`）は「子の深度の最大 `child_max`」と「その深度を持つ子の数 `child_max_count`」を持ち、index 代入・`pop` で `child_max_count` が 0 になると `settle_child_depth` が全要素の保存済み深度を読み直す。この読み直しは fuel に課金しない。最も深い子がただ 1 つの List で `xs[0] = 0` と `xs[0] = e`（`e` は深い値）を往復する、または最も深い子を `pop` して `push` し直す往復では、1 往復ごとに要素数ぶんを読み直すので、時間が要素数の 2 乗になり、fuel に比例しない（issue #304 の計測で N = 50,000 のとき約 24 秒）。Dict でも、最も深い値がただ 1 つの key を浅い値で上書きすると同じく読み直す。
+- **実装範囲:**
+  - 読み直しが起きる 3 か所（`Value::index_set_tracked` の List と Dict、`Value::list_pop_tracked`）で、読み直す子の数ぶんの fuel を `BudgetLedger::charge_fuel` で課金する。量は、List の index 代入では要素数、Dict の index 代入では entry 数、`pop` では取り除いた後の要素数（0 なら課金しない）。§4.1 の課金表の「1 / 読み直した子」のとおり。
+  - 課金は値を変える前に行う。読み直しが起きるかは、値を変える前に backing の要約と入れる値・取り除く値の深度から決まる（List の index 代入: 取り除く子の深度が `child_max` に等しく、`child_max_count` が 1 で、入れる値の深度が `child_max` より小さい。Dict の index 代入: 既存の key の上書きで同じ条件。新しい key は読み直さない。`pop`: 取り除く末尾の子の深度が `child_max` に等しく、`child_max_count` が 1）。これを `Value::detach_list` / `detach_dict`（COW の複製と heap の課金）の前に求めて fuel を課金し、超過なら対象を変えずに `ControlStop`（`BudgetExceeded(Fuel)`）を返す。fuel を heap より先に見るのは §7.2 の優先順位（`Fuel` が `HeapBytes` より先）と同じ向きにするためである。判定を読み直しの実行（`settle_child_depth`）と食い違わせないよう、判定の関数を 1 つにして両方から使う（例: 判定の結果を `settle_child_depth` に渡す）。
+  - tree-walk 版（`src/eval.rs` の `budget_list_pop`・`src/builtin_core.rs` の index 代入）と VM 版（`src/vm.rs` の `OpCode::SetIndex`・`OpCode::PopUpdate`）は、どちらも上の `src/value.rs` の primitive を通るので、課金の位置と量は両 backend で同じになる。呼び出し側は primitive の `ControlStop` を既に `control_stop_to_error` で運んでいるので、変えない見込みである。
+  - VM の Dict リテラルの構築（`OpCode::DictInsert`）も `index_set_tracked` を通るため、重複した key で最も深い値を浅い値で上書きすると読み直しが起きる。tree の Dict リテラル（`src/eval.rs` の `Expr::Dict`）は `BTreeMap` に入れてから最後に 1 回だけ要約するので読み直さない。§4.1 の「lowering差をscriptのfuel差にしない」のとおり、リテラルの構築では課金しない（`DictInsert` は課金しない経路で primitive を呼ぶ）。課金の対象はスクリプトの index 代入・`pop` だけである（判断待ち: 設計 PR の判断の候補 Q2。判断役の選択をここに反映する）。
+  - [言語仕様](language-spec.md)「値のネスト深度制限」の「課金」の行を §21.3 に合わせる（読み直しのときだけ、読み直した子の数ぶん fuel を課金する。heap には課金しない）。`fuel_accounting_revision` と `language_revision` の扱いは下の「課金の変化」。
+  - done にする実装 PR で、本書の未実装範囲の表から「§4.1 の『List / Dict の深度の読み直し』の課金」の行を削除する。tree の slice fuel が数えないもの（逸脱一覧の 1 行目。builtin が台帳へ直接課金する per-element fuel）に読み直しの課金も入るので、その行に index 代入・`pop` の読み直しを足す。
+- **範囲外:**
+  - 深度ごとの子の数の histogram（§21.3 の決定記録で採らなかった案）。
+  - VM の Dict リテラルの重複 key での読み直しそのもの（課金しないまま残る）。回数と 1 回の量はリテラルの entry 数、つまり source の大きさ（`max_single_source_bytes`）で上限がある（Q2）。
+  - COW の複製（`detach_list` / `detach_dict` が共有中の backing を要素ごとに複製する）への per-element fuel 課金。§4.1 の「collection elementを走査・copy・生成」の一部で、`fuel-bulk-charge` の範囲。
+  - tree の slice fuel に読み直しの課金を数えること（逸脱一覧 1 行目の直し方と同じ。§4.2）。
+  - `BudgetCharged` 監査 event の reason の細分。読み直しの課金は他の `charge_fuel` と同じく `Operation` に集計される（`src/budget.rs` の `charge_reason_for`）。
+  - `fuel_accounting_revision` の field の実装（F-2 の範囲）。
+- **課金の変化:** 深度の読み直しが起きる index 代入・`pop` だけ、読み直した子の数ぶん fuel が増える。step・heap・peak_heap と、読み直しの起きない操作の fuel は変わらない。fix-value-nesting-depth-limit の VND-AT-05（「fuel・`live_heap` / `peak_heap` の値が変わらない（深度の計算は課金しない）」）は、その小節を書いた時点の記録として残し、このスライスの後は fuel について「読み直しの起きない script では変わらない」と読む（下の VDS-AT-04。`tests/value_nesting_depth_limit.rs` の代表 script は読み直しを起こさないので期待値は変わらない見込み。VND-AT-03 の時間のテストは最後に 1 回だけ 10 万要素を読み直し、設計の際の計測で tree の fuel は変更前 200,254 なので、課金後も既定の `total_fuel`（1,000,000）に収まる）。fuel の会計の変更なので `language_revision` は変えない（§3.1）。`fuel_accounting_revision` は 1 のままにし、§3.1 の「初期版は `1`」の説明に、field を実装する F-2 より前に足した課金点（このスライスの読み直し）は版 1 に含めると書き足す（判断待ち: 設計 PR の判断の候補 Q1。判断役の選択をここに反映する）。
+- **想定の変更規模:** `src/` は 30〜80 行程度（`src/value.rs` の読み直しの判定の関数 15〜30 行、3 か所の課金 10〜25 行、`settle_child_depth` の判定の共有 5〜15 行、呼び出し側でエラーを運ぶ変更があれば 0〜10 行）。テストは `tests/` と `src/value.rs` の unit test で 150〜250 行。docs は言語仕様の 1 行、本書の逸脱一覧・未実装範囲。触る仕組みは「値の表現（List / Dict の backing の深度の更新）」1 つ。受入基準は 4 項目。§14.1（[開発ループ手順書](loop-runbook.md)）に収まる。
+- **受入基準:**
+  - **VDS-AT-01（読み直した子の数ぶんを課金）:** 読み直しが起きる操作（最も深い子がただ 1 つの List の index 代入・Dict の既存 key の上書き・`pop`）の fuel の増分が、課金の無い同じ形の操作との差で、読み直した子の数（List の要素数・Dict の entry 数・`pop` の後の要素数）に一致する。読み直しの起きない操作（同じ深度の子が残る取り除き、より深い値・同じ深度の値を入れる index 代入、Dict の新しい key、`push`）と、最も深い値を重複した key で浅い値に上書きする Dict リテラル（`{"a": e, "b": 1, "a": 1}`。VM だけが内部で読み直す）の fuel は変更前と同じである。tree-walk 版と VM 版で fuel が一致する。確かめ方: 同じ script を両 backend で実行して `committed.fuel` を比べる統合テストと、`src/value.rs` の判定の unit test。
+  - **VDS-AT-02（往復は fuel で止まる）:** issue #304 の敵対的入力（要素数 50,000 の List の最も深い要素の `xs[0] = 0` / `xs[0] = e` の往復と、最も深い末尾の要素の `pop` / `push` の往復を、`while true` で繰り返す）と、Dict の同じ形が、既定の budget で `BudgetExceeded(Fuel)` の terminal で止まり、壁時計の上限（例: 10 秒）以内に終わる。`try` / `catch` の内側でも catch されない。確かめ方: CLI を subprocess で起動して、exit code・stderr の fuel 超過の診断・経過時間を確かめるテスト（両 backend）。
+  - **VDS-AT-03（値を変える前に課金する）:** 残りの fuel が読み直す子の数より少ないときの index 代入・`pop` が `BudgetExceeded(Fuel)` で止まり、超過の記録（`resource`・`requested`）が読み直す子の数を示し、対象の backing を共有する別名があっても COW の複製の heap を課金しない（`live_heap` / `peak_heap` が操作の前と同じ）。tree-walk 版と VM 版で同じ resource・同じ committed fuel になる。確かめ方: 小さい `total_fuel` を設定した実行で usage と超過の記録を比べるテスト（両 backend）。
+  - **VDS-AT-04（ほかの観測は不変）:** 既存のテスト（`tests/value_nesting_depth_limit.rs` の VND-AT-01..05 と `tests/` 一式、unit test）が期待値の変更なしで通る。読み直しの起きない script で fuel・step・`live_heap` / `peak_heap` が変更前と同じで、tree と VM の differential test が一致する。確かめ方: 既存のテスト一式。期待値を変えたテストがあれば、読み直しが起きることを PR 本文に示す。
 
 ## 15. 境界受入テスト
 
