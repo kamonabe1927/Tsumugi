@@ -353,6 +353,7 @@ parent     = "REV-001"
 spec       = { doc = "docs/execution-control.md", section = "fix-value-depth-settle-quadratic 実装スライス（深度の読み直しへの fuel 課金）" }
 acceptance = ["VDS-AT-01..04"]
 depends_on = ["fix-value-nesting-depth-limit"]
+design_pr  = 349
 order      = 93
 
 [[slice]]
