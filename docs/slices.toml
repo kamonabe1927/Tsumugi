@@ -342,6 +342,21 @@ acceptance = ["VND-AT-01..05"]
 design_pr  = 297
 impl_pr    = 301
 
+# 判断済みの needs-design issue #304（kamonabe の `判断:` で「読み直しへの fuel 課金」）から作った fix。
+# 規範は semantic-decisions §21.3「課金」と execution-control §4.1「List / Dict の深度の読み直し」（この設計 PR で改訂）。
+# order は loop-runbook §8 の既定のうち「それ以外 → すべてのスライスより後」（#304 は kamonabe の不具合の報告ではなく、
+# 実装 PR #301 のレビューから実装役が立てた needs-design issue）。見積もり: src/ 30〜80 行、触る仕組みは値の表現 1 つ、受入基準 4。
+[[slice]]
+id         = "fix-value-depth-settle-quadratic"
+title      = "List / Dict の深度の読み直しに、読み直した子の数ぶん fuel を課金する（semantic-decisions §21.3、execution-control §4.1、issue #304）"
+status     = "ready"
+parent     = "REV-001"
+spec       = { doc = "docs/execution-control.md", section = "fix-value-depth-settle-quadratic 実装スライス（深度の読み直しへの fuel 課金）" }
+acceptance = ["VDS-AT-01..04"]
+depends_on = ["fix-value-nesting-depth-limit"]
+design_pr  = 349
+order      = 93
+
 [[slice]]
 id         = "fix-closure-capture-chain-stack"
 title      = "closure の capture の連鎖の破棄による stack 枯渇を防ぐ（TM-007、semantic-decisions §21.3 の範囲外）"

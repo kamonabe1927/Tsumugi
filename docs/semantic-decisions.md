@@ -2375,7 +2375,7 @@ Tsumugi の時刻は内部表現も出力基準も UTC 固定である。`now()`
 
 ## 21. 値のネスト深度上限（issue #290）
 
-設計ステータス: **実装済み・言語仕様へ統合済み**（言語仕様 0.21 の「実行安全性」「値のネスト深度制限」。実装は [実行予算・協調実行仕様](execution-control.md) §14 の fix-value-nesting-depth-limit、受入試験は `tests/value_nesting_depth_limit.rs`）
+設計ステータス: **実装済み・言語仕様へ統合済み**（言語仕様 0.21 の「実行安全性」「値のネスト深度制限」。実装は [実行予算・協調実行仕様](execution-control.md) §14 の fix-value-nesting-depth-limit、受入試験は `tests/value_nesting_depth_limit.rs`）。§21.3 の「課金」は [issue #304](https://github.com/kamonabe/Tsumugi/issues/304) の判断で改訂した（深度の読み直しへの fuel 課金）。その実装との差は[実行予算・協調実行仕様](execution-control.md)の未実装範囲の表にある
 
 ### 21.1 背景・課題
 
@@ -2393,7 +2393,8 @@ Tsumugi の時刻は内部表現も出力基準も UTC 固定である。`now()`
 - **対象:** List / Dict を作る、または List / Dict に値を入れるすべての経路。List / Dict リテラル、`push`、index 代入（List の要素・Dict の値）、`map` の結果（callback の戻り値を要素に並べる）を含む。入力の要素を並べ替える・一部を取り出す・入れ物を替えるだけの builtin（`filter`・`slice`・`reverse`・`sort`・`values` など）は入力より深い値を作らないため、超過しない。host function の戻り値や host から渡された値そのものの深度は検査しない（host は信頼境界の内側、[脅威モデル](threat-model.md) §9）が、スクリプトがそれを List / Dict に入れるときは同じ規則で検査する。tree-walk 版と VM 版で同じ境界・同じメッセージ・同じ line になる。
 - **関数値:** 関数値の深度は 0 で、capture した変数の値を深度に数えない。closure の capture の連鎖による stack 枯渇は本節の範囲外で、[`slices.toml`](slices.toml) の `fix-closure-capture-chain-stack`（`todo`）で別に扱う。
 - **設定変更:** 不可（コンパイル時定数）。`BudgetConfig`・環境変数・CLI option の入口を設けない（call / AST / import の深度上限と同じ）。
-- **課金:** 深度の計算と検査は fuel・heap に課金しない（§5.1 の論理サイズは変えない）。
+- **課金:** 深度の計算と検査は heap に課金しない（[実行予算・協調実行仕様](execution-control.md) §5.1 の論理サイズは変えない）。fuel は、深度の読み直しにだけ課金する。index 代入・`pop` で最大深度の子がいなくなり、残った子の保存済み深度を全部読み直して正確な深度を求めるときに、読み直した子の数（List の要素数・Dict の entry 数）ぶんを [実行予算・協調実行仕様](execution-control.md) §4.1 の「List / Dict の深度の読み直し」として課金する。それ以外の深度の計算と検査（作るときの要約、`push`・index 代入で入れる値の深度の検査、同じ深度の子が残る取り除き）は fuel にも課金しない。読み直しの fuel は値を変える前に課金し、超過は `BudgetExceeded(Fuel)` の catch できない terminal になる。tree-walk 版と VM 版で同じ操作・同じ量・同じ位置で課金する。
+  - **決定記録（[issue #304](https://github.com/kamonabe/Tsumugi/issues/304) で kamonabe が選択）:** 読み直しへの fuel 課金にする。理由: 最大深度の子の差し替えや `push` / `pop` の往復で読み直しが繰り返されると、時間が要素数の 2 乗になる（issue #304 の計測で N = 50,000 のとき約 24 秒）。読み直しを課金しないと、この時間が fuel に比例せず、fuel の上限でホストへの負荷の最悪値を抑えられない（[マニフェスト](manifesto.md)原則 3「すべての実行に予算を設ける」・原則 1）。読み直した子の数ぶんを課金すれば、時間が fuel に比例する。採らなかった案: 深度ごとの子の数の histogram を backing に持ち、読み直しをやめる案は、backing ごとに §5.1 の論理サイズに入らない Rust のメモリが増える（原則 3 で heap の上限が実メモリを表さなくなり、原則 8 で値の表現が大きくなる）。
 
 ### 21.4 採用理由（思想・設計との整合）
 
@@ -2414,7 +2415,7 @@ Tsumugi の時刻は内部表現も出力基準も UTC 固定である。`now()`
 
 - Tsumugi は alpha 版であり後方互換性を保証対象にしていない（マニフェスト）。§20.7 と同じ扱いである。
 - 深さが一定を超えるとプロセスごと abort する現在の挙動は、上限内の値だけを使うスクリプトにとっても「どこまで深くしてよいか」が host stack の大きさとビルドで変わる予測できない挙動であり（原則 5）、残す理由が無い。
-- 上限内の値だけを使うスクリプトの挙動（結果・fuel・heap）は変わらない。
+- 上限内の値だけを使うスクリプトの挙動（結果・fuel・heap）は変わらない。ただし [issue #304](https://github.com/kamonabe/Tsumugi/issues/304) の改訂（§21.3 の「課金」）のあとは、深度の読み直しが起きる index 代入・`pop` だけ、読み直した子の数ぶん fuel が増える（結果と heap は変わらない。fuel の会計の変更なので `language_revision` は変えない。[実行予算・協調実行仕様](execution-control.md) §3.1）。
 
 ### 21.7 受入基準
 
