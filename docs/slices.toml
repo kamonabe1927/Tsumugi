@@ -316,7 +316,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "fix-heap-charge
 acceptance = ["HCN-AT-01..03"]
 design_pr  = 347
 depends_on = ["A-1"]
-order      = 24
+order      = 30
 
 # issue #290（kamonabe、「優先」）から作った不具合の fix 2 本と、その設計で見つかった関連の 1 本。
 # order は loop-runbook §8.1 の「優先」の既定（今ある ready・todo のすべてより前の空いている値）。
@@ -517,7 +517,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["F-2"]
-order      = 25
+order      = 31
 
 # audit-strict-cbor（strict deterministic CBOR、§9.2）は 1 PR の大きさの目安に収まらないため、
 # c1〜c4 の 4 スライスへ分割した（spec「audit-strict-cbor の sub-slice 分割」）。元の id は置き換えて残さない。
@@ -545,7 +545,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-06..10"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 31
+order      = 32
 
 [[slice]]
 id         = "audit-strict-cbor-c3"
@@ -557,7 +557,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-11..15"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 32
+order      = 33
 
 [[slice]]
 id         = "audit-strict-cbor-c4"
@@ -569,7 +569,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-16..20"]
 depends_on = ["audit-strict-cbor-c2", "audit-strict-cbor-c3"]
 design_pr  = 256
-order      = 33
+order      = 34
 
 [[slice]]
 id         = "audit-sink-required"
@@ -685,45 +685,48 @@ order      = 92
 # parent は、Windows の lexical 検査が他の fs 検査の fix と同じ AUD-020、REPL の budget が REV-007（session state と
 # run meter を request ごとに分ける）、foreign engine の拒否と poison が REV-008（stable execution の transaction）、
 # link 時の課金・`ExecutionRequest` の Send/Sync・`HostErrorCode` が fix-host-function-id-unique と同じ REV-015。
+# 付け直し（状態整理 PR、PM）: 94〜99 を 24〜29 にした（今ある ready の fix-heap-charge-audit-notify・fix-value-depth-settle-quadratic
+# より前）。0〜23 に空きが無いため、24・25 を空けて ready・todo どうしの相対順を保つよう、fix-heap-charge-audit-notify を 24 → 30、
+# fuel-bulk-charge を 25 → 31、audit-strict-cbor-c2・c3・c4 を 31・32・33 → 32・33・34 にした。done のスライスの order は変えていない。
 
 [[slice]]
 id         = "fix-windows-legacy-lexical-colon"
 title      = "Windows の legacy profile の lexical 検査が component 内の `:` を取りこぼさないようにし、platform 差のテストを足す（capability-model §5.5・§14.3、loop:drift #352 D-57）"
 status     = "todo"
 parent     = "AUD-020"
-order      = 94
+order      = 24
 
 [[slice]]
 id         = "fix-link-request-budget-charge"
 title      = "Engine::link で LinkRequest の budget に source/module/import の count・bytes を課金し上限を判定する（embedding-api §5、loop:drift #352 D-62）"
 status     = "todo"
 parent     = "REV-015"
-order      = 95
+order      = 25
 
 [[slice]]
 id         = "fix-run-foreign-engine-mismatch"
 title      = "Engine::run に別 engine の context・LinkedScript を渡したとき、開始前の EngineMismatch として拒否し context を poison しない（embedding-api §9・§10 規則1・EMB-AT-03、loop:drift #352 D-63）"
 status     = "todo"
 parent     = "REV-008"
-order      = 96
+order      = 26
 
 [[slice]]
 id         = "fix-execution-request-send-sync"
 title      = "MonotonicClock に Send + Sync の bound を足して ExecutionRequest を Send・Sync にし、EMB-AT-02 の assertion に加える（embedding-api §9、loop:drift #352 D-64）"
 status     = "todo"
 parent     = "REV-015"
-order      = 97
+order      = 27
 
 [[slice]]
 id         = "fix-repl-submission-budget"
 title      = "REPL の各 submission を、その ExecutionRequest が所有する有限 budget で実行する（embedding-api §6・§12、execution-control §3・§13、loop:drift #352 D-67）"
 status     = "todo"
 parent     = "REV-007"
-order      = 98
+order      = 28
 
 [[slice]]
 id         = "fix-host-error-code-invalid-descriptor"
 title      = "HostErrorCode::new の文字種の違反に ConfigError::InvalidDescriptor を返す（embedding-api §3・§8、loop:drift #352 D-68）"
 status     = "todo"
 parent     = "REV-015"
-order      = 99
+order      = 29
