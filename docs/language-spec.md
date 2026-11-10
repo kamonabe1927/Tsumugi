@@ -14,7 +14,7 @@
 
 - CLI の既定は safe profile である（[Capability Model仕様](capability-model.md) §14.2・§14.4）。safe profile が既定で許可するのは標準出力（`print`）とスクリプト引数（`args()`）だけで、それ以外は `--allow-env KEY`・`--allow-clock`・`--allow-script-stdin`・`--allow-exit`・`--fs-root NAME=PATH` と `--fs-op NAME=OP[,OP...]`・`--allow-import-root NAME=PATH` で個別に許可する（同 §14.1）。`--deny-stdout` は標準出力の許可を外す
 - `--profile legacy` は互換用で、環境変数（`TSUMUGI_` で始まるものを除く）・時刻・標準入出力・プロセス終了と、`TSUMUGI_SANDBOX` に従うファイルシステムを許可する（同 §14.3）。legacy profile は import root を許可しないため、ファイル・標準入力から実行するスクリプトの import は拒否される
-- REPL も同じ profile と option で動く。ただし REPL の import は import root を要しない（「モジュール / import」の「制約」）
+- REPL も同じ profile と option で動く。REPL の import もファイル・標準入力と同じく import root を要し、許可が無ければ link 時に拒否される（「モジュール / import」の「制約」、[Capability Model仕様](capability-model.md) §10）。現在の実装との差は下の「現在の既知非適合」にある
 - 許可の無い操作は、スクリプト実行中なら catch 可能な `capability`（ファイルシステム操作は `sandbox`）エラーになる。import の拒否だけは実行開始前の link 時に起き、catch できない（「モジュール / import」の「パス解決」）
 
 本節と、組み込み関数表・「実行安全性」の権限に関する記述は、loop:drift #298 の D-17・D-18 を受けて CLI の既定（safe profile）に合わせて直した。実装は変えず、本書を [Capability Model仕様](capability-model.md) §14 と実装に合わせる案（Q1=A・Q2=A）は、返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5、issue #298）。理由: Capability Model仕様が採択した safe 既定はマニフェスト原則 2「権限はホストが明示的に付与する」に沿い、実装もそれに一致している。本書だけが CLI が ambient に権限を持つ前提で書かれていた。これは既に実装されている CLI の既定を記述し直したもので、`LanguageRevision` で分岐する言語挙動の変更ではないため、仕様 revision は 0.21 のまま変えない。
@@ -31,7 +31,7 @@
 
 両engine共通の仕様違反（[Capability Model仕様](capability-model.md) の目標との差）:
 
-- REPL の import の実行時の読み込みは、profile にかかわらず `TSUMUGI_SANDBOX` を読み、許可範囲外のパスをサンドボックス違反にする。目標は「safe profile では `TSUMUGI_SANDBOX` を読まない」である（同 §14.3・§14.4）。REPL の import が評価器内蔵の module loader を経由していることによる。ファイル・標準入力から実行するスクリプトの import は、link 時に resolver が import root の下で確かめた内容だけを実行し、`TSUMUGI_SANDBOX` を読まない
+- REPL（tree・VM）の import は link 時の resolver gate を通らず、import root を要さずに現在の作業ディレクトリからの相対パスで解決され、profile にかかわらず `TSUMUGI_SANDBOX` を読む。目標は、REPL もファイル・標準入力と同じく各入力を link 時に import root の下で解決し（未許可なら拒否）、`TSUMUGI_SANDBOX` を読まないことである（同 §10・§14.3・§14.4）。この差の正本は同仕様の逸脱一覧の REPL の import の行である
 
 本書の文法どおり、複数行lambdaの終端`end`は必須である。
 
@@ -691,8 +691,8 @@ import はプログラムの実行を始める前にすべて解決する。読�
 - import はプログラムのトップレベルでのみ使用できる。関数・条件分岐・ループ・`try` / `catch`・複数行ラムダのブロック内に記述すると、パスの読み込み前にパースエラー `import はトップレベルでのみ使用できます` になる
 - root scriptを数えず、現在処理中のimport chainは最大128ファイル。異なるファイルへの129段目のimportは`import 失敗: ネストが深すぎます (上限: 128)`という`import`ランタイムエラーになる。既訪問パスは深度検査前にスキップされるため、循環importの従来挙動は変わらない
 - import されたファイル内の `let` 宣言・`fn` 定義がすべて現在のスコープに展開される（名前空間は分離されない）
-- REPL での import は import root を要さず、現在の作業ディレクトリからの相対パスで解決される
-- ファイル・標準入力から実行するスクリプトの import は `TSUMUGI_SANDBOX` を読まない（import の許可は import root だけで決まる）。safe profile の REPL の import も `TSUMUGI_SANDBOX` を読まないのが目標である（[Capability Model仕様](capability-model.md) §14.3・§14.4）。現在の実装との差は上の「現在の既知非適合」にある
+- REPL での import も、ファイル・標準入力と同じく入力ごとに実行開始前の link 時に import root の下で解決され、import root が許可されていなければ link 時に拒否される（[Capability Model仕様](capability-model.md) §10）。現在の作業ディレクトリからの相対の import が欲しいときは `--allow-import-root default=.` を明示する
+- ファイル・標準入力・REPL の import は `TSUMUGI_SANDBOX` を読まない（import の許可は import root だけで決まる。[Capability Model仕様](capability-model.md) §14.3・§14.4）。現在の実装との差は上の「現在の既知非適合」にある
 
 ## エラー処理（try / catch）
 
