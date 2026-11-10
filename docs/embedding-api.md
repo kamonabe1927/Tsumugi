@@ -19,6 +19,7 @@
 §3〜§12 の公開型を実装と照合して確かめた差のうち、上の 3 項目だけである。照合していない節（§13 以降）の逸脱と、
 上の設計ステータス段落・§14「実装slice」表にある現在の状態（E9・E10 の残りなど）は、まだ表へ移していない。
 監査 builder の差（`audit_sink` が任意である点など）は [決定性・実行時監査仕様](determinism-and-audit.md) の逸脱一覧にある。
+loop:drift #352 の D-62〜D-65・D-67・D-68 で、§5 の link 時の課金、§9 の foreign engine の拒否と `ExecutionRequest` の Send/Sync、§12 の VM 経路（E9 の残り）、REPL の budget、§3・§8 の `HostErrorCode` の 7 行を足し、§12 と §15 EMB-AT-05 に残っていた実装状態の注記を表へ移した（2026-11-10 の整合点検で事実を確かめた差）。
 §6 が正本を [実行予算・協調実行仕様](execution-control.md) §3 に置く `ExecutionRequest` の差（loop:drift #288 の D-15）と、
 同仕様 §9.1 の handle API の差（D-16）は、同仕様の逸脱一覧にある。
 
@@ -29,6 +30,13 @@
 | 公開 `ExecutionOutcome`（`src/embedding.rs` の `ExecutionOutcome`、crate root では `EmbeddingOutcome`）は `Completed` / `Exited` / `RuntimeError` / `BudgetExceeded` / `DeadlineExceeded` / `Cancelled` / `InternalFailure` の 7 variant だけで、目標の 13 variant のうち `Denied` / `LinkError` / `HostError` / `AuditFailure` / `RecordFailure` / `ReplayMismatch` が無い。link 時の拒否と resolver の host 失敗は `Engine::link` の `Result<_, LinkError>`（`LinkError::Denied` / `LinkError::Resolve(HostError)` ほか）で返し、監査失敗は監査付き経路だけの別型 `AuditedOutcome::AuditFailed` で返す。`RecordFailure` / `ReplayMismatch` は record/replay が未実装のため無い（同じ差を [決定性・実行時監査仕様](determinism-and-audit.md) の逸脱一覧が §7.2 の `TerminalOutcome` との対応として持つ） | §8 | E1・E5・E7・E11 |
 | `ExecutionOutcome` の field の形が目標と違う。目標の `Completed { value: Value, usage }` に対し、実装（`src/embedding.rs` の `ExecutionOutcome::Completed`）は `Completed { usage }` で `value` が無い。目標の `BudgetExceeded { failure: BudgetExceeded, usage }` に対し、実装は `BudgetExceeded { error: ExecutionError, usage }` で、超過した resource は `ExecutionError::code` の `ErrorKind` で表す（構造化の `BudgetExceeded` 型は `src/budget.rs` にあるが outcome には載せない）。目標の `DeadlineExceeded { deadline: MonotonicInstant, usage }` に対し、実装は `DeadlineExceeded { usage }` で `deadline` が無い | §8 | E5（`Completed`）、E11（`BudgetExceeded`・`DeadlineExceeded`） |
 | `StartError`（`src/scheduler.rs` の `StartError`、`src/lib.rs` で crate root に公開）は `Backpressure { active, queued, limit }` / `Config(ConfigError)` / `ConcurrentRunRequiresPolling` の 3 variant だけで、目標の `EngineMismatch` / `RevisionMismatch` / `ContextBusy` / `ContextPoisoned` / `InvalidRequest` / `AuditUnavailable` / `InternalFailure` が無く、目標に無い `Config(ConfigError)` を持つ。`ConcurrentRunRequiresPolling` は variant だけで、検出は配線していない | §9 | exec-control Slice 5 |
+| `LinkRequest` の budget で link 時に source/module/import の count・bytes を課金せず、上限も判定しない。`Engine::link`（`src/embedding.rs` の `link_call_context`）は resolver を呼んで graph を作るだけで、課金は run の `Link` フェーズで `ExecutionRequest` の budget に行う（`LinkRequest` の budget を import_count=0・import_bytes=1 にして 1 module を import しても link は `Ok` になる）。fix-import-run-from-link-graph は範囲外とした（同スライス小節は [Capability Model仕様](capability-model.md) §18）。fix スライス fix-link-request-budget-charge で直す。loop:drift #352 D-62 | §5 | 既存の挙動（loop:drift #352 D-62 で確認） |
+| `Engine::run` に別 engine の `ExecutionContext` か `LinkedScript` を渡すと、開始前の mismatch として拒否せず `ExecutionOutcome::InternalFailure` を返し、context を poison する（`src/embedding.rs` の `run` の engine 照合。unit test `run_rejects_foreign_context` はこの挙動を固定している）。目標は §9・§10 規則1・EMB-AT-03 の開始前の `EngineMismatch` による拒否で、§9 のとおり context を変えず poison しない。同期 `run` の戻り値の形は fix の設計で決める。fix スライス fix-run-foreign-engine-mismatch で直す。loop:drift #352 D-63 | §9・§10・§15 | 既存の挙動（loop:drift #352 D-63 で確認） |
+| `ExecutionRequest` が `Send`・`Sync` でない。field の `clock: Arc<dyn MonotonicClock>` の `MonotonicClock`（`src/budget.rs`）に `Send + Sync` の bound が無い（`Engine`・`CompiledScript`・`LinkedScript` は満たす）。EMB-AT-02 の compile-time assertion は `ExecutionRequest` を見ていない。fix スライス fix-execution-request-send-sync で直す。loop:drift #352 D-64 | §9・§15 | 既存の挙動（loop:drift #352 D-64 で確認） |
+| `Engine::run` は `EngineConfig` の `Backend` を見ず、`VmExperimental` の engine でも常に tree 評価器で実行する（`src/embedding.rs` は `Compiler`・`Vm` を参照しない）。VM backend adapter（run 経路の Engine 統合）と EMB-AT-17 の VM 側は未実装で、延期先は E9 の残り。loop:drift #352 D-65 | §12・§15 | E9（未実装範囲） |
+| CLI の VM 経路（file/stdin・REPL。`src/main.rs`）は Engine API を通らず `Compiler` と `Vm` を直接呼び、capability を `Vm::set_capabilities` で注入する。VM file/stdin は import の gate だけのために `Backend::TreeWalk` の engine を build して `compile`→`link` を通し、import 展開は link 済み graph から `expand_for_cli` で行う。VM REPL の import の差は [Capability Model仕様](capability-model.md) の逸脱一覧の REPL の行にある。延期先は E9 の残り。loop:drift #352 D-65 | §12・§15 | E9（VM file/stdin の import gate だけを統合した最小統合） |
+| REPL（`run_for_repl`、tree）は session 全体で 1 本の budget を持ち、2 回目以降の submission では渡された `ExecutionRequest` の budget を使わない（fuel（step）だけを reset し、source/output/host/string/heap などの累積値を持ち越す）。目標は §6・§12 のとおり各 submission の `ExecutionRequest` が所有する有限 budget。fix スライス fix-repl-submission-budget で直す（累積の扱いはその設計で決める）。loop:drift #352 D-67 | §6・§12 | E7（tree REPL の Engine API 統合） |
+| `HostErrorCode::new`（`src/embedding.rs`）は NUL を含まない文字種の違反（`"A"`・`"1a"`）にも `ConfigError::IdentifierContainsNul` を返す。目標は §8 のとおり `ConfigError::InvalidDescriptor { field: "host_error_code", code: "invalid_identifier" }`。fix スライス fix-host-error-code-invalid-descriptor で直す。loop:drift #352 D-68 | §3・§8 | 既存の挙動（loop:drift #352 D-68 で確認） |
 
 ## 1. 目的と規範範囲
 
@@ -139,7 +147,7 @@ impl Engine {
 }
 ```
 
-`SourceId::new`は1..=256 UTF-8 bytes、NULなしを受理する。表示用IDであり、hostはsecret pathやcredentialを入れてはならない。`EngineId`はprocess内で衝突しないrandom nonzero u128とし、永続identityには使わない。
+`SourceId::new`は1..=256 UTF-8 bytes、NULなしを受理する。表示用IDであり、hostはsecret pathやcredentialを入れてはならない。`EngineId`はprocess内で一意な非ゼロのu128とし（乱数源を使わない）、永続identityには使わない。この形は loop:drift #352 D-66 の Q1=A（判断役が選択、issue #352）による。理由: engineはambient random sourceへ直接アクセスしない（[決定性・実行時監査仕様](determinism-and-audit.md) §7.1）。本節が求める性質は「process内で衝突しない」「永続identityに使わない」で、乱数でなくても満たせる（[マニフェスト](manifesto.md) 原則5・原則8）。§11 規則2のfault IDも同じである。採らなかった案B（hostが注入する乱数源から生成する）は、本節が求めていない衝突回避のために公開APIとfixスライスを増やし、fault IDが実行ごとに変わって再現性も下がるため採らない。
 
 `VmExperimental`は`allow_experimental_backend(true)`がなければbuild errorである。Phase 1/2内部縦切りではaudit sinkをまだ接続しない。Phase 6統合buildではbuilderへ`audit_sink`を追加し、[決定性・実行時監査仕様](determinism-and-audit.md)どおりsink未指定を`ConfigError::AuditSinkRequired`で拒否し、`AuditFailurePolicy::FailClosed`だけを受理する。同じbuildにsinkなしfallbackやbest-effort policyを併存させない。
 
@@ -438,7 +446,7 @@ pub enum ExecutionOutcome {
 }
 ```
 
-`HostErrorCode::new`はASCII lowercase `[a-z][a-z0-9_.-]{0,63}`だけを受理する。`safe_message`、`Debug`、`Display`へsecret、absolute path、native backtrace、panic payloadを入れない。
+`HostErrorCode::new`はASCII lowercase `[a-z][a-z0-9_.-]{0,63}`だけを受理する。空文字列は`ConfigError::EmptyIdentifier`、64 bytesを超えるものは`ConfigError::IdentifierTooLong`、NULを含まない文字種の違反（例: `"A"`・`"1a"`）は`ConfigError::InvalidDescriptor { field: "host_error_code", code: "invalid_identifier" }`を返す（§3）。文字種の違反に`InvalidDescriptor`を返すことは loop:drift #352 D-68 の Q1=A（判断役が選択、issue #352）による。理由: NULを含まない入力に`IdentifierContainsNul`を返すと失敗の理由が観測した事実と合わない（[マニフェスト](manifesto.md) 原則5・原則6）。`InvalidDescriptor`はhost function名の文字種の違反（`code: "invalid_identifier"`）にすでに使われ、`field`・`code`で機械可読に区別でき、公開enumにvariantを足さずに済む（原則8）。採らなかった案B（新しいvariantを足す）は、公開APIを広げ、同じ種類の誤りの返し方が2通りになるため採らない。`safe_message`、`Debug`、`Display`へsecret、absolute path、native backtrace、panic payloadを入れない。
 
 v1の`Completed.value`は`Value::Null`。top-level返値を将来追加してもvariantは変えない。
 
@@ -518,7 +526,7 @@ pub enum StartError {
 ## 11. Host panic、abort、exit
 
 1. lexer/parser/linker/backend/host functionのunwind panicを各host boundaryで`catch_unwind(AssertUnwindSafe(...))`する。
-2. compile panicは`CompileDiagnosticCode::InternalFault`、link/start panicはそれぞれ`LinkError::InternalFailure` / `StartError::InternalFailure`、handle作成後のrun/poll panicはterminal `ExecutionOutcome::InternalFailure`とし、random nonzero fault IDを付ける。panic以外では、audit sink callbackからの同じEngineへの再入の拒否（第9節）にも`CompileDiagnosticCode::InternalFault` / `LinkError::InternalFailure` / `ExecutionOutcome::InternalFailure`を使う。
+2. compile panicは`CompileDiagnosticCode::InternalFault`、link/start panicはそれぞれ`LinkError::InternalFailure` / `StartError::InternalFailure`、handle作成後のrun/poll panicはterminal `ExecutionOutcome::InternalFailure`とし、process内で一意な非ゼロのfault ID（乱数源を使わない。§3の`EngineId`と同じ、loop:drift #352 D-66 Q1=A）を付ける。panic以外では、audit sink callbackからの同じEngineへの再入の拒否（第9節）にも`CompileDiagnosticCode::InternalFault` / `LinkError::InternalFailure` / `ExecutionOutcome::InternalFailure`を使う。
 3. panic payload/native backtraceはpublic errorへ含めず、host-only diagnostic hookがある場合だけ渡す。
 4. `panic=abort`、OOM、stack overflow abort、FFI UB、callback内process exit/abortは捕捉不能。[脅威モデル](threat-model.md)どおり別process隔離が最終防御である。
 5. 公式host function/adapterはpanic、abort、process exitを行ってはならない。
@@ -537,10 +545,9 @@ tsumugi [OPTIONS] [SCRIPT [ARGS...]]
 - `args()`はbinary名、script path、CLI flagを含めない。
 - 非UTF-8、unknown option、option値欠落、profile/capability usage errorはscript開始前にstderrへ診断しexit 1とする。help/versionだけstdout・0である。
 - profile/capability optionの値検証とgrant構築は[Capability Model仕様](capability-model.md)第14節に従う。safe profileのstdout既定はbuilderによる明示`Stdout` grantでありambient accessではない。
-- **C9/C10時点のcapability注入経路**: CLIはprofileから組んだfrozen `CapabilitySet`を経路別に注入する——tree file/stdin（importの有無を問わず）はEngine API（`ExecutionRequest::with_capabilities`、link時は`LinkRequest.capabilities`）、tree REPLもE7でEngine API（session で1つ保持する`EmbeddingContext`を再利用し、各submissionの`ExecutionRequest::with_capabilities`へ同じfrozen setを載せる。REPLは`clear_user_state`やcapability clearを呼ばず持ち越す）、全VM経路は`Vm::set_capabilities`。tree file/stdinのimport解決はC6/E7でEngine resolverへ統合済み（`--allow-import-root`が`module_resolver`をgrant）。tree REPLはsession開始時に1回だけ注入した扱いを再現しつつ全submissionへ持ち越す。
-  - **tree REPLのimport解決はresolver gateを通らない**: tree REPLは統合前から`--allow-import-root`無しでもCWD相対importを解決できる（評価器内蔵の`ModuleLoader`が解決し、固定のエラー文字列を出す）observable挙動を持つ。E7ではこの挙動を保全するため、REPL専用の内部入口（`link_for_repl`／`run_for_repl`、いずれも`#[doc(hidden)]`のcrate内部shim）がfile/stdinの`link`が課すresolver gateを通さず、import解決はrun側の評価器内蔵loaderに委ねる。これは新規のcapability緩和ではなく従来挙動の保全であり、file/stdin経路のresolver gate（未grant + importは terminal `Denied`）とは別物。目標はREPLもfile/stdinと同じくsubmissionごとにlink時のresolver gateを通すこと（[Capability Model仕様](capability-model.md) §10、issue #327 Q1=A）で、この迂回は同仕様の逸脱一覧に載る現在の差である。
-  - **tree REPLのbudgetライフサイクル**: REPLはsession全体で1本のbudget ledgerを共有し、submissionごとにfuel(step)だけresetしてcumulative counter（source/output/host/string/heap等）はsession累積を温存する（`run_for_repl`）。これも統合前tree REPLのobservable挙動の保全で、file/stdinのone-shot run（呼び出しごとにbudget config再構築）とは意図的に別経路。
-  - **VM file/stdinのimport gate**: E9でVM file/stdin（`execute_vm_with_path`）のimport解決を、link層のEngine resolver gate（`compile`→`link`、`LinkRequest.capabilities`の`module_resolver`。`--allow-import-root`がgrant）経由へ統合した。未grant + importはtreeと同じくterminal `Denied`、import 0件はresolver不問で通過、grant時は従来どおり解決・実行する。fix-import-run-from-link-graph以後、import展開はlinkがresolverで読んだsourceから`expand_for_cli`で行い（tree file/stdinも同じくlink済みgraphから展開する）、script本体実行は`Compiler`+`Vm`（`Vm::set_capabilities`）のalpha経路で、評価器内蔵`ModuleLoader`はもうfile/stdinのrunでは使わない（gate専用に`Backend::TreeWalk` engineをbuildする最小統合で、VM backend adapterは新設しない）。VM backend adapter本体（run経路のEngine統合）とconformanceはE9残。VM REPLは現状ではtree REPLと対称にimport gateを迂回し評価器内蔵`ModuleLoader`に委ねる（目標と現在の差は上のtree REPLと同じ）。
+- **capability注入経路**: CLIはprofileから組んだfrozen `CapabilitySet`を、tree・VMのfile/stdinとREPLのすべてでEngine API（`ExecutionRequest::with_capabilities`、link時は`LinkRequest.capabilities`）へ注入する。`--allow-import-root`が`module_resolver`をgrantする。REPLはsessionで1つの`ExecutionContext`を再利用し、各submissionの`ExecutionRequest`へ同じfrozen setを載せ、`clear_user_state`やcapability clearを呼ばずに持ち越す。現在の実装との差は上の逸脱一覧にある。
+  - **REPLのimport解決**: REPL（tree・VM）もfile/stdinと同じく、各submissionをlink時のEngine resolver gateに通し、runはそのlinkが確かめたgraphから展開する。`module_resolver`が未grantでimportを含むsubmissionはterminal `Denied`とし、下の結果表のとおり表示して次の入力へ進む（[Capability Model仕様](capability-model.md) §10、issue #327 Q1=A）。現在の迂回の正本は同仕様の逸脱一覧のREPLのimportの行である。この箇条を目標の文だけにし、現状を逸脱一覧への参照にすることは loop:drift #352 D-60 の Q1=A（判断役が選択、issue #352）による。理由: [マニフェスト](manifesto.md) 原則2と優先順位の表「明示的なcapability ＞ ambient authorityによる利便性」、[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」（本文は目標、現状は逸脱一覧だけ）。採らなかった案B（現状の記述と目標の追記を残し、本書の逸脱一覧にもREPLの行を足す）は、目標の章に迂回を規範の形で書いた記述が残り、同じ状態を2つの逸脱一覧に持つことになるため採らない。
+  - **REPLのbudget**: REPLの各submissionは1 executionであり、そのsubmissionの`ExecutionRequest`が所有する有限budgetで実行する（§6、[実行予算・協調実行仕様](execution-control.md) §3・§13）。submissionをまたいで引き継ぐのはcontextだけである。session累積の扱いを含む現在の実装との差は上の逸脱一覧にある。この規則は loop:drift #352 D-67 の Q1=A（判断役が選択、issue #352）による。理由: §6は全executionが作成時から有限budgetを持ち`ExecutionRequest`がそれを所有すると定め、REPLを例外とする規定は目標に無い。[マニフェスト](manifesto.md) 原則3（スクリプトが消費できる資源をホストが制御できる）に照らし、目標を実装に合わせて後退させない。累積の扱いは fix スライス fix-repl-submission-budget の設計で決める。採らなかった案B（session累積を目標の規則として書く）は、2回目以降のsubmissionでhostが渡したbudgetを使わない挙動を目標にし、原則3に反しうるため採らない。
 
 | 結果 | file/stdin mode | REPL |
 |---|---:|---|
@@ -673,7 +680,7 @@ loop:drift #318 の D-29 と D-31 を直す。2 件とも CLI の利用者に見
 | EMB-AT-02 | 1 | Compiled/Linkedは`Send+Sync`、Context/Handleは`!Send+!Sync`のcompile-time assertion |
 | EMB-AT-03 | 1 | foreign CompiledScriptをlink時、foreign LinkedScript/contextをstart時に対応するmismatchで拒否しresolver/命令0 |
 | EMB-AT-04 | 1 | 同contextの同時startをborrowまたはContextBusyで拒否 |
-| EMB-AT-05 | 1/2 | compile時resolver/OS/callback 0、link時script/stdio 0、run時resolver 0。Phase 2でimportはlink時にresolver capabilityで解決（resolver未grantは terminal `Denied`）。Phase 1の「importはFeatureUnavailable」はC6/E7で解消済み |
+| EMB-AT-05 | 1/2 | compile時resolver/OS/callback 0、link時script/stdio 0、run時resolver 0。Phase 2でimportはlink時にresolver capabilityで解決（resolver未grantは terminal `Denied`） |
 | EMB-AT-06 | 1 | Ready dropは命令0、context再利用可 |
 | EMB-AT-07 | 1〜4 | InternalFailure以外のterminal後はframe cleanでcommit/rollback規則どおり再利用可、InternalFailureだけpoison |
 | EMB-AT-08 | 1〜4 | Completed/Exitedだけ全language-state commit、caught error後のCompleted/Exitedもcommit、その他terminalは開始時点へrollback。完了済み外部I/Oは戻さずauditへ記録しtree/VM一致 |
