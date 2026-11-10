@@ -2375,7 +2375,7 @@ Tsumugi の時刻は内部表現も出力基準も UTC 固定である。`now()`
 
 ## 21. 値のネスト深度上限（issue #290）
 
-設計ステータス: **実装済み・言語仕様へ統合済み**（言語仕様 0.21 の「実行安全性」「値のネスト深度制限」。実装は [実行予算・協調実行仕様](execution-control.md) §14 の fix-value-nesting-depth-limit、受入試験は `tests/value_nesting_depth_limit.rs`）。§21.3 の「課金」は [issue #304](https://github.com/kamonabe/Tsumugi/issues/304) の判断で改訂した（深度の読み直しへの fuel 課金）。その実装との差は[実行予算・協調実行仕様](execution-control.md)の未実装範囲の表にある
+設計ステータス: **実装済み・言語仕様へ統合済み**（言語仕様 0.21 の「実行安全性」「値のネスト深度制限」。実装は [実行予算・協調実行仕様](execution-control.md) §14 の fix-value-nesting-depth-limit、受入試験は `tests/value_nesting_depth_limit.rs`）。§21.3 の「課金」は [issue #304](https://github.com/kamonabe/Tsumugi/issues/304) の判断で改訂した（深度の読み直しへの fuel 課金。fix-value-depth-settle-quadratic で実装済み）
 
 ### 21.1 背景・課題
 

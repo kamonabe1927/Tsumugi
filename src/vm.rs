@@ -1731,7 +1731,8 @@ impl Vm {
                 value.check_element_depth(line)?;
                 let idx = self.stack.len().saturating_sub(1);
                 let mut collection = std::mem::replace(&mut self.stack[idx], Value::Null);
-                let result = collection.index_set_tracked(
+                // リテラルの構築は読み直しに fuel を課金しない（tree のリテラルと揃える、§4.1）。
+                let result = collection.index_set_tracked_uncharged_settle(
                     crate::value::IndexTarget::DictKey(k),
                     value,
                     &mut self.budget,
