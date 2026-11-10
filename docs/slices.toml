@@ -730,3 +730,28 @@ title      = "HostErrorCode::new の文字種の違反に ConfigError::InvalidDe
 status     = "todo"
 parent     = "REV-015"
 order      = 29
+
+# 週次計画 #355 の P-1（loop-guard §4.1 の 1 段目＝CI の機械チェックを cargo test のテストとして置く）を元にしたスライス（loop-runbook §10、PM が分割）。未設計（todo）。
+# 検査項目の選定（何を・どの許可リストで弾くか）は設計役が選択肢と推奨案を出し、判断役が決める（#355 P-1）。.github/（凍結）は変えない。
+# order は §10 のとおり今あるすべての ready（最大 93）より後。93 より後に P-2〜P-5 や P に結びつかない todo が無いので、すべてのスライスより後（100・101）に置く。既存のスライスの order は変えていない。
+# 原則と検査の対応表は、2 本それぞれのテストの冒頭（と設計で決める spec の小節）に持つ。
+#
+# manifesto-check-ambient-surface（P-1）: 見積もり src/ 0〜50 行（テストが主。違反が見つかれば許可リストへの理由付きの追加か fix スライスに回す）、
+#   触る仕組みは「src/ の静的検査（tests/ の 1 本）」1 つ、受入基準 3〜4（例: 検出パターンの拡張〔std::net・std::process::Command・thread::spawn・env 等〕、
+#   src/ 配下のサブディレクトリ〔src/bin など〕も走査、許可リストの各行に理由と原則、対応表）。既存の CAP-AT-27（tests/ambient_access_audit.rs）を土台にするか別にするかは設計で決める。
+# manifesto-check-no-host-abort（P-1）: 見積もり src/ 0〜150 行（script から届く lib の経路に process::exit / abort / 無条件の panic!・todo!・unimplemented! が見つかれば
+#   置き換えるか許可リストに理由付きで載せる）、触る仕組みは「lib の production コードの静的検査（tests/ の 1 本）」1 つ、受入基準 3〜4（例: 検出パターン、
+#   cfg(test) と CLI adapter〔main.rs〕の除外、許可リストの理由と原則、対応表）。unwrap・expect を対象に含めるかは設計で決める（含めると src/ の変更が増えうるので sub-slice に分ける）。
+[[slice]]
+id         = "manifesto-check-ambient-surface"
+title      = "src/ の production コードに ambient な OS・network・process の直接呼びが許可リスト外に無いことを cargo test で固定する（loop-guard §4.1 の 1 段目、原則 2・8、週次計画 #355 P-1）"
+status     = "todo"
+parent     = "AUD-022"
+order      = 100
+
+[[slice]]
+id         = "manifesto-check-no-host-abort"
+title      = "lib の script から届く経路に process::exit・abort・無条件の panic! が無いことを cargo test で固定する（loop-guard §4.1 の 1 段目、原則 6、週次計画 #355 P-1）"
+status     = "todo"
+parent     = "AUD-022"
+order      = 101
