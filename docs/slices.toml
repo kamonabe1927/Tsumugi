@@ -675,8 +675,13 @@ order      = 92
 
 # loop:drift #352 の D-57・D-62・D-63・D-64・D-67・D-68 で逸脱一覧に載せた差の延期先。未設計（todo）。
 # order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 24 で 0〜23 に
-# 空きが無い（同 §8 は付け直しだけの状態整理 PR を先に出すと定める）。この PR では付け直しをせず、仮にすべてのスライスより後
-# （94〜99）に置いた。扱いは PR の判断の候補に書いた。並びは issue #352 の D-N の順。
+# 空きが無い（同 §8 は付け直しだけの状態整理 PR を先に出すと定める。done を含む全スライスで重複を弾き、負の値は読めない）。
+# この PR では付け直しをせず、仮にすべてのスライスより後（94〜99）に置き、マージ後に PM が付け直しだけの状態整理 PR で
+# 今ある ready より前に移す（Q1=A。判断役が選択（PR #368））。理由: 付け直しを別 PR にすれば、この PR のレビュー・審査は
+# ずれの修正と fix スライスの追加だけを見ればよく、既存スライスの着手順の変更は単独で検証できる（原則 8・9、PR #322 の
+# C1=A と同じ扱い）。94〜99 は付け直しまでの仮の値で、§8 の「先に出す」からの外れはここに記録として残す。採らなかった案
+# B（この PR の中で付け直す）は付け直しだけの PR に分ける §8 に沿わず差分とレビューの範囲が広がるため、案 C（94〜99 のまま
+# にする）は不具合の fix を理由なく §8 の既定から外すため採らない。並びは issue #352 の D-N の順。
 # parent は、Windows の lexical 検査が他の fs 検査の fix と同じ AUD-020、REPL の budget が REV-007（session state と
 # run meter を request ごとに分ける）、foreign engine の拒否と poison が REV-008（stable execution の transaction）、
 # link 時の課金・`ExecutionRequest` の Send/Sync・`HostErrorCode` が fix-host-function-id-unique と同じ REV-015。
