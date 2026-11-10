@@ -6,7 +6,7 @@ description: Tsumugi 開発ループの「朝の点検」（毎朝 1 回の定�
 # loop-morning: 朝の点検
 
 規則の正本は `docs/loop-guard.md`（凍結。最優先）と `docs/loop-runbook.md`（以下「手順書」）の §11・§12・§15。
-「前日」は JST の 0:00〜24:00 である。時間の上限は 45 分（手順書 §14.3）。
+「前日」は JST の 0:00〜24:00 である。朝の点検が欠けた日があれば、その日の分も含める（範囲の決め方は手順書 §11）。時間の上限は 45 分（手順書 §14.3）。
 
 この回は**見つけて記録する回**である。直してよいのは、事後点検で見逃しが見つかったときの取り消しの PR（loop-guard §4.4）だけで、
 それ以外のずれは `loop:drift` issue に記録し、直すのは進行の回に任せる。
@@ -18,7 +18,7 @@ description: Tsumugi 開発ループの「朝の点検」（毎朝 1 回の定�
 
 ## 2. 事後点検（手順書 §11）
 
-1. 前日にマージされた PR を集める: `gh api "repos/kamonabe1927/Tsumugi/pulls?state=closed&sort=updated&direction=desc&per_page=100"` から `merged_at` が前日のもの
+1. 前日にマージされた PR を集める: `gh api "repos/kamonabe1927/Tsumugi/pulls?state=closed&sort=updated&direction=desc&per_page=100"` から `merged_at` が前日（手順書 §11 の範囲）のもの
 2. PR ごとに、事後点検役を Agent ツールで起動する（`model: "opus"`、前景）。渡すのは PR 番号・マージ commit・clone したパス・「`.claude/skills/manifesto-gate/SKILL.md` の §1（事後点検の読み方）と §2 の表で、マージされた差分を判定する。審査コメントは先に読まない。PR にはコメントを書かず、表と疑いだけを返す」という依頼だけ。
    審査が代替（`（代替: Opus）`）だった PR は、全差分を必ず読ませる。判断が代替だった PR・issue は、判断の結論が手順書 §7.3 と loop-decide の比べ方に合っているかも読ませる。数が多ければ代替のものを先にし、45 分に収まらない分は次の朝に回して要確認に書く
 3. あわせて PM（このセッション）が、マージの根拠が PR に残っているかを確かめる（loop-guard §6: レビュー・審査のコメント、3 時間待ち、1 日の上限、`保留:`、凍結ファイルの許可）。PR を経ずに main に入った commit が無いかも見る（見つけたら取り消さず、要確認に書く）
@@ -35,7 +35,7 @@ description: Tsumugi 開発ループの「朝の点検」（毎朝 1 回の定�
 
 ## 4. 日報とまとめ
 
-前日の動きを集める。
+前日（手順書 §11 の範囲）の動きを集める。
 
 - 進行の回の `#tsumugi-dev` 報告（何もしなかった回は投稿しないので、件数は Claude_Code_Remote の定期タスクの実行記録 `list_triggers` が使えればそれで確かめる。読めなければ「確認できず」）
 - 開いているループの PR と、それぞれ何を待っているか（`state.py` の結果）
