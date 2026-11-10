@@ -14,8 +14,8 @@ use tsumugi::{
     AuditEvent, AuditSink, BudgetConfig, CapabilityDecisionKind, CapabilitySet, CompileOptions,
     EffectStatus, EmbeddingContext, EmbeddingEngine, EmbeddingOutcome, EmbeddingRequest,
     ExecutionId, FakeClock, FilesystemCapability, FilesystemRoot, FsOperation, HostCallOutcome,
-    InMemoryAuditSink, LinkRequest, MonotonicClock, MountName, OsDirectoryHandle, Source, SourceId,
-    SymlinkPolicy,
+    InMemoryAuditSink, LinkRequest, MonotonicClock, MountName, OsDirectoryHandle,
+    ScriptedAuditSink, ScriptedResponse, Source, SourceId, SymlinkPolicy, TerminalOutcome,
 };
 
 // -----------------------------------------------------------------------------
@@ -579,4 +579,158 @@ fn fbh_at_03_sinkless_path_unchanged() {
     assert_eq!(with, without, "usage を含む outcome が sink 有無で一致");
     assert_eq!(with_bytes, without_bytes);
     assert_eq!(with_bytes, b"hello");
+}
+
+// -----------------------------------------------------------------------------
+// fix-terminal-host-effects-may-remain（HEM-AT-01..04、§13 AUD-024）
+// -----------------------------------------------------------------------------
+
+/// script を `caps` で監査付きに走らせ、Terminal の (outcome, context_committed,
+/// host_effects_may_remain) を返す。outcome の種別は呼び出し側では見ない。
+fn run_terminal_flags(
+    id: u128,
+    text: &'static str,
+    caps: CapabilitySet,
+) -> (TerminalOutcome, bool, bool) {
+    let sink = Arc::new(InMemoryAuditSink::new());
+    let engine = EmbeddingEngine::builder()
+        .audit_sink(sink.clone() as Arc<dyn AuditSink>)
+        .build()
+        .expect("build");
+    let script = link_source(&engine, "m", text);
+    let linked = engine.link(&script, link_request()).expect("link");
+    let mut ctx = EmbeddingContext::new(&engine);
+    let _ = engine.run_audited(&linked, &mut ctx, run_request(id, caps));
+    let envelopes = sink.snapshot();
+    match &envelopes.last().expect("non-empty").event {
+        AuditEvent::Terminal {
+            outcome,
+            context_committed,
+            host_effects_may_remain,
+            ..
+        } => (
+            outcome.clone(),
+            *context_committed,
+            *host_effects_may_remain,
+        ),
+        other => panic!("末尾は Terminal のはず: {other:?}"),
+    }
+}
+
+#[test]
+fn hem_at_01_rollback_terminal_keeps_host_effects_may_remain() {
+    let base = temp_dir("hem01");
+    let (outcome, committed, remain) = run_terminal_flags(
+        31,
+        "write_file(\"@data/out.txt\", \"hello\")\nlet x = 1 / 0\n",
+        fs_capabilities(&base),
+    );
+    let _ = std::fs::remove_dir_all(&base);
+    assert_ne!(outcome, TerminalOutcome::Completed);
+    assert!(
+        !committed,
+        "未捕捉 runtime error は context を commit しない"
+    );
+    assert!(remain, "Committed の write_file が残りうる");
+}
+
+#[test]
+fn hem_at_02_completed_terminal_keeps_host_effects_may_remain() {
+    let base = temp_dir("hem02");
+    let (outcome, committed, remain) = run_terminal_flags(
+        32,
+        "write_file(\"@data/out.txt\", \"hello\")\n",
+        fs_capabilities(&base),
+    );
+    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(outcome, TerminalOutcome::Completed);
+    assert!(committed);
+    assert!(remain);
+}
+
+#[test]
+fn hem_at_03_no_external_effect_terminal_is_false() {
+    // host call なし。
+    let (_, _, remain) = run_terminal_flags(33, "let x = 1\n", CapabilitySet::empty());
+    assert!(!remain, "host call なし");
+
+    // read_file だけ（effect_status = None）。
+    let base = temp_dir("hem03");
+    std::fs::write(base.join("in.txt"), "abc").expect("seed");
+    let (_, _, remain) = run_terminal_flags(
+        34,
+        "let c = read_file(\"@data/in.txt\")\n",
+        fs_capabilities(&base),
+    );
+    let _ = std::fs::remove_dir_all(&base);
+    assert!(!remain, "read_file は effect_status = None");
+
+    // grant が無く write_file が拒否される（None）。
+    let (outcome, _, remain) = run_terminal_flags(
+        35,
+        "try\n    write_file(\"@data/out.txt\", \"x\")\ncatch e\n    let ok = true\nend\n",
+        CapabilitySet::empty(),
+    );
+    assert_eq!(outcome, TerminalOutcome::Completed);
+    assert!(!remain, "Deny は effect_status = None");
+
+    // Started の ack 失敗の Terminal。
+    let sink = Arc::new(ScriptedAuditSink::new([ScriptedResponse::AckWrongId]));
+    let engine = EmbeddingEngine::builder()
+        .audit_sink(sink.clone() as Arc<dyn AuditSink>)
+        .build()
+        .expect("build");
+    let script = link_source(&engine, "m", "let x = 1\n");
+    let linked = engine.link(&script, link_request()).expect("link");
+    let mut ctx = EmbeddingContext::new(&engine);
+    let _ = engine.run_audited(&linked, &mut ctx, run_request(36, CapabilitySet::empty()));
+    let terminals: Vec<_> = sink
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            AuditEvent::Terminal {
+                outcome,
+                host_effects_may_remain,
+                ..
+            } => Some((outcome, host_effects_may_remain)),
+            _ => None,
+        })
+        .collect();
+    assert!(!terminals.is_empty(), "AuditFailure の Terminal がある");
+    for (outcome, remain) in terminals {
+        assert_eq!(outcome, TerminalOutcome::AuditFailure);
+        assert!(!remain);
+    }
+}
+
+#[test]
+fn hem_flag_is_reset_between_executions() {
+    // HEM-AT-04（非破壊）は既存の tests/audit_*.rs が無改変で緑であること。ここは持ち越しの確認。
+    // 同じ context・engine で、write のあとの実行の次に host call なしの実行をしても持ち越さない。
+    let base = temp_dir("hem04");
+    let sink = Arc::new(InMemoryAuditSink::new());
+    let engine = EmbeddingEngine::builder()
+        .audit_sink(sink.clone() as Arc<dyn AuditSink>)
+        .build()
+        .expect("build");
+    let mut ctx = EmbeddingContext::new(&engine);
+    let w = link_source(&engine, "m", "write_file(\"@data/o.txt\", \"a\")\n");
+    let w = engine.link(&w, link_request()).expect("link");
+    let _ = engine.run_audited(&w, &mut ctx, run_request(41, fs_capabilities(&base)));
+    let n = link_source(&engine, "m2", "let y = 2\n");
+    let n = engine.link(&n, link_request()).expect("link");
+    let _ = engine.run_audited(&n, &mut ctx, run_request(42, CapabilitySet::empty()));
+    let _ = std::fs::remove_dir_all(&base);
+    let flags: Vec<bool> = sink
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            AuditEvent::Terminal {
+                host_effects_may_remain,
+                ..
+            } => Some(host_effects_may_remain),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(flags, vec![true, false]);
 }

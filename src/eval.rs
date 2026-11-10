@@ -624,6 +624,9 @@ pub struct Evaluator {
     /// に反するため、1 本にまとめている（Phase 6 B-2 で修正）。sink 無し経路は drain しないため
     /// emission ゼロ・byte-for-byte 不変（§1.1 opt-in）。push は意味論・課金・外部効果へ影響しない。
     audit_events: Vec<crate::audit::AuditEvent>,
+    /// `effect_status` が `Committed` / `Unknown` の `HostCallFinished` を積んだか（§13 AUD-024、
+    /// Terminal の `host_effects_may_remain` の元）。drain しても戻さず、execution ごとに戻す。
+    host_effects_may_remain: bool,
     /// cooperative host-call の Pending により文/反復境界で yield を要求されたか（設計 §4.7）。
     ///
     /// `eval_call` が `Pending` を受けると `pending_host_call` を立ててこのフラグを `true` にし、
@@ -759,6 +762,7 @@ impl Evaluator {
             last_yield_poll_index: 0,
             saved_yield_before_backpressure: None,
             audit_events: Vec::new(),
+            host_effects_may_remain: false,
             yield_for_host_call: false,
             resumed_host_call: None,
             // audit drain queue 計器（Phase 6 B-2）は監査付き facade が実行ごとに設定する。
@@ -830,6 +834,7 @@ impl Evaluator {
         self.last_yield_poll_index = 0;
         self.saved_yield_before_backpressure = None;
         self.audit_events.clear();
+        self.host_effects_may_remain = false;
         // audit drain queue 計器（B-2）も execution ごとに外す。監査付き facade が install 後に
         // `set_audit_queue` で張り直す（前実行の計上を持ち越さない）。
         self.clear_audit_queue();
@@ -863,6 +868,7 @@ impl Evaluator {
         self.last_yield_poll_index = 0;
         self.saved_yield_before_backpressure = None;
         self.audit_events.clear();
+        self.host_effects_may_remain = false;
         self.clear_audit_queue();
         // heap 台帳は温存するので heap handle の再配布は不要（cumulative live heap を維持）。
     }
@@ -1370,6 +1376,11 @@ impl Evaluator {
     /// 監査 event 1 件を temporal 順の buffer へ積み、audit drain queue へ計上する（Phase 6 B-2）。
     /// `audit_events` への push はすべてここを通す。
     fn push_audit_event(&mut self, event: crate::audit::AuditEvent) {
+        if let crate::audit::AuditEvent::HostCallFinished { effect_status, .. } = &event
+            && !matches!(effect_status, crate::audit::EffectStatus::None)
+        {
+            self.host_effects_may_remain = true;
+        }
         self.audit_queue_admit(&event);
         self.audit_events.push(event);
     }
@@ -1463,6 +1474,11 @@ impl Evaluator {
             .checked_add(1)
             .ok_or_else(|| TsumugiError::internal(line, "yield poll_index を割り当てできません"))?;
         Ok(index)
+    }
+
+    /// この execution で外部効果が残りうる host call（`Committed` / `Unknown`）を積んだか。
+    pub(crate) fn host_effects_may_remain(&self) -> bool {
+        self.host_effects_may_remain
     }
 
     /// 蓄積済みの監査 event（host-call triple・`Yielded`/`Resumed`・slice 境界で flush した
