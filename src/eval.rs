@@ -1476,17 +1476,17 @@ impl Evaluator {
         Ok(index)
     }
 
+    /// この execution で外部効果が残りうる host call（`Committed` / `Unknown`）を積んだか。
+    pub(crate) fn host_effects_may_remain(&self) -> bool {
+        self.host_effects_may_remain
+    }
+
     /// 蓄積済みの監査 event（host-call triple・`Yielded`/`Resumed`・slice 境界で flush した
     /// `BudgetCharged`）を temporal 順のまま drain して返す（Phase 6、§8 規則3/7/8/9）。
     ///
     /// embedding facade の監査経路が Started と Terminal の間で呼ぶ。[`Self::drain_budget_charges`]
     /// と対称で、返した後はバッファを空にする。sink 無し経路はこれを呼ばないため emission ゼロ・
     /// byte-for-byte 不変（§1.1 opt-in）。
-    /// この execution で外部効果が残りうる host call（`Committed` / `Unknown`）を積んだか。
-    pub(crate) fn host_effects_may_remain(&self) -> bool {
-        self.host_effects_may_remain
-    }
-
     pub(crate) fn drain_audit_events(&mut self) -> Vec<crate::audit::AuditEvent> {
         std::mem::take(&mut self.audit_events)
     }
