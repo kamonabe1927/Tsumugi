@@ -250,12 +250,23 @@ impl<T> Tracked<T> {
         }
     }
 
-    /// 最大深度の子がいなくなっていたら、全要素の保存済み深度を読み直す（再帰しない）。
-    fn settle_child_depth(&mut self)
+    /// 子 1 つを取り除き、続けて（あれば）子 1 つを入れたとき、最大深度の子がいなくなって
+    /// 全要素の読み直し（[`Tracked::settle_child_depth`]）が要るか。値を変える前の要約で決まる。
+    ///
+    /// 読み直しの課金（semantic-decisions §21.3）と読み直しの実行が食い違わないよう、
+    /// 課金の判定と実行の両方がこの関数の結果を使う。
+    fn settle_needed(&self, removed: u32, added: Option<u32>) -> bool {
+        removed == self.child_max
+            && self.child_max_count == 1
+            && added.is_none_or(|a| a < self.child_max)
+    }
+
+    /// `needed`（[`Tracked::settle_needed`]）のとき、全要素の保存済み深度を読み直す（再帰しない）。
+    fn settle_child_depth(&mut self, needed: bool)
     where
         T: ChildDepth,
     {
-        if self.child_max_count == 0 {
+        if needed {
             let (m, c) = self.data.child_depth_summary();
             self.child_max = m;
             self.child_max_count = c;
@@ -1208,8 +1219,13 @@ impl Value {
         phase: ExecutionPhase,
     ) -> Result<(), ControlStop> {
         if let Value::List(list) = self {
-            if list.data.is_empty() {
+            let Some(last) = list.data.last() else {
                 return Ok(());
+            };
+            // 読み直しの課金は値を変える前（COW の複製・heap の課金より前）に行う。
+            let needed = list.settle_needed(last.depth(), None);
+            if needed && list.data.len() > 1 {
+                budget.charge_fuel((list.data.len() - 1) as u64, phase)?;
             }
             Value::detach_list(list, budget, phase)?;
             let old_bytes = list.bytes;
@@ -1217,7 +1233,7 @@ impl Value {
                 let tracked = Rc::get_mut(list).expect("detach 後は一意所有");
                 if let Some(removed) = tracked.data_mut().pop() {
                     tracked.note_child_removed(removed.depth());
-                    tracked.settle_child_depth();
+                    tracked.settle_child_depth(needed);
                 }
             }
             Value::retrack_list(list, old_bytes, budget, phase)?;
@@ -1230,6 +1246,9 @@ impl Value {
     /// 呼び出し側は index 型・範囲・collection 上限を検査済みで、正規化した
     /// `list_index`（List）または `dict_key`（Dict）を渡す。List の index 代入は要素数
     /// 不変で delta 0、Dict の新規 key 追加は key 長ぶんを課金する。
+    ///
+    /// 深度の読み直しが起きるとき（最も深い子がただ 1 つで、それを浅い値で置き換える）は、
+    /// 値を変える前に読み直す子の数ぶんの fuel を課金する（semantic-decisions §21.3）。
     pub fn index_set_tracked(
         &mut self,
         target: IndexTarget,
@@ -1237,10 +1256,41 @@ impl Value {
         budget: &mut crate::budget::BudgetLedger,
         phase: ExecutionPhase,
     ) -> Result<(), ControlStop> {
+        self.index_set_impl(target, value, budget, phase, true)
+    }
+
+    /// [`Value::index_set_tracked`] の、深度の読み直しに fuel を課金しない版。VM の Dict
+    /// リテラルの構築（`DictInsert`）専用。tree の Dict リテラルは最後に 1 回だけ要約して
+    /// 読み直さないので、lowering の差を script の fuel に出さないために課金しない（§4.1）。
+    pub(crate) fn index_set_tracked_uncharged_settle(
+        &mut self,
+        target: IndexTarget,
+        value: Value,
+        budget: &mut crate::budget::BudgetLedger,
+        phase: ExecutionPhase,
+    ) -> Result<(), ControlStop> {
+        self.index_set_impl(target, value, budget, phase, false)
+    }
+
+    fn index_set_impl(
+        &mut self,
+        target: IndexTarget,
+        value: Value,
+        budget: &mut crate::budget::BudgetLedger,
+        phase: ExecutionPhase,
+        charge_settle: bool,
+    ) -> Result<(), ControlStop> {
         match (self, target) {
             (Value::List(list), IndexTarget::ListIndex(idx)) => {
                 // 深度の上限の検査は呼び出し側（`Value::check_element_depth`）。
                 let new_depth = value.depth();
+                let needed = list
+                    .data
+                    .get(idx)
+                    .is_some_and(|old| list.settle_needed(old.depth(), Some(new_depth)));
+                if needed && charge_settle {
+                    budget.charge_fuel(list.data.len() as u64, phase)?;
+                }
                 Value::detach_list(list, budget, phase)?;
                 let old_bytes = list.bytes;
                 {
@@ -1249,13 +1299,21 @@ impl Value {
                         let old = std::mem::replace(&mut tracked.data_mut()[idx], value);
                         tracked.note_child_removed(old.depth());
                         tracked.note_child_added(new_depth);
-                        tracked.settle_child_depth();
+                        tracked.settle_child_depth(needed);
                     }
                 }
                 Value::retrack_list(list, old_bytes, budget, phase)?;
             }
             (Value::Dict(dict), IndexTarget::DictKey(key)) => {
                 let new_depth = value.depth();
+                // 新しい key は何も取り除かないので読み直さない。
+                let needed = dict
+                    .data
+                    .get(&key)
+                    .is_some_and(|old| dict.settle_needed(old.depth(), Some(new_depth)));
+                if needed && charge_settle {
+                    budget.charge_fuel(dict.data.len() as u64, phase)?;
+                }
                 Value::detach_dict(dict, budget, phase)?;
                 let old_bytes = dict.bytes;
                 {
@@ -1265,7 +1323,7 @@ impl Value {
                         tracked.note_child_removed(old.depth());
                     }
                     tracked.note_child_added(new_depth);
-                    tracked.settle_child_depth();
+                    tracked.settle_child_depth(needed);
                 }
                 Value::retrack_dict(dict, old_bytes, budget, phase)?;
             }
@@ -2205,5 +2263,172 @@ mod tests {
             deep_b = list(vec![deep_b]);
         }
         assert_eq!(TotalOrder::compare(&deep_a, &deep_b), Ordering::Equal);
+    }
+
+    // ---- fix-value-depth-settle-quadratic（VDS-AT-01 / 03）: 深度の読み直しの課金 ----
+
+    fn fuel_ledger(total_fuel: u64) -> BudgetLedger {
+        BudgetLedger::with_config(BudgetConfig::for_legacy(total_fuel, 1_000_000))
+    }
+
+    /// 深度 2 の値（`[[1]]` ではなく `[1]` を 1 段包んだ List）。
+    fn deep(budget: &mut BudgetLedger) -> Value {
+        let inner = Value::new_list(vec![Value::Int(1)], budget, ExecutionPhase::Run).unwrap();
+        Value::new_list(vec![inner], budget, ExecutionPhase::Run).unwrap()
+    }
+
+    /// 末尾が最も深い子（ただ 1 つ）で、手前が `n - 1` 個のスカラーの List。
+    fn list_deep_last(n: usize, budget: &mut BudgetLedger) -> Value {
+        let mut items: Vec<Value> = (1..n).map(|_| Value::Int(0)).collect();
+        items.push(deep(budget));
+        Value::new_list(items, budget, ExecutionPhase::Run).unwrap()
+    }
+
+    #[test]
+    fn vds_at_01_settle_needed_matches_actual_reread() {
+        let mut budget = fuel_ledger(1_000_000);
+        let list = list_deep_last(5, &mut budget);
+        let Value::List(l) = &list else {
+            unreachable!()
+        };
+        // 最も深い子がただ 1 つ: それを浅い値で置き換えると読み直す。
+        assert!(l.settle_needed(l.child_max, Some(0)));
+        // 同じ深度・より深い値で置き換える、最も深くない子を取り除くときは読み直さない。
+        assert!(!l.settle_needed(l.child_max, Some(l.child_max)));
+        assert!(!l.settle_needed(l.child_max, Some(l.child_max + 1)));
+        assert!(!l.settle_needed(0, Some(0)));
+        // 取り除くだけ（pop）: 最も深い子なら読み直す。
+        assert!(l.settle_needed(l.child_max, None));
+        assert!(!l.settle_needed(0, None));
+    }
+
+    #[test]
+    fn vds_at_01_index_set_and_pop_charge_children_read_again() {
+        let n = 7usize;
+        // List の index 代入: 要素数 n を課金する。
+        let mut budget = fuel_ledger(1_000_000);
+        let mut list = list_deep_last(n, &mut budget);
+        let before = budget.committed_fuel();
+        list.index_set_tracked(
+            IndexTarget::ListIndex(n - 1),
+            Value::Int(0),
+            &mut budget,
+            ExecutionPhase::Run,
+        )
+        .unwrap();
+        assert_eq!(budget.committed_fuel() - before, n as u64);
+        assert_eq!(list.depth(), 1, "読み直した結果の深度");
+
+        // 読み直しの起きない index 代入（最も深くない子を置き換える）は課金しない。
+        let mut list = list_deep_last(n, &mut budget);
+        let before = budget.committed_fuel();
+        list.index_set_tracked(
+            IndexTarget::ListIndex(0),
+            Value::Int(5),
+            &mut budget,
+            ExecutionPhase::Run,
+        )
+        .unwrap();
+        assert_eq!(budget.committed_fuel(), before);
+        assert_eq!(list.depth(), 3);
+
+        // pop: 取り除いた後の要素数 n - 1 を課金する。空になる pop は課金しない。
+        let mut list = list_deep_last(n, &mut budget);
+        let before = budget.committed_fuel();
+        list.list_pop_tracked(&mut budget, ExecutionPhase::Run)
+            .unwrap();
+        assert_eq!(budget.committed_fuel() - before, (n - 1) as u64);
+        let mut single = list_deep_last(1, &mut budget);
+        let before = budget.committed_fuel();
+        single
+            .list_pop_tracked(&mut budget, ExecutionPhase::Run)
+            .unwrap();
+        assert_eq!(budget.committed_fuel(), before);
+
+        // Dict: 既存の key の上書きだけ entry 数を課金する。新しい key は課金しない。
+        let mut map = BTreeMap::new();
+        map.insert("a".to_string(), deep(&mut budget));
+        for i in 0..4 {
+            map.insert(format!("k{i}"), Value::Int(0));
+        }
+        let mut dict = Value::new_dict(map, &mut budget, ExecutionPhase::Run).unwrap();
+        let before = budget.committed_fuel();
+        dict.index_set_tracked(
+            IndexTarget::DictKey("z".to_string()),
+            Value::Int(0),
+            &mut budget,
+            ExecutionPhase::Run,
+        )
+        .unwrap();
+        assert_eq!(budget.committed_fuel(), before, "新しい key");
+        dict.index_set_tracked(
+            IndexTarget::DictKey("a".to_string()),
+            Value::Int(0),
+            &mut budget,
+            ExecutionPhase::Run,
+        )
+        .unwrap();
+        assert_eq!(
+            budget.committed_fuel() - before,
+            6,
+            "entry 数（5 + 新 key）"
+        );
+
+        // リテラルの構築（課金しない版）は、読み直しが起きても課金しない。
+        let mut map = BTreeMap::new();
+        map.insert("a".to_string(), deep(&mut budget));
+        let mut lit = Value::new_dict(map, &mut budget, ExecutionPhase::Run).unwrap();
+        let before = budget.committed_fuel();
+        lit.index_set_tracked_uncharged_settle(
+            IndexTarget::DictKey("a".to_string()),
+            Value::Int(1),
+            &mut budget,
+            ExecutionPhase::Run,
+        )
+        .unwrap();
+        assert_eq!(budget.committed_fuel(), before);
+        assert_eq!(lit.depth(), 1);
+    }
+
+    #[test]
+    fn vds_at_03_charges_before_mutating_and_before_cow_heap() {
+        let n = 6usize;
+        let mut budget = fuel_ledger(1_000_000);
+        let mut list = list_deep_last(n, &mut budget);
+        let alias = list.clone(); // backing を共有する別名（detach すると heap を課金する）
+        budget.set_total_fuel(budget.committed_fuel() + n as u64 - 1);
+        let live = budget.live_heap_bytes();
+        let err = list
+            .index_set_tracked(
+                IndexTarget::ListIndex(n - 1),
+                Value::Int(0),
+                &mut budget,
+                ExecutionPhase::Run,
+            )
+            .unwrap_err();
+        let ControlStop::BudgetExceeded(e) = err else {
+            panic!("fuel 超過のはず: {err:?}")
+        };
+        assert_eq!(e.resource, crate::budget::BudgetResource::Fuel);
+        assert_eq!(e.requested, n as u64);
+        assert_eq!(budget.live_heap_bytes(), live, "COW の複製を課金しない");
+        assert_eq!(list.depth(), 3, "対象は変わらない");
+        assert_eq!(alias.depth(), 3);
+
+        // pop も同じ（要求は取り除いた後の要素数）。
+        budget.set_total_fuel(budget.committed_fuel() + n as u64 - 2);
+        let err = list
+            .list_pop_tracked(&mut budget, ExecutionPhase::Run)
+            .unwrap_err();
+        let ControlStop::BudgetExceeded(e) = err else {
+            panic!("fuel 超過のはず: {err:?}")
+        };
+        assert_eq!(e.resource, crate::budget::BudgetResource::Fuel);
+        assert_eq!(e.requested, (n - 1) as u64);
+        assert_eq!(budget.live_heap_bytes(), live);
+        let Value::List(l) = &list else {
+            unreachable!()
+        };
+        assert_eq!(l.len(), n);
     }
 }
