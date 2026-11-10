@@ -1224,7 +1224,7 @@ impl Value {
             };
             // 読み直しの課金は値を変える前（COW の複製・heap の課金より前）に行う。
             let needed = list.settle_needed(last.depth(), None);
-            if needed {
+            if needed && list.data.len() > 1 {
                 budget.charge_fuel((list.data.len() - 1) as u64, phase)?;
             }
             Value::detach_list(list, budget, phase)?;

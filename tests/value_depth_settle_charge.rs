@@ -251,21 +251,24 @@ fn vds_at_02_roundtrips_stop_on_fuel() {
     }
 }
 
-fn tree_run_with_fuel(source: &str, total_fuel: u64) -> (bool, BudgetUsage) {
+fn tree_run_with_fuel(source: &str, total_fuel: u64) -> (Option<String>, BudgetUsage) {
     let tokens = Lexer::new(source).tokenize();
     let program = Parser::new(tokens).parse().expect("parse");
     let mut evaluator = Evaluator::with_budget(BudgetConfig::for_legacy(total_fuel, 1_000_000));
-    let ok = evaluator.run(&program, source.len() as u64).is_ok();
+    let ok = evaluator
+        .run(&program, source.len() as u64)
+        .err()
+        .map(|e| e.to_string());
     (ok, evaluator.budget_usage())
 }
 
-fn vm_run_with_fuel(source: &str, total_fuel: u64) -> (bool, BudgetUsage) {
+fn vm_run_with_fuel(source: &str, total_fuel: u64) -> (Option<String>, BudgetUsage) {
     let tokens = Lexer::new(source).tokenize();
     let program = Parser::new(tokens).parse().expect("parse");
     let chunk = Compiler::new().compile(&program).expect("compile");
     let mut vm = Vm::new(chunk);
     vm.set_max_steps(total_fuel);
-    let ok = vm.run().is_ok();
+    let ok = vm.run().err().map(|e| e.to_string());
     (ok, vm.budget_usage())
 }
 
@@ -300,6 +303,7 @@ fn vds_at_03_charges_before_mutating() {
                 .replace("xs[0]", "xs[1]")
                 .replace("pop(xs)", "push(xs, 0)")
         );
+        let mut stops: Vec<(String, u64)> = Vec::new();
         for use_vm in [false, true] {
             let run = |s: &str, f: u64| {
                 if use_vm {
@@ -312,7 +316,7 @@ fn vds_at_03_charges_before_mutating() {
             let (mut lo, mut hi) = (0u64, 100_000u64);
             while lo < hi {
                 let mid = lo + (hi - lo) / 2;
-                if run(&prefix, mid).0 {
+                if run(&prefix, mid).0.is_none() {
                     hi = mid;
                 } else {
                     lo = mid + 1;
@@ -320,13 +324,16 @@ fn vds_at_03_charges_before_mutating() {
             }
             let before = lo;
             // 操作を含む script が成功する最小 fuel は、読み直さない操作より n（以上）多い。
-            let (ok, _) = run(&full, before + (n as u64) / 2);
+            let (err, stopped) = run(&full, before + (n as u64) / 2);
+            let err = err.unwrap_or_else(|| {
+                panic!("[vm={use_vm}] {label}: 残り fuel が足りないのに成功した")
+            });
             assert!(
-                !ok,
-                "[vm={use_vm}] {label}: 残り fuel が足りないのに成功した"
+                err.contains(STOPPED),
+                "[vm={use_vm}] {label}: fuel 超過で止まっていない: {err}"
             );
+            stops.push((err, stopped.committed.fuel));
             // 同じ形で読み直さない操作（別名があるので COW で複製する）の peak_heap より、複製の分だけ小さい。
-            let (_, stopped) = run(&full, before + (n as u64) / 2);
             let (_, cow) = run(&cow_control, before + 1_000);
             assert!(
                 stopped.peak_heap_bytes + 24 + 32 * n as u64 <= cow.peak_heap_bytes,
@@ -335,8 +342,13 @@ fn vds_at_03_charges_before_mutating() {
                 cow.peak_heap_bytes
             );
             // 十分な fuel があれば成功する。
-            assert!(run(&full, before + 1_000).0, "[vm={use_vm}] {label}");
+            assert!(
+                run(&full, before + 1_000).0.is_none(),
+                "[vm={use_vm}] {label}"
+            );
         }
+        // 停止した実行の resource（エラーの種別とメッセージ）と committed fuel が両 backend で同じ。
+        assert_eq!(stops[0], stops[1], "{label}: tree と VM の停止が違う");
     }
 }
 
