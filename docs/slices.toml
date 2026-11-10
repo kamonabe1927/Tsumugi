@@ -643,22 +643,24 @@ blocked_reason = "E10 統合後（roadmap.md「Phase 6 残」の記載どおり�
 [[slice]]
 id         = "fix-repl-import-gate-tree"
 title      = "tree REPL の import を submission ごとに link 時の resolver gate に通し、link の graph から展開する（capability-model §10、issue #327）"
-status     = "ready"
+status     = "blocked"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-repl-import-gate-tree 実装スライス（tree REPL の import を resolver gate に通す）" }
 acceptance = ["RIT-AT-01..04"]
 design_pr  = 339
 order      = 90
+blocked_reason = "manifesto: 原則5（予測可能性）— tree と VM を別スライスで入れると、間の期間に同じ REPL 入力・同じ権限で tree は Denied・--vm は import 成功となり backend 間の差が増える（#339 の事後点検）。取り消しの #351 も原則2・9 の疑いで止めた（issue #353）"
 
 [[slice]]
 id         = "fix-repl-import-gate-vm"
 title      = "VM REPL の import を submission ごとに link 時の resolver gate に通し、ModuleLoader を外す（capability-model §10、issue #327）"
-status     = "ready"
+status     = "blocked"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-repl-import-gate-vm 実装スライス（VM REPL の import を resolver gate に通す）" }
 acceptance = ["RIV-AT-01..04"]
 design_pr  = 339
 order      = 91
+blocked_reason = "manifesto: 原則5（予測可能性）— tree と VM を別スライスで入れると、間の期間に同じ REPL 入力・同じ権限で tree は Denied・--vm は import 成功となり backend 間の差が増える（#339 の事後点検）。取り消しの #351 も原則2・9 の疑いで止めた（issue #353）"
 
 [[slice]]
 id         = "fix-handle-import-from-link"
