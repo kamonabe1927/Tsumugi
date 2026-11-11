@@ -813,4 +813,5 @@ status     = "ready"
 parent     = "REV-001"
 spec       = { doc = "docs/execution-control.md", section = "fix-fs-write-content-budgeted-render 実装スライス（`write_file` / `append_file` の内容の予算付き描画）" }
 acceptance = ["FWR-AT-01..04"]
+design_pr  = 381
 order      = 97
