@@ -1,6 +1,6 @@
 # Tsumugi 実行予算・協調実行仕様
 
-最終更新: 2026-11-01
+最終更新: 2026-11-11
 
 設計ステータス: **到達目標の確定仕様（§1〜§13）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -36,6 +36,8 @@ handle 経路を §3 の `ExecutionRequest` と組み込みAPI仕様 §8 の `Ex
 | `PollSlice.max_fuel`（`src/engine.rs`）は `NonZeroU64`（16 以上）でなく `u64` で、0 や 16 未満を型で排除しない（field は `pub` で、構築時の検査を通らない）。既定 10,000 は目標どおり | §9.1 | Slice 3 PR-a |
 | `PollResult::Terminal` の `outcome` は [組み込みAPI仕様](embedding-api.md) §8 の `ExecutionOutcome` でなく、`src/engine.rs` の別の `ExecutionOutcome`（crate root では `ExecutionOutcome`）で、variant は `Completed` / `RuntimeError` / `LinkError` / `Cancelled` / `DeadlineExceeded` の 5 つだけである（予算超過は `RuntimeError` に含まれ、`Denied` / `Exited` / `HostError` / `BudgetExceeded` などが無い。variant は `usage` を持たず、最終 usage は `PollResult::Terminal.usage` で観測する）。scheduler の `Engine` が監査 sink を持たない点は [決定性・実行時監査仕様](determinism-and-audit.md) の逸脱一覧に B-1 としてある | §9.1 | Slice 3 PR-a |
 | imported module record（§5.1）の heap 課金は、評価器内蔵 `ModuleLoader` を使う経路では `ModuleId` の UTF-8 byte 長でなく canonical path（host path）の byte 長で数える。該当するのは tree REPL（`Engine::run_for_repl` → `Evaluator::begin_execution`）・VM REPL（`src/main.rs` の `Vm::charge_link(&[LoadedModule])`）と、scheduler の handle 経路（`src/engine.rs` の初回 poll の `begin_execution`）である。file/stdin の `Engine::run`・`run_audited` と VM file/stdin は `ModuleId` の byte 長で数える（fix-import-run-from-link-graph） | §5.1 | REV-015 PR-d |
+| 同期の `Engine::execute`・`execute_repl_submission`（`src/engine.rs`、crate root の `Engine`）は、同じ `Engine` に他の nonterminal な handle があっても `StartError::ConcurrentRunRequiresPolling` を返さずに開始する。terminal まで poll する `drive_to_outcome` は `Yielded` で `continue` するだけなので、run-turn queue の先頭でない handle は `SchedulerPreempted` の `Yielded` を受け続け、呼び出しが戻らない（例: 同じ `Engine` で handle h1 を `max_fuel: 100` で 1 回 poll して `Yielded` にしたあと、別の context で `execute` を呼ぶ）。variant は `src/scheduler.rs` に定義済みだが検出は配線しておらず、その doc の「同期入口は構造的にこの状況を起こさない」は事実と異なる | §9.2 | Slice 3 PR-a（Slice 5 の run-turn FIFO で顕在化） |
+| scheduler（`src/engine.rs`、crate root の `ExecutionContext`）の `ExecutionContext` は、§13 の目標に無い公開メソッド `reset_step_budget()` を持つ。中身は `Evaluator::reset_step_budget` → `budget.reset_fuel()` で、同じ ledger の fuel だけを戻す（heap・I/O などの使用量は戻さない）。src・tests に呼び出し元は無い。facade の `embedding::ExecutionContext` には無い | §13 | Slice 1（legacy adapter） |
 
 ## 未実装範囲（目標仕様 §1〜§13 のうち未着手・延期中）
 
@@ -47,7 +49,9 @@ handle 経路を §3 の `ExecutionRequest` と組み込みAPI仕様 §8 の `Ex
 | callback なし bulk builtin（`sort` / `join` / 文字列繰り返し / 大 collection コピー等）の chunk 境界での slice yield。現状は bulk builtin 1 回分を §4.2 の超過として扱い、chunk 前の確認は deadline / cancel だけ | §4.1/§4.2 | fuel-bulk-chunk-yield |
 | VM の式レベル continuation（VM の slice yield と continuation parity） | §9.3 | Slice 6（VM が experimental の間） |
 | script / host の明示 yield（`YieldReason::ExplicitYield`）。型はあるが trigger を配線していない | §9 | — |
-| §4.1 課金表の主要 charge point（statement / expression / operation 単位）への移行。現状の fuel は文・反復・呼び出しと一部 builtin の per-element だけ（`fuel_accounting_revision = 1`） | §4.1 | F-2 |
+| §4.1 課金表の主要 charge point（statement / expression / operation 単位）への移行。現状の fuel は文・反復・呼び出しと一部 builtin の per-element だけ（課金は §3.1 の版 `1` 相当） | §4.1 | F-2 |
+| `BudgetConfig.fuel_accounting_revision` の field と、heap/fuel のどちらの会計版が不正かを区別できる config error。`BudgetConfig`（`src/budget.rs`）に field が無く、会計版の不正は単一 variant の `UnsupportedAccountingRevision(u32)`（heap だけ）で返す | §3/§3.1 | F-2 |
+| reservation オブジェクト（§7 の `reserve` が返し `commit(actual)` / `refund()` で settle する型）と、未 settle の drop を release build でも `InternalFailure(UnsettledReservation)` にする規則 7。現状の `Budget::reserve_all` は `Result<(), ControlStop>` を返し、`commit(resource, reserved, actual)`・`refund(resource, reserved)` に量を渡す形で、未 settle は検出しない。`actual > reserved` は規則 3 の拒否でなく `debug_assert` と `min` による丸めで扱う | §7 | budget-reservation-settle |
 
 ## 1. 位置づけ
 
@@ -107,6 +111,8 @@ Phase 1/2は本書の最終公開型の内部subsetとして実装する。先�
 pub struct BudgetConfig {
     // 論理accounting契約。初期実装は1だけを受理する。
     pub heap_accounting_revision: u32,
+    // §4.1課金表の版（§3.1）。
+    pub fuel_accounting_revision: u32,
 
     // 論理fuel unit
     pub total_fuel: u64,
@@ -994,20 +1000,6 @@ run-turn queueはEngine全体でFIFO round-robinとし、continuation自体で�
 Slice 2で追加した上限のlegacy key（`TSUMUGI_MAX_SINGLE_STRING_BYTES` / `TSUMUGI_MAX_STRING_ALLOCATIONS` / `TSUMUGI_MAX_STRING_BYTES` / `TSUMUGI_MAX_SINGLE_SOURCE_BYTES` / `TSUMUGI_MAX_SOURCE_COUNT` / `TSUMUGI_MAX_SOURCE_BYTES` / `TSUMUGI_MAX_IMPORT_COUNT` / `TSUMUGI_MAX_IMPORT_BYTES` / `TSUMUGI_MAX_LIVE_HEAP_BYTES` / `TSUMUGI_MAX_INPUT_CALLS` / `TSUMUGI_MAX_INPUT_BYTES` / `TSUMUGI_MAX_OUTPUT_CALLS` / `TSUMUGI_MAX_OUTPUT_BYTES` / `TSUMUGI_MAX_HOST_CALLS` / `TSUMUGI_MAX_HOST_REQUEST_BYTES` / `TSUMUGI_MAX_HOST_RESPONSE_BYTES` / `TSUMUGI_MAX_HOST_CALL_BYTES`）も、上表と同じ移行規則で扱う（2026-10-20決定）。各keyは同名の`BudgetConfig`上限fieldへ写し、数値として解釈できない値は無視して既定を残す。
 
 新fuelはstatement・expression等も課金するため、同じ数値でも旧step limitより早く到達し得る。互換mappingは安全側であり、旧実行量の完全再現を保証しない。
-
-> **§13 実装注記（2026-10-20）**
->
-> legacy envの入口はCLI adapter（`src/main.rs`の`LegacyBudgetEnv`）だけに置いた。起動時に1回だけ
-> process envを読み、tree/VMのfile・stdin・REPLの全経路で同じ上書きを適用する（tree/VMは
-> `BudgetConfig::standard`、clockを持たないVM実行は`for_legacy(1_000_000, 1_000_000)`を土台にする）。
-> 上書きが1つでも効くと、stderrへ1回
-> 「警告: 環境変数 KEY[, KEY...] による実行予算の上書きは非推奨であり、将来のバージョンで削除されます」を出す。
-> libraryは env を読まない: `BudgetConfig::from_legacy_env`を削除し、env非依存の
-> `BudgetConfig::apply_legacy_overrides(lookup)`と`LEGACY_OVERRIDE_KEYS`へ置き換えた。
-> `Evaluator::new` / `Vm::new` / `Vm::new_repl`（alpha facadeの`ExecutionContext::new`を含む）は
-> §3.1既定の上限を使う。VMへ明示configを渡す`Vm::with_budget` / `Vm::new_repl_with_budget`を追加した。
-> これにより、option B（最終形移行Slice 1）以降に残っていた「tree file/stdinだけがenvを無視する」
-> tree/VM差を解消した。削除予定versionは、最初のreleaseを切る時点で決める（未決）。`ExecutionContext::reset_step_budget()`は削除し、executionごとに新しい`BudgetUsage`を作る。REPLの各入力は1 executionとし、contextだけを引き継ぐ。
 
 `MAX_AST_DEPTH`、`MAX_IMPORT_DEPTH`、`MAX_USER_CALL_DEPTH`は環境変数化せず、language revisionに紐づく構造上限として維持する。将来configurableにする場合もbudgetと同じ不変configへ置き、paused中変更は許さない。
 
@@ -2686,6 +2678,24 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
   - **VDS-AT-02（往復は fuel で止まる）:** issue #304 の敵対的入力（要素数 50,000 の List の最も深い要素の `xs[0] = 0` / `xs[0] = e` の往復と、最も深い末尾の要素の `pop` / `push` の往復を、`while true` で繰り返す）と、Dict の同じ形が、既定の budget で `BudgetExceeded(Fuel)` の terminal で止まり、壁時計の上限（例: 10 秒）以内に終わる。`try` / `catch` の内側でも catch されない。確かめ方: CLI を subprocess で起動して、exit code・stderr の fuel 超過の診断・経過時間を確かめるテスト（両 backend）。
   - **VDS-AT-03（値を変える前に課金する）:** 残りの fuel が読み直す子の数より少ないときの index 代入・`pop` が `BudgetExceeded(Fuel)` で止まり、超過の記録（`resource`・`requested`）が読み直す子の数を示し、対象の backing を共有する別名があっても COW の複製の heap を課金しない（`live_heap` / `peak_heap` が操作の前と同じ）。tree-walk 版と VM 版で同じ resource・同じ committed fuel になる。確かめ方: 小さい `total_fuel` を設定した実行で usage と超過の記録を比べるテスト（両 backend）。
   - **VDS-AT-04（ほかの観測は不変）:** 既存のテスト（`tests/value_nesting_depth_limit.rs` の VND-AT-01..05 と `tests/` 一式、unit test）が期待値の変更なしで通る。読み直しの起きない script で fuel・step・`live_heap` / `peak_heap` が変更前と同じで、tree と VM の differential test が一致する。確かめ方: 既存のテスト一式。期待値を変えたテストがあれば、読み直しが起きることを PR 本文に示す。
+
+### legacy env の入口の実装記録（旧「§13 実装注記（2026-10-20）」）
+
+この小節は、§13（目標の章）にあった実装注記を loop:drift #373 の D-73 (5) で移したものである（目標の章に実装状態・経緯を置かない。[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。2026-10-20 時点の記録で、現在の状態は冒頭の逸脱一覧を見る。
+
+> legacy envの入口はCLI adapter（`src/main.rs`の`LegacyBudgetEnv`）だけに置いた。起動時に1回だけ
+> process envを読み、tree/VMのfile・stdin・REPLの全経路で同じ上書きを適用する（tree/VMは
+> `BudgetConfig::standard`、clockを持たないVM実行は`for_legacy(1_000_000, 1_000_000)`を土台にする）。
+> 上書きが1つでも効くと、stderrへ1回
+> 「警告: 環境変数 KEY[, KEY...] による実行予算の上書きは非推奨であり、将来のバージョンで削除されます」を出す。
+> libraryは env を読まない: `BudgetConfig::from_legacy_env`を削除し、env非依存の
+> `BudgetConfig::apply_legacy_overrides(lookup)`と`LEGACY_OVERRIDE_KEYS`へ置き換えた。
+> `Evaluator::new` / `Vm::new` / `Vm::new_repl`（alpha facadeの`ExecutionContext::new`を含む）は
+> §3.1既定の上限を使う。VMへ明示configを渡す`Vm::with_budget` / `Vm::new_repl_with_budget`を追加した。
+> これにより、option B（最終形移行Slice 1）以降に残っていた「tree file/stdinだけがenvを無視する」
+> tree/VM差を解消した。削除予定versionは、最初のreleaseを切る時点で決める（未決）。executionごとに新しい`BudgetUsage`を作る。REPLの各入力は1 executionとし、contextだけを引き継ぐ。
+
+移すときに、旧注記の「`ExecutionContext::reset_step_budget()`は削除し」を事実に合わせて外した（loop:drift #373 の D-71）。2026-10-20 に削除されていたのは facade の `embedding::ExecutionContext` の側だけで、scheduler 側の `ExecutionContext`（`src/engine.rs`、crate root から公開）には fuel だけを戻す `reset_step_budget()` が残っている。§13 の目標（execution ごとに新しい `BudgetUsage`）に合わせ、残っているメソッドを削除する fix スライス fix-scheduler-context-reset-step-budget を足し、それまでの差は逸脱一覧に載せた。判断役が選択（issue #373 の D-71、Q1=A）。理由: 呼び出し元が無く、同じ ledger の fuel だけを手で戻す公開 API が残ると「どの予算で実行したか」の説明が 2 通りになる。alpha では組み込み API の後方互換を目標にしない（マニフェスト「目指さないもの」）ので、削除で守る相手もいない。採らなかった案 B（メソッドを残し逸脱として載せるだけ）は、§13 の目標を変えない限り解消のスライスがいずれ要り、目標と食い違う公開 API を残す期間が延びるだけになる。
 
 ## 15. 境界受入テスト
 
