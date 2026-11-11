@@ -408,7 +408,7 @@ closure が握る code（tree=`FnDef.body` の `Rc<[Stmt]>`、VM=`VmFn.chunk` �
 続ける」: retained closure の code を、artifact の release 後も reachable な限り課金し続ける。**課金の有無と
 release 寿命は両 engine で一致する**が、課金額は engine ごとの artifact 単位（tree=`ast_node`、
 VM=`bytecode_chunk`）のままで、§5.3 の「AST または bytecode」どおり数値は engine 固有であって
-よい（A-2 のような engine 共通の単一基準へ寄せる＝ byte 単位で `live_heap` / `peak_heap` を
+よい（engine 共通の単一基準へ寄せる＝ byte 単位で `live_heap` / `peak_heap` を
 一致させることは**しない**）。これにより resource 消費の backend 差（＝「片方だけ落ちる」
 非対称）を解消し、[決定性・監査仕様](determinism-and-audit.md) §3 の決定性要件（terminal 時
 `BudgetUsage` の backend 一致＝課金の有無・寿命が揃うこと）および manifesto 原則 5 を満たす。
@@ -596,7 +596,7 @@ token は **code object 単位で 1 つ**とし、instance はそれを `Rc::clo
   （instance の固定 overhead）と retained-code token（本体 AST / prototype chunk の論理サイズ）
   は別トークンとして並置する。
 - **§5.3「AST または bytecode」原則との整合**: tree は AST を、VM は bytecode chunk を課金する
-  という engine ごとの別 artifact の建付けは A-1 でも維持する（A-2 のように engine 共通の
+  という engine ごとの別 artifact の建付けは A-1 でも維持する（engine 共通の
   単一基準へ寄せない）。したがって retained closure の課金額も engine ごとに（tree=`ast_node` /
   VM=`bytecode_chunk`）異なる数値になってよく、A-1 が backend 間で揃えるのは **課金の有無と
   release 寿命**であって `live_heap` / `peak_heap` の byte 単位の数値一致ではない。
@@ -2713,7 +2713,8 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
 
 - **当時の token の持ち方**: tree の `ast_token` は `ast_heap_size(linked_program)` を 1 本の lump token で課金していた。§5.3 の per-code-object 分割はこの lump token からの差し引きではなく、Link 時の分割で境界を作る。
 - **外した src の参照**: `FunctionPrototype.chunk`（`src/chunk.rs:22`）、`Chunk` の `PartialEq`/`Clone` 派生（`src/chunk.rs:11,41`）、`Block = Rc<[Stmt]>`（`src/ast.rs:14`）、closure 生成点（`src/eval.rs` の `Stmt::FnDef` / `Expr::Lambda` 評価）、`MakeClosure`（`src/vm.rs:1273` 近傍）、`ExecutionPhase::Compile`（`src/vm.rs:310` 近傍）、`chunk_tokens.clear()`（`src/vm.rs:383` 近傍）、`Tracked::Drop`（`src/value.rs:180-186`）。
-- **外した語**: 跨入力生成の不変量の見出しの「finding 2」（PR-6b の設計レビューの指摘番号）、実現機構の見出しの「設計として確定・実装者が選ぶ余地を残さない」、関数 header の token を指す「PR-c の」。
+- **外した語**: 跨入力生成の不変量の見出しの「finding 2」（PR-6b の設計レビューの指摘番号）、実現機構の見出しの「設計として確定・実装者が選ぶ余地を残さない」、関数 header の token を指す「PR-c の」、engine 共通の単一基準へ寄せる却下案の名前「A-2」（2 か所。「A-2 のような」「A-2 のように」。A-2 の定義は §14 Slice 6 にある）。
+- **直前の小節のメモとの対応**: 直前の小節「§5.3 にあった設計レビュー対応メモ」の [MEDIUM] の 3 項目めが撤回したと書く「再利用」の表現と、「走査を body 単位の小計へ再構成する必須作業」の文は、§5.3 から外し、この小節の「tree の走査を改造する必要があった理由」の引用へ移した（§5.3 には走査の規則だけが残る）。
 
 ## 15. 境界受入テスト
 
