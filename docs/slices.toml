@@ -804,7 +804,7 @@ order      = 96
 # 描画を有限化した REV-001（fix-contains-budgeted-equality と同じ項目）。
 # order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 32 で 0〜31 に空きが無い
 # （done を含む全スライスで重複を弾く）。この PR では付け直しをせず、仮にすべてのスライスより後（97）に置いた。扱いは PR の
-# 判断の候補 Q1 に書いた（PR #368 の Q1=A と同じ形）。見積もり: src/ 50〜120 行、触る仕組みは fs host call の request payload
+# 判断の候補 Q1 に書き、Q1=A（判断役が選択（PR #381））に決まった。マージ後に PM が付け直しだけの状態整理 PR で 32 より前へ移す。見積もり: src/ 50〜120 行、触る仕組みは fs host call の request payload
 # の作り方 1 つ、受入基準 4。
 [[slice]]
 id         = "fix-fs-write-content-budgeted-render"
