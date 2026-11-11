@@ -763,3 +763,38 @@ title      = "lib の script から届く経路に process::exit・abort・無�
 status     = "todo"
 parent     = "AUD-022"
 order      = 16
+
+# loop:drift #373 の D-69・D-71・D-70 で逸脱一覧・未実装範囲に載せた差の延期先。未設計（todo）。
+# fix 2 本の order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 32 で
+# 0〜31 に空きが無い。PR #368 の判断（Q1=A）と同じく、この PR では付け直しをせず、仮にすべてのスライスより後（94・95）に置き、
+# マージ後に PM が付け直しだけの状態整理 PR で今ある ready より前に移す（§8 の「先に出す」からの外れはここに記録として残す）。
+# 並びは D-69（host が止まらない経路）を先にした。budget-reservation-settle は不具合でなく未実装範囲の延期先なので、
+# §8 の「それ以外」の既定（すべてのスライスより後、96）。parent は scheduler・budget の最終形を扱う REV-015。
+# fix-sync-run-concurrent-handle: 同期の Engine::execute・execute_repl_submission で他の nonterminal handle を検出して
+#   StartError::ConcurrentRunRequiresPolling を返す（execution-control §9.2、D-69）。見積もり src/ 30〜80 行、触る仕組みは
+#   scheduler の同期入口 1 つ、受入基準 2〜3（検出して開始しない・script work が 0・単独の handle では従来どおり）。
+# fix-scheduler-context-reset-step-budget: scheduler 側の ExecutionContext::reset_step_budget を削除する（§13、D-71、判断役が選択
+#   issue #373 Q1=A）。見積もり src/ 10 行未満、触る仕組みは scheduler の ExecutionContext 1 つ、受入基準 1〜2。
+# budget-reservation-settle: §7 の reservation オブジェクトと規則 3・7（未 settle の drop を InternalFailure にする）へ寄せる
+#   （D-70）。見積もり src/ 200〜500 行（reserve_all の呼び出し元の置き換えを含む。超えるなら設計で sub-slice に分ける）、
+#   触る仕組みは budget の reserve/commit/refund 1 つ、受入基準 3〜5。
+[[slice]]
+id         = "fix-sync-run-concurrent-handle"
+title      = "同期の Engine::execute・execute_repl_submission が他の nonterminal handle を検出して ConcurrentRunRequiresPolling を返し、戻らない経路を無くす（execution-control §9.2、loop:drift #373 D-69）"
+status     = "todo"
+parent     = "REV-015"
+order      = 94
+
+[[slice]]
+id         = "fix-scheduler-context-reset-step-budget"
+title      = "scheduler 側の ExecutionContext::reset_step_budget（fuel だけを戻す公開メソッド）を削除する（execution-control §13、loop:drift #373 D-71）"
+status     = "todo"
+parent     = "REV-015"
+order      = 95
+
+[[slice]]
+id         = "budget-reservation-settle"
+title      = "reserve が reservation オブジェクトを返し、commit/refund で settle し、未 settle の drop を InternalFailure(UnsettledReservation) にする（execution-control §7、loop:drift #373 D-70）"
+status     = "todo"
+parent     = "REV-015"
+order      = 96
