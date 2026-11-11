@@ -953,7 +953,7 @@ StartError::Backpressure {
 }
 ```
 
-queue中もdeadlineとcancelを監視する。slot解放時は最古の`Yielded(AdmissionQueued { resume_to })`だけを対応するCreated/Linkedへ進める。link失敗、cancel、drop時もqueue/active slotを1回だけ解放する。priority APIは初期実装で提供しない。
+queue中もdeadlineとcancelを監視する。slot解放時は最古の`Yielded(AdmissionQueued { resume_to })`だけを対応するCreated/Linkedへ進める。link失敗、cancel、drop時もqueue/active slotを1回だけ解放する。priority APIは提供しない。run-turn queueとadmission queueの順序は§12.1のFIFOだけで決め、host が待ち時間と資源使用量の釣り合いを選ぶ手段は`PollSlice.max_fuel`（§9.1）・`EngineLimits`・executionごとのbudgetに限る（判断役が選択（PR #379）、Q1=A。理由: priorityは§12.1の規則3と最古から進めるadmissionの順序を崩す入口で、提供しないと言い切るほうが[マニフェスト](manifesto.md)原則1・8に沿う。採らなかった案B〔未実装範囲へ移す〕は、priorityの型・順序の規則が目標に無いまま公開APIの追加を先取りする。priorityが要るときは要望のissueから設計PRで本節に目標を書く）。
 
 ### 12.1 fairness
 
