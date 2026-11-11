@@ -316,7 +316,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "fix-heap-charge
 acceptance = ["HCN-AT-01..03"]
 design_pr  = 347
 depends_on = ["A-1"]
-order      = 30
+order      = 32
 
 # issue #290（kamonabe、「優先」）から作った不具合の fix 2 本と、その設計で見つかった関連の 1 本。
 # order は loop-runbook §8.1 の「優先」の既定（今ある ready・todo のすべてより前の空いている値）。
@@ -364,7 +364,7 @@ id         = "fix-closure-capture-chain-stack"
 title      = "closure の capture の連鎖の破棄による stack 枯渇を防ぐ（TM-007、semantic-decisions §21.3 の範囲外）"
 status     = "todo"
 parent     = "REV-001"
-order      = 14
+order      = 17
 
 # loop:drift #263 D-3 (e)（Q2=A、返信なしのため推奨案で確定）で見つかった不具合の fix。
 # capability-model §11.1「host function ID は registry 内で一意」に対し、register_cooperative が
@@ -478,7 +478,7 @@ spec       = { doc = "docs/execution-control.md", section = "tree-expr-continuat
 acceptance = ["TEC-AT-01..03", "TEC-AT-05..07"]
 depends_on = ["tree-expr-continuation-e3"]
 design_pr  = 250
-order      = 16
+order      = 20
 
 # tree-expr-continuation が呼び出し・反復を必ず yield 可能点にした後、callback なし bulk builtin
 # （sort/join/文字列繰り返し/大 collection コピー等）を chunk（256 element/16 KiB）単位で中断・再開
@@ -491,7 +491,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 3"
 depends_on = ["tree-expr-continuation-e4"]
-order      = 17
+order      = 24
 
 # 設計は PR #241 で確定済みだが、前段 tree-expr-continuation（e1〜e4、最後は e4）が done になるまで着手不可。
 # DoR 3（depends_on がすべて done）を満たさないため status は todo のまま置き、
@@ -506,7 +506,7 @@ spec       = { doc = "docs/execution-control.md", section = "F-2 実装スライ
 acceptance = ["F2-AT-01..08", "F2-AT-01b"]
 depends_on = ["F-1", "tree-expr-continuation-e4"]
 design_pr  = 241
-order      = 20
+order      = 25
 
 # F-2 が入れる FuelSchedule / Charge opcode の基盤の上に bulk 課金点を足すため F-2 依存。
 # map/filter/serialize の per-element 課金もここで扱う（現状 fuel per-element は比較/表示/sort のみ）。
@@ -518,7 +518,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["F-2"]
-order      = 31
+order      = 33
 
 # audit-strict-cbor（strict deterministic CBOR、§9.2）は 1 PR の大きさの目安に収まらないため、
 # c1〜c4 の 4 スライスへ分割した（spec「audit-strict-cbor の sub-slice 分割」）。元の id は置き換えて残さない。
@@ -546,7 +546,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-06..10"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 32
+order      = 34
 
 [[slice]]
 id         = "audit-strict-cbor-c3"
@@ -558,7 +558,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-11..15"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 33
+order      = 35
 
 [[slice]]
 id         = "audit-strict-cbor-c4"
@@ -570,7 +570,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-16..20"]
 depends_on = ["audit-strict-cbor-c2", "audit-strict-cbor-c3"]
 design_pr  = 256
-order      = 34
+order      = 36
 
 [[slice]]
 id         = "audit-sink-required"
@@ -695,39 +695,71 @@ id         = "fix-windows-legacy-lexical-colon"
 title      = "Windows の legacy profile の lexical 検査が component 内の `:` を取りこぼさないようにし、platform 差のテストを足す（capability-model §5.5・§14.3、loop:drift #352 D-57）"
 status     = "todo"
 parent     = "AUD-020"
-order      = 24
+order      = 26
 
 [[slice]]
 id         = "fix-link-request-budget-charge"
 title      = "Engine::link で LinkRequest の budget に source/module/import の count・bytes を課金し上限を判定する（embedding-api §5、loop:drift #352 D-62）"
 status     = "todo"
 parent     = "REV-015"
-order      = 25
+order      = 27
 
 [[slice]]
 id         = "fix-run-foreign-engine-mismatch"
 title      = "Engine::run に別 engine の context・LinkedScript を渡したとき、開始前の EngineMismatch として拒否し context を poison しない（embedding-api §9・§10 規則1・EMB-AT-03、loop:drift #352 D-63）"
 status     = "todo"
 parent     = "REV-008"
-order      = 26
+order      = 28
 
 [[slice]]
 id         = "fix-execution-request-send-sync"
 title      = "MonotonicClock に Send + Sync の bound を足して ExecutionRequest を Send・Sync にし、EMB-AT-02 の assertion に加える（embedding-api §9、loop:drift #352 D-64）"
 status     = "todo"
 parent     = "REV-015"
-order      = 27
+order      = 29
 
 [[slice]]
 id         = "fix-repl-submission-budget"
 title      = "REPL の各 submission を、その ExecutionRequest が所有する有限 budget で実行する（embedding-api §6・§12、execution-control §3・§13、loop:drift #352 D-67）"
 status     = "todo"
 parent     = "REV-007"
-order      = 28
+order      = 30
 
 [[slice]]
 id         = "fix-host-error-code-invalid-descriptor"
 title      = "HostErrorCode::new の文字種の違反に ConfigError::InvalidDescriptor を返す（embedding-api §3・§8、loop:drift #352 D-68）"
 status     = "todo"
 parent     = "REV-015"
-order      = 29
+order      = 31
+
+# 週次計画 #355 の P-1（loop-guard §4.1 の 1 段目＝CI の機械チェックを cargo test のテストとして置く）を元にしたスライス（loop-runbook §10、PM が分割）。未設計（todo）。
+# 検査項目の選定（何を・どの許可リストで弾くか）は設計役が選択肢と推奨案を出し、判断役が決める（#355 P-1）。.github/（凍結）は変えない。
+# order は、P-3・P-4 に結びつく todo と P に結びつかない todo の最小（fix-closure-capture-chain-stack の旧 14）より前に置く（PR #372 の判断役の
+# Q1=B と、kamonabe の「判断: Q1=B を、この PR の中で反映する」）。§10 の「すべての ready より後」とは両立しないため、計画の優先順を守る側を優先した。
+# 0〜13 に空きが無いので、この PR の中で付け直した。done のスライスの order は変えず、todo・ready どうしの相対順を保つよう、done の使っていない値に
+# 前から詰めた: manifesto-check-ambient-surface 100 → 14、manifesto-check-no-host-abort 101 → 16、fix-closure-capture-chain-stack 14 → 17、
+# tree-expr-continuation-e4 16 → 20、fuel-bulk-chunk-yield 17 → 24、F-2 20 → 25、fix-windows-legacy-lexical-colon 24 → 26、
+# fix-link-request-budget-charge 25 → 27、fix-run-foreign-engine-mismatch 26 → 28、fix-execution-request-send-sync 27 → 29、
+# fix-repl-submission-budget 28 → 30、fix-host-error-code-invalid-descriptor 29 → 31、fix-heap-charge-audit-notify 30 → 32、fuel-bulk-charge 31 → 33、
+# audit-strict-cbor-c2・c3・c4 32・33・34 → 34・35・36。40 以降（と blocked の 90・91）は変えていない。
+# 原則と検査の対応表は、2 本それぞれのテストの冒頭（と設計で決める spec の小節）に持つ。
+#
+# manifesto-check-ambient-surface（P-1）: 見積もり src/ 0〜50 行（テストが主。違反が見つかれば許可リストへの理由付きの追加か fix スライスに回す）、
+#   触る仕組みは「src/ の静的検査（tests/ の 1 本）」1 つ、受入基準 3〜4（例: 検出パターンの拡張〔std::net・std::process::Command・thread::spawn・env 等〕、
+#   src/ 配下のサブディレクトリ〔src/bin など〕も走査、許可リストの各行に理由と原則、対応表）。既存の CAP-AT-27（tests/ambient_access_audit.rs）を土台にするか別にするかは設計で決める。
+# manifesto-check-no-host-abort（P-1）: 見積もり src/ 0〜150 行（script から届く lib の経路に process::exit / abort / 無条件の panic!・todo!・unimplemented! が見つかれば
+#   置き換えるか許可リストに理由付きで載せる）、触る仕組みは「lib の production コードの静的検査（tests/ の 1 本）」1 つ、受入基準 3〜4（例: 検出パターン、
+#   cfg(test) と CLI adapter〔main.rs〕の除外、許可リストの理由と原則、対応表）。unwrap・expect を対象に含めるかは設計で決める（含めると src/ の変更が増えうるので sub-slice に分ける）。
+[[slice]]
+id         = "manifesto-check-ambient-surface"
+title      = "src/ の production コードに ambient な OS・network・process の直接呼びが許可リスト外に無いことを cargo test で固定する（loop-guard §4.1 の 1 段目、原則 2・8、週次計画 #355 P-1）"
+status     = "todo"
+parent     = "AUD-022"
+order      = 14
+
+[[slice]]
+id         = "manifesto-check-no-host-abort"
+title      = "lib の script から届く経路に process::exit・abort・無条件の panic! が無いことを cargo test で固定する（loop-guard §4.1 の 1 段目、原則 6、週次計画 #355 P-1）"
+status     = "todo"
+parent     = "AUD-022"
+order      = 16
