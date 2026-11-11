@@ -34,7 +34,7 @@ PM は spec も実装も自分で書かない。各役を Agent ツールで**�
   - review が無ければレビュー役（`model: "opus"`、loop-review）を起動する
   - review が `ok` で gate が無ければ審査役（`model: "fable"`、manifesto-gate）を起動する。Fable が応答できなければ `model: "opus"` で代替させ、代替であることを伝える
   - 終わったら `loop:running` を外す。1 回で回すのは PR 1 本まで
-- `review` が `findings` の PR: 指摘が機械的なら書いた役に直させ（`loop:design` は設計役 opus、`loop:impl` は実装役 sonnet）、新しいレビュー役で再レビューする（往復 2 回まで）。選択肢のある指摘は手順書 §7 の判断にかける
+- `review` が `findings` の PR: 指摘が機械的なら書いた役に直させ（`loop:design` は設計役 opus、`loop:impl` は実装役 sonnet）、新しいレビュー役で再レビューする（往復 5 回まで。数え直しは手順書 §13）。選択肢のある指摘は手順書 §7 の判断にかける
 - `merge_candidate` が true の PR（1 回で 1 本まで）: loop-guard §6 の全条件を改めて確かめる
   - CI: `gh api repos/kamonabe1927/Tsumugi/commits/<head_sha>/check-runs` と `.../commits/<head_sha>/status`（`Frozen guard (status)` を含む）がすべて成功
   - マージ可能: `gh api repos/kamonabe1927/Tsumugi/pulls/<番号> --jq .mergeable` が true
