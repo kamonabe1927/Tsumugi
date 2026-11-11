@@ -287,7 +287,7 @@ per-item超過時の`BudgetExceeded`は`used = 0`、`reserved = 0`、`requested 
 
 `MiB`は1,048,576 byteである。`heap_accounting_revision != 1`は`ConfigError::UnsupportedAccountingRevision`でexecution作成前に拒否する。すべての上限は0を許し、該当操作を最初から禁止できる。deadlineだけは作成時点より後でなければならない。
 
-`fuel_accounting_revision`は§4.1の課金表（charge pointと課金値）の版である。`heap_accounting_revision`が§5.1の論理サイズ表の版であるのと対称で、`BudgetConfig`が`u32`で保持し、`BudgetConfig::standard`は既定を現行版にする。課金表を変える変更（charge pointの追加・課金値の変更）はこの値を1つ上げ、同時に受理する版を新版だけへ更新する（`heap_accounting_revision`と同じく、受理しない版はexecution作成前に`ConfigError`で拒否する）。会計版の不正は、どのfield（heapかfuelか）が不正かを呼び出し側が区別できる形のconfig errorで返す（現在の差は冒頭の未実装範囲を見る）。旧版の課金を再現する互換経路は持たない（alphaにつき後方互換無保証、旧版指定は拒否されるのであって旧課金で動くのではない）。fuelの会計版をこの専用fieldに分離するのは、`language_revision`（§17.8の全順序化などscriptから観測できる言語挙動の版）と会計の版を混ぜないためである。したがってfuel課金の変更で`language_revision`はbumpしない。初期版は`1`（F-1までの課金。F-2が§4.1の表へ移行するとき`2`へ上げる）。fieldを実装するF-2より前に足した課金点（§4.1の「List / Dictの深度の読み直し」）は版`1`に含める。fieldが無い間は、版で課金を選べるhostも、拒否すべき旧版の指定も、監査で区別される記録も無く、版を上げても区別するものが無いためである（判断役が選択（PR #349）、Q1=A）。
+`fuel_accounting_revision`は§4.1の課金表（charge pointと課金値）の版である。`heap_accounting_revision`が§5.1の論理サイズ表の版であるのと対称で、`BudgetConfig`が`u32`で保持し、`BudgetConfig::standard`は既定を現行版にする。課金表を変える変更（charge pointの追加・課金値の変更）はこの値を1つ上げ、同時に受理する版を新版だけへ更新する（`heap_accounting_revision`と同じく、受理しない版はexecution作成前に`ConfigError`で拒否する）。会計版の不正は、どのfield（heapかfuelか）が不正かを呼び出し側が区別できる形のconfig errorで返す（現在の差は冒頭の未実装範囲を見る）。旧版の課金を再現する互換経路は持たない（alphaにつき後方互換無保証、旧版指定は拒否されるのであって旧課金で動くのではない）。fuelの会計版をこの専用fieldに分離するのは、`language_revision`（§17.8の全順序化などscriptから観測できる言語挙動の版）と会計の版を混ぜないためである。したがってfuel課金の変更で`language_revision`はbumpしない。初期版は`1`（F-1までの課金。F-2が§4.1の表へ移行するとき`2`へ上げる）。§4.1の「List / Dictの深度の読み直し」は版`1`に含める（そう決めた理由は§14「fix-value-depth-settle-quadratic 実装スライス」の決定記録を見る）。
 
 ## 4. Fuel課金
 
@@ -625,25 +625,6 @@ token は **code object 単位で 1 つ**とし、instance はそれを `Rc::clo
   charge trace を突合するが、その突合対象は
   「reachable な限り課金され続けること・release 寿命が一致すること」および code artifact に
   既に認められている engine 固有サイズ差であり、code artifact の byte 単位数値一致ではない。
-
-> **設計レビュー対応メモ（REV-015 Slice 6 PR-6b, 2 巡目）**: 本 A-1 設計はレビュー指摘を次の
-> とおり反映した。
-> - *[HIGH] VM の `FunctionPrototype.retain_token` slot 方式が実装不能*: `Chunk` は `Rc<Chunk>`
->   共有・`charge_chunk_tree_into` は `&Chunk` 走査で interior mutability なしに slot へ書けない
->   （`src/vm.rs:299-317`, `:363-388`, `src/chunk.rs:53`）。→ **slot 方式を却下し、VM も tree と
->   対称な `Rc::as_ptr` key の side-table 方式へ統一**した（上記「token と code object の対応付け」）。
-> - *[MEDIUM] side-table 寿命と跨入力 ABA*: closure 生成は adopt/Link 入力と別入力になりうる
->   （VM の `MakeClosure` は複数 `run_repl_chunk` を跨ぐ、tree の内側 closure も外側 call 入力で
->   初生成）。→ **side-table を `Weak` の長命 index にし、生成時に subtree 全体の token を一括
->   `Rc::clone` 移譲**する不変量を明記（「side-table は `Weak` の index」「跨入力生成の不変量」
->   「生成時はトークンを移譲する（subtree 一括）」）。ABA は upgrade 可否が token の生死で判定
->   されるため実害なしと固定。
-> - *[MEDIUM] tree の per-body 分割が `ast_heap_size` の flat worklist では成立しない*: 現行走査は
->   body を個々の `Stmt` へ平坦展開し per-body 小計を保持しない（`src/ast.rs:548-549`, `:585-586`）。
->   → **「走査を body 単位の小計へ再構成する必須作業」である旨を明記**し「再利用」表現を撤回
->   （「全ネスト深度を eager に列挙」tree 項）。
-> - *[NIT] body の `Rc` 共有有無*: → tree の body は原則 distinct `Rc`、共有されても backing
->   同一性で 1 token に畳まれ §5.2 と整合、の一文を追加（「ネスト closure の transitive 規則」tree 項）。
 
 ## 6. Input、output、host callの課金
 
@@ -2702,6 +2683,29 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
 この小節は、§1（目標の章）の段落にあった各スライスの実装状況を loop:drift #373 の D-73 (1) で移したものである（目標の章に実装状態を置かない。[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。2026-11-01 時点の記録で、現在の状態は冒頭の逸脱一覧と [`slices.toml`](slices.toml) を見る。
 
 > 第14節 Slice 1（budget型・legacy adapter・共有BudgetLedger）は `src/budget.rs` に実装済みで、Slice 2 のうち string accounting サブスライス（per-item `SingleStringBytes`・cumulative `StringAllocations`/`StringBytes` の課金を共有 builtin handler へ tree/VM 共通で配線し、さらに string リテラル・`+` 連結・f-string の生成点でも `track_result` で課金）と source / import accounting サブスライス（per-item `SingleSourceBytes`・cumulative `SourceCount`/`SourceBytes`・`ImportCount`/`ImportBytes` を Link フェーズで root と import へ tree/VM 共通で課金）、heap accounting 基盤サブスライス（`AllocationId`・`AllocationLedger`・§5.1 論理サイズ関数・`HeapBytes` reserve/超過写像）、collection（`List`/`Dict`）の per-drop release サブスライス（`Rc<Tracked<T>>` で生成時に課金し最後の参照 drop で release、COW は delta 課金、tree/VM 両対応）、および String body の per-drop release サブスライス（PR-b、`Value::Str` を `Rc<Tracked<String>>` 化し、builtin 結果を dispatch 境界の `track_result` で live heap 課金・最後の参照 drop で release）、cell と tree/VM 関数 instance の per-drop release サブスライス（PR-c、cell 生成点で captured cell を課金し `Value::Fn`/`VmFn` の header token で function instance header を課金、drop で release）、および AST / bytecode chunk / imported module record / rollback journal の per-drop 追跡サブスライス（PR-d、所有構造側が `HeapToken = Tracked<()>` トークンで §5.1 論理サイズを課金し drop で release。§5.3「AST または bytecode」に従い tree は AST・VM は bytecode chunk を課金、import record は両 engine、rollback journal entry は両 engine で entry の固定 overhead を課金）、および string リテラル/連結/f-string 経路の課金サブスライス（生成点で `track_result` を通し cumulative + live heap を課金、tree/VM 両対応）、および I-O accounting サブスライス（input / output / host call の count + bytes を reserve/commit/refund（§7）で課金し、stdio を host call として co-charge。tree/VM の `print` / `input` / filesystem dispatch 境界へ共通配線）も実装済みで、Slice 2 は完了した。Slice 3 は PR-a（公開 state-machine surface + poll-to-terminal core）と PR-b（tree evaluator の statement / block / loop を明示 frame stack + driver ループへ変換し continuation_frame heap を配線）、PR-c（関数呼び出し・try handler の明示 frame。`eval_call` / `call_fn_value` を `FrameKind::Call` 化し、共通 `run_driver` + `drive_call_body` で本体を駆動。VM の `CallFrame` / `TryHandler` をミラー）、PR-d（slice fuel + yield。PR-d-1 で continuation を Evaluator 所有の `'static` 永続 frame stack へ移し、PR-d-2 で slice-fuel accounting と文/反復境界での `Yielded(SliceFuelExhausted)`・`begin_execution` / `run_slice` resume を実装）まで実装済み。PR-e（式の途中での slice yield。§14「tree-expr-continuation 実装スライス」）の現在の実装範囲は冒頭の逸脱一覧を見ること。cancel/pause（Slice 4）と scheduler・host pending（Slice 5）は実装済みである（Slice 5 は `SchedulerShared`/`AdmissionController` の bounded admission・run-turn FIFO backpressure、nonblocking host-call ticket〔`HostCallTicket`/`ExecutionWaker`/`HostCallPoll`〕と wake・queue 待ち/pause/host 待ち中の deadline/cancel 伝播、独立上限の `AdapterExecutor` + `CooperativeAdapter`/`CapabilityCallContext.may_yield`。`AuditBackpressure`-yield（sink-Pending 由来）は Phase 6 B-1 で facade の監査付き poll driver に配線済み〔§10.2、[決定性・実行時監査仕様](determinism-and-audit.md) §14〕。audit drain queue byte 会計〔§10.2〕は B-2 で per-execution 上限を同 driver に配線済み、engine 全体の上限は E10 統合後）。VM charge parity（Slice 6）も heap・string・I-O の会計について完了済み（fuel の課金差は第14節「F-1 実装スライス」で扱う）で、最終形移行のうち `BudgetConfig` 必須所有（Slice 1: `ExecutionRequest::new(budget, clock)`・deadline を `BudgetConfig.deadline` へ統合・`EngineConfig.budget` collapse・CLI 既定の有限化＝option B）は実装済みである。最終形の `CancellationToken` 必須所有（Slice 2: `ExecutionRequest` が `cancellation: CancellationToken` を必須所有し `.cancellation(value)` builder で設定、`Engine::run` が実行直前に request-owned token を評価器へ install）も実装済みで、REV-015 最終形移行（budget + cancellation 必須所有）は完了した。残りは Phase 6（audit）である。
+
+### §5.3 にあった設計レビュー対応メモ（REV-015 Slice 6 PR-6b）
+
+この小節は、§5.3（目標の章）の「closure が retain する code の課金」の末尾にあった設計レビュー対応メモを loop:drift #373 の D-73 (4) で移したものである（目標の章に経緯を置かない。[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。PR-6b の設計レビュー 2 巡目の時点の記録で、src の行番号はその時点のものである。メモの中の「上記」と「」で挙げた項目名は §5.3「closure が retain する code の課金」の各項を指す。現在の状態は冒頭の逸脱一覧を見る。
+
+> **設計レビュー対応メモ（REV-015 Slice 6 PR-6b, 2 巡目）**: 本 A-1 設計はレビュー指摘を次の
+> とおり反映した。
+> - *[HIGH] VM の `FunctionPrototype.retain_token` slot 方式が実装不能*: `Chunk` は `Rc<Chunk>`
+>   共有・`charge_chunk_tree_into` は `&Chunk` 走査で interior mutability なしに slot へ書けない
+>   （`src/vm.rs:299-317`, `:363-388`, `src/chunk.rs:53`）。→ **slot 方式を却下し、VM も tree と
+>   対称な `Rc::as_ptr` key の side-table 方式へ統一**した（上記「token と code object の対応付け」）。
+> - *[MEDIUM] side-table 寿命と跨入力 ABA*: closure 生成は adopt/Link 入力と別入力になりうる
+>   （VM の `MakeClosure` は複数 `run_repl_chunk` を跨ぐ、tree の内側 closure も外側 call 入力で
+>   初生成）。→ **side-table を `Weak` の長命 index にし、生成時に subtree 全体の token を一括
+>   `Rc::clone` 移譲**する不変量を明記（「side-table は `Weak` の index」「跨入力生成の不変量」
+>   「生成時はトークンを移譲する（subtree 一括）」）。ABA は upgrade 可否が token の生死で判定
+>   されるため実害なしと固定。
+> - *[MEDIUM] tree の per-body 分割が `ast_heap_size` の flat worklist では成立しない*: 現行走査は
+>   body を個々の `Stmt` へ平坦展開し per-body 小計を保持しない（`src/ast.rs:548-549`, `:585-586`）。
+>   → **「走査を body 単位の小計へ再構成する必須作業」である旨を明記**し「再利用」表現を撤回
+>   （「全ネスト深度を eager に列挙」tree 項）。
+> - *[NIT] body の `Rc` 共有有無*: → tree の body は原則 distinct `Rc`、共有されても backing
+>   同一性で 1 token に畳まれ §5.2 と整合、の一文を追加（「ネスト closure の transitive 規則」tree 項）。
 
 ## 15. 境界受入テスト
 
