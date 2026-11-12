@@ -155,7 +155,7 @@ impl Evaluator {
     pub(super) fn apply_pure_core_builtin(
         &mut self,
         name: &str,
-        evaluated: Vec<Value>,
+        mut evaluated: Vec<Value>,
         line: usize,
     ) -> Result<Option<Value>, TsumugiError> {
         // filesystem host call の count + request bytes（書き込み内容）を、境界へ
@@ -169,6 +169,10 @@ impl Evaluator {
             // `BudgetCharged` が、この host call の `HostCallStarted` より前に出る。host call 自身の
             // 課金（以降の request・response）は次の flush 点で出る。
             self.flush_charges_into_audit_events();
+            // write/append の非 Str 内容は予算付きで 1 回だけ描画し、request bytes・書き込み内容・
+            // 監査の body で共有する。描画の fuel は host call 自身の課金（flush の後）。
+            crate::builtin_core::render_fs_content_budgeted(name, &mut evaluated, &mut self.budget)
+                .map_err(|stop| self.control_stop_to_error(stop, line))?;
             let request_bytes = crate::builtin_core::host_call_request_bytes(name, &evaluated);
             self.budget
                 .charge_host_call_request(request_bytes, ExecutionPhase::Run)

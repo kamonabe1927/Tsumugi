@@ -2151,7 +2151,7 @@ impl Vm {
     fn exec_builtin(
         &mut self,
         name: &str,
-        args: Vec<Value>,
+        mut args: Vec<Value>,
         line: usize,
     ) -> Result<Value, TsumugiError> {
         // filesystem host call の count + request bytes を、境界へ入る（副作用が始まる）
@@ -2159,6 +2159,10 @@ impl Vm {
         // の PureCore wrapper）と同じ論理位置・同じ規則で課金する。read 系は request 0 byte。
         let is_host_call = crate::builtin_core::is_host_call_builtin(name);
         if is_host_call {
+            // write/append の非 Str 内容は予算付きで 1 回だけ描画してから request を課金する
+            // （tree engine の builtin.rs と同じ順序、issue #356）。
+            crate::builtin_core::render_fs_content_budgeted(name, &mut args, &mut self.budget)
+                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
             let request_bytes = crate::builtin_core::host_call_request_bytes(name, &args);
             self.budget
                 .charge_host_call_request(request_bytes, ExecutionPhase::Run)
