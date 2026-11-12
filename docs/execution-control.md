@@ -1,6 +1,6 @@
 # Tsumugi 実行予算・協調実行仕様
 
-最終更新: 2026-11-11
+最終更新: 2026-11-12
 
 設計ステータス: **到達目標の確定仕様（§1〜§13）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -39,6 +39,7 @@ handle 経路を §3 の `ExecutionRequest` と組み込みAPI仕様 §8 の `Ex
 | 同期の `Engine::execute`・`execute_repl_submission`（`src/engine.rs`、crate root の `Engine`）は、同じ `Engine` に他の nonterminal な handle があっても `StartError::ConcurrentRunRequiresPolling` を返さずに開始する。terminal まで poll する `drive_to_outcome` は `Yielded` で `continue` するだけなので、run-turn queue の先頭でない handle は `SchedulerPreempted` の `Yielded` を受け続け、呼び出しが戻らない（例: 同じ `Engine` で handle h1 を `max_fuel: 100` で 1 回 poll して `Yielded` にしたあと、別の context で `execute` を呼ぶ）。variant は `src/scheduler.rs` に定義済みだが検出は配線しておらず、その doc の「同期入口は構造的にこの状況を起こさない」は事実と異なる。fix スライス fix-sync-run-concurrent-handle で直す（`src/scheduler.rs` の variant の doc の誤りも同じスライスで直す。loop:drift #373 D-69） | §9.2 | Slice 3 PR-a（Slice 5 の run-turn FIFO で顕在化） |
 | scheduler（`src/engine.rs`、crate root の `ExecutionContext`）の `ExecutionContext` は、§13 の目標に無い公開メソッド `reset_step_budget()` を持つ。中身は `Evaluator::reset_step_budget` → `budget.reset_fuel()` で、同じ ledger の fuel だけを戻す（heap・I/O などの使用量は戻さない）。src・tests に呼び出し元は無い。facade の `embedding::ExecutionContext` には無い。fix スライス fix-scheduler-context-reset-step-budget で直す（loop:drift #373 D-71） | §13 | Slice 1（legacy adapter） |
 | `write_file` / `append_file` の第 2 引数が `Str` でないとき、request bytes の算出（`src/builtin_core.rs` の `host_call_request_bytes`）・adapter へ渡す payload（同 `fs_content_arg`）・監査の request body（同 `host_call_body_values`）が、予算を見ない `Value` の `Display`（`to_string`）で値を描画する。request bytes の算出は capability 判定より前（tree は `src/builtin.rs` の `apply_pure_core_builtin`、VM は `src/vm.rs` の `exec_builtin`）に走るため、共有された入れ子（`a = [a, a]` を 64 回）を渡すと、fs の grant が無い safe profile でも fuel・deadline・per-item byte 上限のどれでも止まらない（tree-walk 版・VM 版とも。issue #356）。fix スライス fix-fs-write-content-budgeted-render で直す | §6.1/§7 | REV-015 Slice 2（I/O accounting） |
+| `join` と `replace` が、結果の文字列の長さを `max_single_string_bytes`（§5.3）と確保の前に比べない。`join`（`src/builtin_core.rs` の `builtin_join_budgeted`）は要素ごとに `render_display` で描画して per-item の上限だけを見たあと、全体の長さを確かめずに `parts.join(sep)` で連結する（描画した要素をすべて `Vec<String>` に持つので、その時点で要素の合計長を確保している）。`replace`（同 `builtin_replace`）は `s.replace(old, new)` を作り切る（空パターンでは出力が約「文字数 × `new` の長さ」になる）。どちらも長さの検査は結果を作ったあとの `track_result` → `charge_string` が初めて行うので、上限を大きく超える入力では `BudgetExceeded(SingleStringBytes)` にならずに Rust の allocation 失敗でプロセスが abort する（exit 134。tree-walk 版・VM 版とも。issue #357）。fix スライス fix-join-replace-string-limit で直す | §5.2/§5.3/§7 | REV-015 Slice 2（string accounting） |
 
 ## 未実装範囲（目標仕様 §1〜§13 のうち未着手・延期中）
 
@@ -393,6 +394,7 @@ continuation frameの課金対象は、スコープを作るframe（96 + local s
 
 - `string_allocations`と`string_bytes`は成功した新規String bodyの累積値で、解放しても減らさない。substringが既存bodyを共有する実装なら新規allocationとして数えず、新bodyをcopyすれば数える。
 - `max_single_string_bytes`はUTF-8 payload 1個の長さに適用する。headerは含めない。
+- builtinが新しいString bodyを作るとき（`join`・`replace`、値の描画など）は、bodyを確保する前に結果の長さが`max_single_string_bytes`を超えないことを確かめる。長さを先に求めるか、上限付きで逐次に書き出して超えた時点で止める。上限を超える結果を作り切ってから検査してはならない（§5.2、§7）。
 - `source_count`はrootを1として、読み込んだimport sourceごとに1増やす。同一normalized module IDのcache hitは増やさない。
 - `source_bytes`はrootとimportの生UTF-8 byte長の合計である。BOM・改行を正規化せず、hash対象と同じbyte列を数える。
 - `import_count`はrootを含まず、初めて解決したnormalized module IDごとに1増やす。
@@ -2669,6 +2671,33 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
   - **FWR-AT-02（grant 有りでも外部効果の前に止まる）:** fs の write を grant した実行で、描画が fuel または `max_single_string_bytes` を超える第 2 引数の `write_file` / `append_file` が、adapter を呼ばずに `BudgetExceeded` の terminal で止まり、`try` / `catch` で捕捉されない。committed の `host_request_bytes` と `host_calls` は増えない。これを、描画が fuel を超える場合（`BudgetExceeded(Fuel)`）と描画が `max_single_string_bytes` を超える場合（`BudgetExceeded(SingleStringBytes)`）のそれぞれで確かめる。確かめ方: 呼び出しを記録する fake の filesystem adapter（または一時 directory の root）を使い、2 つの資源の超過それぞれについて、超過の resource・adapter 呼び出し 0・ファイル無し・usage を確かめるテスト（両 backend）。
   - **FWR-AT-03（書き込み内容と request bytes は変わらない）:** 予算内の List / Dict / 入れ子 / スカラー（Int・Float・Bool・Null）を第 2 引数にした `write_file` / `append_file` の書き込まれた内容と committed の `host_request_bytes` が変更前と同じ（`Display` の描画と同じ文字列・同じ長さ）で、`Str` の第 2 引数の fuel・`host_request_bytes` も変更前と同じである。tree-walk 版と VM 版で同じ。確かめ方: 一時 directory に書いた内容と usage を比べる統合テスト（両 backend）。
   - **FWR-AT-04（描画の fuel は `print` と同じ・監査の body も同じ）:** 同じ値を `print` したときと `write_file` したときの描画による fuel の増分が一致する。body の Reveal を許す redaction policy の監査付き実行（tree）で、`HostCallStarted` の request body が書き込まれた内容と同じ文字列になる。監査付き実行（tree）で、描画の fuel を含む `BudgetCharged` は、その host call の `HostCallStarted` の後に出る（host call より前の消費の `BudgetCharged` は従来どおり `HostCallStarted` の前で、描画の fuel を含まない）。確かめ方: usage の fuel を比べるテスト（両 backend）と、`tests/audit_redaction.rs` か `tests/audit_hostcall.rs` の形の監査のテスト（request body と、`BudgetCharged` と `HostCallStarted` の相対順と、それぞれの fuel の `committed_delta`）。
+
+### fix-join-replace-string-limit 実装スライス（`join` / `replace` の結果の長さを確保前に検査）
+
+[issue #357](https://github.com/kamonabe1927/Tsumugi/issues/357) から作ったスライス（不具合の修正、`slices.toml` の `fix-join-replace-string-limit`）。issue の仕分けで「受け入れ」とした。直し方は §5.2（新 object は allocation の前に reserve）・§5.3（`max_single_string_bytes`）・§7（外部効果・allocation の前の reserve、§7.1 の overflow）と、この設計 PR で §5.3 に書き足した「builtin が新しい String body を作るときは確保の前に長さを確かめる」の項で決まる。逸脱一覧の「callback なし bulk builtin の chunk 境界での slice yield」（fuel-bulk-chunk-yield、yield の話）とは別の不具合として切る。
+
+- **現状の不具合:** `join`（`src/builtin_core.rs` の `builtin_join_budgeted`）は要素ごとに `BudgetLedger::render_display` で描画し、要素 1 つの長さだけを per-item の上限で見る。描画した要素を `Vec<String>` にすべて持ってから `parts.join(sep)` で連結し、全体の長さは見ない。`replace`（同 `builtin_replace`、`builtin_core::dispatch` から呼ばれ budget を持たない）は `s.replace(old, new)` で結果を作り切る。空パターンでは `new` を文字の境界ごと（文字数 + 1 箇所）に挿すので、出力は約「文字数 × `new` の長さ」になる。どちらも長さの検査は、結果を返したあとの `track_result` → `charge_string`（tree は `src/builtin.rs` の `apply_pure_core_builtin`、VM は `src/vm.rs` の `exec_builtin`）が初めて行う。そのため上限を大きく超える入力では `BudgetExceeded(SingleStringBytes)` にならず、Rust の allocation 失敗でプロセスが abort する（exit 134）。issue #357 の再現（4 MiB の文字列 2000 個の `join(xs, "")`、1 MiB の文字列の `replace(s, "", s)`）で、tree-walk 版・VM 版とも同じ。要素が少なければ「文字列の長さが上限を超えました」で止まるが、それは結果を確保したあとの検査である。
+- **実装範囲:**
+  - `join`: 要素と区切りを 1 つの出力 buffer へ順に書き出し、要素の描画（`render_display` と同じ描画と fuel 課金）と区切りの書き足しのたびに、buffer の累積 byte 長が `max_single_string_bytes` を超えていないかを確かめる。超えた時点で `ControlStop::BudgetExceeded(SingleStringBytes)`（`used = reserved = 0`、`requested` は下の Q1 で決める値）を返し、それ以上の要素を描画しない。要素ごとの `Vec<String>` は作らない。これで `join` が確保する文字列は、上限に要素 1 つ（または区切り 1 つ）の長さを足した程度（多くとも上限の約 2 倍）に収まる。buffer へ書き出す関数の形（`BudgetLedger` のメソッドにするか、`render_into` を crate 内に公開するか）は実装に任せる。
+  - `replace`: 結果を作る前に、`old` の一致の数 m（`old` が空なら文字数 + 1）を数え、結果の長さ `len(s) + m × (len(new) − len(old))` を checked な演算で求める。長さが `max_single_string_bytes` を超えれば、結果を作らずに `BudgetExceeded(SingleStringBytes)`（`used = reserved = 0`、`requested` = 求めた結果の長さ）を返す。演算が overflow したら §7.1 のとおり `requested = u64::MAX` の同じ超過とする。超えなければ従来どおり `s.replace(old, new)` で作る。
+  - `replace` を `join` と同じく budget を受け取る版（例: `builtin_replace_budgeted`）にし、tree（`apply_pure_core_builtin`）と VM（`exec_builtin`）の dispatch 境界で `join` と同じ位置で intercept する。両 backend が同じ共有関数を呼ぶ（`builtin_core::dispatch` の `"replace"` の腕は消し、`sort` / `join` / `to_str` / `contains` と同じ注記を足す）。tree の式 frame 経路（tree-expr-continuation-e3）も `apply_pure_core_builtin` を通るので同じになる。
+  - 超過は `control_stop_to_error(stop, 0, line)` で terminal にし（既存の `join` と同じ）、`try` / `catch` で捕捉されない。
+  - done にする実装 PR で、本書の逸脱一覧から `join` / `replace` の行を削除する。
+- **範囲外:**
+  - 予算内の `join` / `replace` の結果・fuel・string の累積会計（`string_allocations` / `string_bytes`）・live heap の課金（変えない。結果は従来どおり `track_result` で課金する）。
+  - `replace` の一致を数える走査と書き出しへの fuel 課金、`join` の Str 要素の byte 長への fuel 課金（§4.1 の UTF-8 payload の課金は fuel-bulk-charge、走査の途中の slice yield は fuel-bulk-chunk-yield の範囲）。数える走査は入力の長さに比例し、入力は `max_single_string_bytes` 以下なので有限である。
+  - 文字列の連結 `+`（tree の `src/eval.rs` の `eval_binop`、VM の `src/vm.rs` の `binary_add`）。こちらも結果を作ってから `charge_string` で検査するが、両辺が上限以下なので確保は上限の 2 倍までで abort には至らない。§5.2 の「allocation 前に reserve」との差は、このスライスでは扱わない（整合点検で逸脱一覧に載せるかを決める）。
+  - その他の文字列 builtin（`upper` / `lower` / `trim` / `split` / `path_join` / `format_time` など）。結果の長さが入力の定数倍以下で、abort に至る経路は issue #357 では報告されていない。
+  - `max_single_string_bytes` の既定値と、§7.2 の優先順位（`SingleStringBytes` だけを返す。cumulative の `StringAllocations` / `StringBytes` の検査は従来どおり `track_result` の `charge_string` で行う）。
+- **課金の変化:** 予算内の呼び出しでは fuel・string の累積会計・heap は変わらない（`join` の要素の描画は今と同じ `render_display` の規則で、複合ノードごとに fuel 1）。上限を超える呼び出しは、確保の前に同じ resource（`SingleStringBytes`）の terminal で止まる。`join` で超える場合は、超えた時点より後の要素を描画しないので、変更前より fuel が少なくなることがある。§4.1 に charge point を足す変更ではないので `fuel_accounting_revision`（§3.1）は変えない。`language_revision` も変えない。
+- **判断の候補（設計 PR #PRNUM の Q1）:** `join` が上限を超えたときの `requested` を、打ち切った時点の累積 byte 長（推奨 A）にするか、結果全体の長さ（B）にするか。判断役が選んだら、ここに決定記録を書く。
+- **着手順（`order`）:** [開発ループ手順書](loop-runbook.md) §8 の「不具合の報告」の既定は「今ある `ready` より前」だが、この設計の時点で `ready` の最小は 34（fix-fs-write-content-budgeted-render）で、0〜33 は done を含めてすべて使われていた。先例（PR #368 の Q1=A、PR #381 の Q1=A。いずれも判断役が選択）と同じく、設計 PR では仮にすべてのスライスより後（97）に置き、マージ後に PM が `order` の付け直しだけの状態整理 PR を遅らせずに出して、今ある `ready` より前へ移す。§8 は付け直しの PR を「先に出す」と定めており、この扱いは順序が逆（設計 PR のマージ後）になる。この外れをここに記録として残す。付け直しの PR が出るまで、このスライスは §8 の既定を満たしていない。
+- **想定の変更規模:** `src/` は 60〜150 行程度（`join` の 1 buffer への書き出しと累積長の検査 25〜50 行、`replace` の長さの事前計算と budget 版 25〜50 行、`src/builtin.rs` と `src/vm.rs` の intercept 各 5〜15 行、`builtin_core::dispatch` の腕と注記の整理 数行）。テストは unit と `tests/` で 150〜250 行。触る仕組みは「文字列 builtin（`join` / `replace`）の結果の長さの検査」1 つ。受入基準は 4 項目。[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
+- **受入基準:**
+  - **JRS-AT-01（issue の再現が abort しない）:** issue #357 の 2 つの再現（4 MiB の文字列 2000 個の `join(xs, "")`、1 MiB の文字列の `replace(s, "", s)`）を既定の budget の CLI で実行すると、プロセスが abort せず（exit 134 でなく）、単一文字列上限の超過の診断（`文字列の長さが上限を超えました`）で exit 1 になる。tree-walk 版と VM 版で同じ。確かめ方: CLI を subprocess で起動して exit code と stderr を確かめるテスト（両 backend）。Linux では、確保の前に止まることを確かめるため、address space を制限した子プロセス（`sh -c 'ulimit -v 4000000; …'` など、issue の再現と同じ条件）から起動する。
+  - **JRS-AT-02（上限ちょうどは成功し、+1 で確保前に止まる）:** 小さい `max_single_string_bytes`（例: 64）を設定した実行で、結果がちょうど上限の長さになる `join` / `replace` は成功し、1 byte 長くなる入力は `BudgetExceeded(SingleStringBytes)` の terminal になり、`try` / `catch` で捕捉されない（§15.1）。`replace` は空パターン・`new` が `old` より短い（結果が縮む）場合・一致なしを含め、超過の `requested` が結果の長さと一致する。`join` は List / Dict を含む要素と区切りの書き足しで超える場合を含め、`requested` が Q1 で決めた値になる。tree-walk 版と VM 版で同じ。確かめ方: `BudgetConfig` を設定した embedding API の統合テスト（両 backend）。
+  - **JRS-AT-03（予算内の結果と課金は変わらない）:** 予算内の `join`（空 List・空の区切り・Str 以外の要素・入れ子の List / Dict・多バイト文字）と `replace`（空パターン・一致なし・多バイト文字・結果が縮む場合）の結果の文字列と、usage の fuel・`string_allocations`・`string_bytes` が変更前と同じである。tree-walk 版と VM 版で同じ。確かめ方: 結果と usage を比べる統合テスト（両 backend。既存の `join` / `replace` のテストもそのまま通る）。
+  - **JRS-AT-04（長さの計算の overflow）:** `replace` の結果の長さを求める計算が u64（または usize）で overflow する入力の組み合わせでは、wrap せず `requested = u64::MAX` の `SingleStringBytes` 超過になる（§7.1）。確かめ方: 長さを求める関数に大きな長さと一致の数を直接渡す unit test（実際の巨大な文字列は作らない）。
 
 ### legacy env の入口の実装記録（旧「§13 実装注記（2026-10-20）」）
 

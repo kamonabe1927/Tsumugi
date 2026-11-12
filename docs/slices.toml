@@ -803,6 +803,23 @@ status     = "todo"
 parent     = "REV-015"
 order      = 96
 
+# issue #357（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。join / replace が結果の文字列を作り切ってから
+# max_single_string_bytes を検査し、上限を大きく超える入力で BudgetExceeded でなくプロセスが abort する不具合を、確保の前の
+# 長さの検査で直す（execution-control §5.2・§5.3・§7）。parent は string accounting を入れた REV-015（Slice 2）。
+# fuel-bulk-chunk-yield（chunk 境界の slice yield）とは別の不具合として切った。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 34 で 0〜33 に空きが無い
+# （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381 の Q1=A）と同じく、この PR では付け直しをせず、仮にすべての
+# スライスより後（97）に置いた。マージ後に PM が付け直しだけの状態整理 PR で 34 より前へ移す。
+# 見積もり: src/ 60〜150 行、触る仕組みは文字列 builtin（join / replace）の結果の長さの検査 1 つ、受入基準 4。
+[[slice]]
+id         = "fix-join-replace-string-limit"
+title      = "join / replace が結果の長さを確保の前に max_single_string_bytes と比べ、上限を超える入力で abort せず BudgetExceeded(SingleStringBytes) で止まる（execution-control §5.3・§7、issue #357）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-join-replace-string-limit 実装スライス（`join` / `replace` の結果の長さを確保前に検査）" }
+acceptance = ["JRS-AT-01..04"]
+order      = 97
+
 # issue #356（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。write_file / append_file の Str でない
 # 第 2 引数を、予算を見ない Display でなく render_display で描画する（execution-control §6.1・§7）。parent は print・to_str の
 # 描画を有限化した REV-001（fix-contains-budgeted-equality と同じ項目）。
