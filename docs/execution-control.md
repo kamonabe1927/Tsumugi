@@ -2690,7 +2690,7 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
   - その他の文字列 builtin（`upper` / `lower` / `trim` / `split` / `path_join` / `format_time` など）。結果の長さが入力の定数倍以下で、abort に至る経路は issue #357 では報告されていない。
   - `max_single_string_bytes` の既定値と、§7.2 の優先順位（`SingleStringBytes` だけを返す。cumulative の `StringAllocations` / `StringBytes` の検査は従来どおり `track_result` の `charge_string` で行う）。
 - **課金の変化:** 予算内の呼び出しでは fuel・string の累積会計・heap は変わらない（`join` の要素の描画は今と同じ `render_display` の規則で、複合ノードごとに fuel 1）。上限を超える呼び出しは、確保の前に同じ resource（`SingleStringBytes`）の terminal で止まる。`join` で超える場合は、超えた時点より後の要素を描画しないので、変更前より fuel が少なくなることがある。§4.1 に charge point を足す変更ではないので `fuel_accounting_revision`（§3.1）は変えない。`language_revision` も変えない。
-- **判断の候補（設計 PR #PRNUM の Q1）:** `join` が上限を超えたときの `requested` を、打ち切った時点の累積 byte 長（推奨 A）にするか、結果全体の長さ（B）にするか。判断役が選んだら、ここに決定記録を書く。
+- **判断の候補（設計 PR #386 の Q1）:** `join` が上限を超えたときの `requested` を、打ち切った時点の累積 byte 長（推奨 A）にするか、結果全体の長さ（B）にするか。判断役が選んだら、ここに決定記録を書く。
 - **着手順（`order`）:** [開発ループ手順書](loop-runbook.md) §8 の「不具合の報告」の既定は「今ある `ready` より前」だが、この設計の時点で `ready` の最小は 34（fix-fs-write-content-budgeted-render）で、0〜33 は done を含めてすべて使われていた。先例（PR #368 の Q1=A、PR #381 の Q1=A。いずれも判断役が選択）と同じく、設計 PR では仮にすべてのスライスより後（97）に置き、マージ後に PM が `order` の付け直しだけの状態整理 PR を遅らせずに出して、今ある `ready` より前へ移す。§8 は付け直しの PR を「先に出す」と定めており、この扱いは順序が逆（設計 PR のマージ後）になる。この外れをここに記録として残す。付け直しの PR が出るまで、このスライスは §8 の既定を満たしていない。
 - **想定の変更規模:** `src/` は 60〜150 行程度（`join` の 1 buffer への書き出しと累積長の検査 25〜50 行、`replace` の長さの事前計算と budget 版 25〜50 行、`src/builtin.rs` と `src/vm.rs` の intercept 各 5〜15 行、`builtin_core::dispatch` の腕と注記の整理 数行）。テストは unit と `tests/` で 150〜250 行。触る仕組みは「文字列 builtin（`join` / `replace`）の結果の長さの検査」1 つ。受入基準は 4 項目。[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
 - **受入基準:**

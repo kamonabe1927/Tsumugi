@@ -818,6 +818,7 @@ status     = "ready"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-join-replace-string-limit 実装スライス（`join` / `replace` の結果の長さを確保前に検査）" }
 acceptance = ["JRS-AT-01..04"]
+design_pr  = 386
 order      = 97
 
 # issue #356（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。write_file / append_file の Str でない
