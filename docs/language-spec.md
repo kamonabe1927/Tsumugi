@@ -6,7 +6,7 @@
 
 この番号は言語仕様のrevisionであり、Cargo package / REPLの実装バージョン `0.1.0` とは独立して管理する。
 
-本書をTsumugiの**現行実装から観測できる規範仕様**とし、デフォルトのツリーウォーク版と`--vm`版は同じ観測可能な挙動を満たすものとする。次期revisionについて設計確定済みだが未実装の決定は[次期意味論・実装決定](semantic-decisions.md)を正本とし、その受入基準とpaired testが完了するまで本書へ先行反映しない。実装差は言語機能ではなく非適合として扱い、詳細と修正状況は[`roadmap.md`](roadmap.md)の監査バックログで管理する。
+本書をTsumugiの**現行実装から観測できる規範仕様**とし、デフォルトのツリーウォーク版と`--vm`版は同じ観測可能な挙動を満たすものとする。次期revisionについて設計確定済みだが未実装の決定は[次期意味論・実装決定](semantic-decisions.md)を正本とし、その受入基準とpaired testが完了するまで本書へ先行反映しない。実装差は言語機能ではなく非適合として扱い、現在の非適合は下の「逸脱一覧」にだけ書く。
 
 ### 外部操作の権限（capability）
 
@@ -14,24 +14,22 @@
 
 - CLI の既定は safe profile である（[Capability Model仕様](capability-model.md) §14.2・§14.4）。safe profile が既定で許可するのは標準出力（`print`）とスクリプト引数（`args()`）だけで、それ以外は `--allow-env KEY`・`--allow-clock`・`--allow-script-stdin`・`--allow-exit`・`--fs-root NAME=PATH` と `--fs-op NAME=OP[,OP...]`・`--allow-import-root NAME=PATH` で個別に許可する（同 §14.1）。`--deny-stdout` は標準出力の許可を外す
 - `--profile legacy` は互換用で、環境変数（`TSUMUGI_` で始まるものを除く）・時刻・標準入出力・プロセス終了と、`TSUMUGI_SANDBOX` に従うファイルシステムを許可する（同 §14.3）。legacy profile は import root を許可しないため、ファイル・標準入力から実行するスクリプトの import は拒否される
-- REPL も同じ profile と option で動く。REPL の import もファイル・標準入力と同じく import root を要し、許可が無ければ link 時に拒否される（「モジュール / import」の「制約」、[Capability Model仕様](capability-model.md) §10）。現在の実装との差は下の「現在の既知非適合」にある
+- REPL も同じ profile と option で動く。REPL の import もファイル・標準入力と同じく import root を要し、許可が無ければ link 時に拒否される（「モジュール / import」の「制約」、[Capability Model仕様](capability-model.md) §10）。現在の実装との差は下の「逸脱一覧」にある
 - 許可の無い操作は、スクリプト実行中なら catch 可能な `capability`（ファイルシステム操作は `sandbox`）エラーになる。import の拒否だけは実行開始前の link 時に起き、catch できない（「モジュール / import」の「パス解決」）
 
 本節と、組み込み関数表・「実行安全性」の権限に関する記述は、loop:drift #298 の D-17・D-18 を受けて CLI の既定（safe profile）に合わせて直した。実装は変えず、本書を [Capability Model仕様](capability-model.md) §14 と実装に合わせる案（Q1=A・Q2=A）は、返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5、issue #298）。理由: Capability Model仕様が採択した safe 既定はマニフェスト原則 2「権限はホストが明示的に付与する」に沿い、実装もそれに一致している。本書だけが CLI が ambient に権限を持つ前提で書かれていた。これは既に実装されている CLI の既定を記述し直したもので、`LanguageRevision` で分岐する言語挙動の変更ではないため、仕様 revision は 0.21 のまま変えない。
 
 組み込み関数表の `exit` の行は、loop:drift #302 の D-19 を受けて、実装（C7 で `Exited` へ写すようにした `exit`）と [Capability Model仕様](capability-model.md) §9 に合わせて 0〜255 の範囲・範囲外の `argument` エラー・許可が要ることを補った。実装は変えず本書を補う案（Q1=A）は、返信なしのため推奨案で確定した（issue #302、当時の[開発ループ手順書](loop-runbook.md) §7.5）。理由: 既に実装されている挙動の記述漏れで、`LanguageRevision` で分岐する言語挙動の変更ではないため、仕様 revision は 0.21 のまま変えない。
 
-### 現在の既知非適合
+### 逸脱一覧（目標仕様に対する現在の逸脱）
 
-以下の挙動へ依存するコードは移植可能とみなさない。詳細と修正状況は[`roadmap.md`](roadmap.md)の該当IDを参照する。
+本書の本文は目標の仕様であり、現在の実装との差（逸脱）はこの表にだけ書く（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。表にある挙動へ依存するコードは移植可能とみなさない。解消した行は削除する。ツリーウォーク版と `--vm` 版の差、および本書の規範との差は、整合点検（loop:drift #382）で確かめた範囲で表に無い。
 
-両engine差: 現在なし。
+| 逸脱内容 | 対象の節(§) | 発生スライス |
+|---|---|---|
+| REPL（tree・VM）の import は link 時の resolver gate を通らず、import root を要さずに現在の作業ディレクトリからの相対パスで解決され、profile にかかわらず `TSUMUGI_SANDBOX` を読む。目標は、REPL もファイル・標準入力と同じく各入力を link 時に import root の下で解決し（未許可なら拒否）、`TSUMUGI_SANDBOX` を読まないことである。両 engine 共通で、[Capability Model仕様](capability-model.md) の目標（§10・§14.3・§14.4）との差でもあり、詳細は同仕様の逸脱一覧の REPL の import の行にある | 「モジュール / import」の「制約」、[Capability Model仕様](capability-model.md) §10・§14.3・§14.4 | E7（tree）、E9 の VM file/stdin 統合で据え置いた VM REPL |
 
-両engine共通の仕様違反（本書の規範との差）: 現在なし。
-
-両engine共通の仕様違反（[Capability Model仕様](capability-model.md) の目標との差）:
-
-- REPL（tree・VM）の import は link 時の resolver gate を通らず、import root を要さずに現在の作業ディレクトリからの相対パスで解決され、profile にかかわらず `TSUMUGI_SANDBOX` を読む。目標は、REPL もファイル・標準入力と同じく各入力を link 時に import root の下で解決し（未許可なら拒否）、`TSUMUGI_SANDBOX` を読まないことである（同 §10・§14.3・§14.4）。この差の正本は同仕様の逸脱一覧の REPL の import の行である
+この表は loop:drift #382 の D-82 を受けて、それまでの箇条書きの「現在の既知非適合」（詳細の参照先をロードマップとしていた）から移した。表に載せたのは、整合点検の輪番で tree・VM とも今も成り立つことを確かめた REPL の import の 1 行だけである。逸脱一覧の形に移す案（Q1=A）は判断役が選択した（issue #382）。理由: spec の実装状態の正本を各 spec の逸脱一覧 1 つとする [ドキュメント運用ガイド](documentation-guide.md)「状態の正本は粒度ごとに 1 箇所だけ」に合わせ、同ガイドの移行の規則（輪番で事実を確かめたものから寄せる）どおりに移す。参照先だったロードマップには該当する節も ID も無く、状態の正本が読み手に分からなかった（[マニフェスト](manifesto.md) 原則 9）。採らなかった案B（次に本書に触れる done の実装 PR まで今の形のままにする）は、その PR がいつ来るか決まっておらず、その間ロードマップと本書に状態が分かれたままになるため採らない。
 
 本書の文法どおり、複数行lambdaの終端`end`は必須である。
 
@@ -182,7 +180,7 @@ d["b"] = 2         # 新しいキーの追加
 d["a"] = 10        # 既存キーの更新
 ```
 
-> **制約**: インデックス代入の対象は変数に直接格納されたリストまたは辞書のみ。ネストしたインデックス代入（`xs[0][1] = val`）は現在サポートされていない。ネストした構造を更新するには、一時変数に取り出して代入し直す。
+> **制約**: インデックス代入の対象は変数に直接格納されたリストまたは辞書のみ。ネストしたインデックス代入（`xs[0][1] = val`）はサポートしない。ネストした構造を更新するには、一時変数に取り出して代入し直す。
 
 **評価順**: `target[index] = value` は左から右へ、次の順で処理する。
 
@@ -664,7 +662,7 @@ print(cube(3))     # 27
 
 ### 評価時点
 
-import はプログラムの実行を始める前にすべて解決する。読み込み・パース・サンドボックス検査・深度検査は、最初の文を実行する前に行う。
+import はプログラムの実行を始める前にすべて解決する。import root の下での解決・読み込み・パース・深度検査は、最初の文を実行する前に行う。
 
 - import が失敗した場合、プログラムは1文も実行されない。失敗より手前に書いた `print` やファイル操作の副作用は起きない
 - モジュールのトップレベル文は、`import` 文が書かれていた位置で実行される。したがって正常時の実行順序は、その位置にモジュールの内容を書いた場合と同じになる
@@ -689,10 +687,10 @@ import はプログラムの実行を始める前にすべて解決する。読�
 ### 制約
 
 - import はプログラムのトップレベルでのみ使用できる。関数・条件分岐・ループ・`try` / `catch`・複数行ラムダのブロック内に記述すると、パスの読み込み前にパースエラー `import はトップレベルでのみ使用できます` になる
-- root scriptを数えず、現在処理中のimport chainは最大128ファイル。異なるファイルへの129段目のimportは`import 失敗: ネストが深すぎます (上限: 128)`という`import`ランタイムエラーになる。既訪問パスは深度検査前にスキップされるため、循環importの従来挙動は変わらない
+- root scriptを数えず、現在処理中のimport chainは最大128ファイル。異なるファイルへの129段目のimportがあると、実行開始前のlink時に拒否する。拒否はcatchできず、1文も実行せずに診断 `import のネストが深すぎます (上限: 128)` を標準エラーへ出して終了コード 1 で終わる。ツリーウォーク版と `--vm` 版で同じである（「実行安全性」の「import chain深度制限」）。既訪問パスは深度検査前にスキップされるため、循環importはこの上限を消費しない
 - import されたファイル内の `let` 宣言・`fn` 定義がすべて現在のスコープに展開される（名前空間は分離されない）
 - REPL での import も、ファイル・標準入力と同じく入力ごとに実行開始前の link 時に import root の下で解決され、import root が許可されていなければ link 時に拒否される（[Capability Model仕様](capability-model.md) §10）。現在の作業ディレクトリからの相対の import が欲しいときは `--allow-import-root default=.` を明示する
-- ファイル・標準入力・REPL の import は `TSUMUGI_SANDBOX` を読まない（import の許可は import root だけで決まる。[Capability Model仕様](capability-model.md) §14.3・§14.4）。現在の実装との差は上の「現在の既知非適合」にある
+- ファイル・標準入力・REPL の import は `TSUMUGI_SANDBOX` を読まない（import の許可は import root だけで決まる。[Capability Model仕様](capability-model.md) §14.3・§14.4）。現在の実装との差は冒頭の「逸脱一覧」にある
 
 ## エラー処理（try / catch）
 
@@ -790,16 +788,17 @@ end
 - リスト/辞書以外へのインデックス代入
 - `to_int` / `floor` / `ceil` / `round` の変換失敗（`NaN` / `±Infinity` / i64 範囲外）
 - `file_size` のサイズが i64 で表現できない（`int_overflow`）
-- ステップ上限超過
 - `print` の出力失敗（`io`）— 出力先が閉じられた場合など
 
 上記は例であり、網羅ではない。`e["type"]` で得られる種別は次のとおり。
 
-`zero_division`, `type`, `index`, `name`, `limit`, `overflow`, `sandbox`, `import`, `argument`, `int_overflow`, `control_flow`, `collection_limit`, `string_limit`, `source_limit`, `heap_limit`, `io_limit`, `conversion`, `builtin_type`, `iteration`, `io`, `capability`, `host`, `internal`, `runtime`
+`zero_division`, `type`, `index`, `name`, `overflow`, `sandbox`, `import`, `argument`, `int_overflow`, `control_flow`, `conversion`, `builtin_type`, `iteration`, `io`, `capability`, `host`, `internal`, `runtime`
+
+予算超過の種別 `limit`（ステップ上限）・`collection_limit`・`string_limit`・`source_limit`・`heap_limit`・`io_limit` は catch できない停止であり、`try` / `catch` で捕捉できず、`e["type"]` として script から観測されない（下の「キャッチできないエラー」、[実行予算・協調実行仕様](execution-control.md) §2 の不変条件 3）
 
 このうち `capability` / `sandbox` は、ホストが許可していない外部操作を試みたときに起きる（冒頭の「外部操作の権限」）。CLI の既定（safe profile）では、`env` / `now` / `input` / `exit` を許可なしで呼ぶと `capability`、ファイルシステム操作を許可なしで行うと `sandbox` になる。`host` は、許可された外部操作が失敗したとき（許可した root の中の存在しないファイルを `read_file` で読んだときなど）に起きる。これらを catch 可能種別として扱う契約は[組み込みAPI仕様](embedding-api.md) 8.1 と [Capability Model仕様](capability-model.md) §4・§8.5 に従う。
 
-このうち `string_limit` / `source_limit` / `heap_limit` / `io_limit` は包括budget（REV-015 Slice 2）で追加した予算超過の種別である。既定の上限では通常のスクリプトから観測されず、対応するメッセージテンプレートは budget 実装の確定に伴って変わり得るため、下の正本表には載せていない（実装状態は[ロードマップ](roadmap.md)の REV-015 を参照）。
+予算超過の種別のうち `string_limit` / `source_limit` / `heap_limit` / `io_limit` は、文字列・source・live heap・入出力の量を制限する包括budgetの超過である。上限の既定値は[実行予算・協調実行仕様](execution-control.md) §3.1 に従い（たとえば 1 つの文字列は 8 MiB、live heap は 64 MiB まで）、既定のままでも超えうる。これら 4 種のメッセージは下の正本表に載せない。
 
 ### エラーの kind とメッセージ（正本）
 
@@ -845,6 +844,8 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 - パースエラー（構文エラー）— プログラムの実行前に発生するため
 - import 先ファイルの構文エラー — `import` はトップレベル限定のため `try` の内側に置けない
 - import root が許可されていない import — 実行開始前の link 時に拒否するため（「モジュール / import」の「パス解決」）
+- import chain の深度上限（129 段目の import）— 実行開始前の link 時に拒否するため（「実行安全性」の「import chain深度制限」）
+- 予算超過（`limit`・`collection_limit`・`string_limit`・`source_limit`・`heap_limit`・`io_limit`）— 予算超過は実行の停止であり、script の `try` / `catch` から捕捉できない（[実行予算・協調実行仕様](execution-control.md) §2 の不変条件 3）
 
 ### 出力の失敗
 
@@ -855,7 +856,7 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 外部状態に触れる組み込み関数は、ホストが許可したときだけ動く（冒頭の「外部操作の権限」、[Capability Model仕様](capability-model.md)）。
 
 - `print` は標準出力、`env` は環境変数、`now` は時刻、`input` はスクリプトの標準入力、`exit` はプロセス終了の許可を要する。許可が無ければ catch 可能な `capability` エラー（`host function の実行が許可されていません: {name}`）になる
-- ファイルシステム関数（`read_file` / `read_lines` / `write_file` / `append_file` / `path_exists` / `is_file` / `is_dir` / `mkdir` / `remove` / `remove_dir` / `remove_tree` / `rename` / `list_dir` / `file_size`）は、対象パスを含む root と操作の許可を要する。許可が無ければ catch 可能な `sandbox` エラー（`ファイルシステム操作が許可されていません`）になる。safe profile のパスは `@NAME/...` か、root `default` に対する相対パスで書く。safe profile では、絶対パス・`.`・`..` を含むパスは、root の許可の有無にかかわらず catch 可能な `argument` エラーになる。パスの形式は許可より先に検査する（[Capability Model仕様](capability-model.md) §8.2・§8.5・§14.1）
+- ファイルシステム関数（`read_file` / `read_lines` / `write_file` / `append_file` / `path_exists` / `is_file` / `is_dir` / `mkdir` / `remove` / `remove_dir` / `remove_tree` / `rename` / `list_dir` / `file_size`）は、対象パスを含む root と操作の許可を要する。許可が無ければ catch 可能な `sandbox` エラー（`ファイルシステム操作が許可されていません`）になる。safe profile のパスは `@NAME/...` か、root `default` に対する相対パスで書く。safe profile では、絶対パス・`.`・`..` を含むパスは、root の許可の有無にかかわらず catch 可能な `argument` エラーになる。パスの形式は許可より先に検査する（[Capability Model仕様](capability-model.md) §8.2・§8.5・§14.1）。`remove_tree` は `remove` / `remove_dir` の削除の許可（`Delete`）とは別の再帰削除の許可（`RecursiveDelete`）を要し、`Delete` から暗黙に昇格しない。safe profile の CLI の `--fs-op` には再帰削除のトークンが無く付与できないため、safe profile の CLI からの `remove_tree` は常に `sandbox` エラーになる。再帰削除が動くのは、legacy profile と、埋め込みホストが `RecursiveDelete` を許可したときである（同 §8.4・§14.1、CAP-AT-23）
 - 許可された操作の失敗（存在しないファイルの読み込み、親ディレクトリの無い場所への書き込み、既存ディレクトリへの `mkdir` など）は、`null` や `false` を返さず catch 可能な `host` エラー（`host function の実行に失敗しました: {name} (filesystem)`）になる。legacy profile でも同じである
 - 下の表の説明は、必要な許可があるときの挙動である
 
@@ -882,15 +883,15 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 | `args()` | スクリプト引数を文字列リストで返す。process argv ではなく実行 context の snapshot を返し、CLIはSCRIPT（またはstdin `-`）より後ろのtokenを順序どおり渡す。埋め込み host は `ExecutionContext::set_script_args` で実行単位に注入する。引数がなければ空リスト（AUD-018） |
 | `input()` | 標準入力から1行読み取る。EOF なら null |
 | `now()` | 現在のUNIXタイムスタンプ（秒）を整数で返す |
-| `format_time(timestamp, format)` | タイムスタンプをUTC固定でフォーマット（%Y, %m, %d, %H, %M, %S, %z, %Z）。`timestamp` は整数のみで、Floatは `builtin_type` エラー。`%z` は常に `+0000`、`%Z` は常に `UTC` という UTC 固定の定数に展開し、OS・ロケール・TZ 設定に依存しない。これら以外の未知記号はそのまま出力に残る（revision 0.21 で `%z`/`%Z` を追加、semantic-decisions.md §20。従来の「タイムゾーン指定は提供しない」記述は撤回） |
+| `format_time(timestamp, format)` | タイムスタンプをUTC固定でフォーマット（%Y, %m, %d, %H, %M, %S, %z, %Z）。`timestamp` は整数のみで、Floatは `builtin_type` エラー。`%z` は常に `+0000`、`%Z` は常に `UTC` という UTC 固定の定数に展開し、OS・ロケール・TZ 設定に依存しない。これら以外の未知記号はそのまま出力に残る（semantic-decisions.md §20） |
 | `path_exists(path)` | パスが存在すれば true |
 | `path_join(parts...)` | パーツを結合してパス文字列を返す。全引数はStrである必要があり、非Strは左から順に検査して最初の1つで `builtin_type` エラー（結合は開始しない）。引数0個は空文字列。正規化・存在確認はせず、separator/absolute component/prefixの扱いは実行OSのRust `PathBuf` と同じ |
 | `mkdir(path)` | ディレクトリを再帰的に作成。成功で true |
 | `remove(path)` | ファイルまたは空ディレクトリを削除。final symlinkはlink自体だけを削除する。成功で true |
-| `remove_dir(path)` | **空ディレクトリのみ**を削除する。非空ディレクトリは削除しない（再帰削除は `remove_tree`）。成功で true（revision 0.20 で再帰削除から変更、REV-021） |
-| `remove_tree(path)` | ディレクトリを中身ごと**再帰削除**する。final symlinkはlink自体だけを削除し、targetをたどらない。成功で true（revision 0.20 で追加、REV-021） |
+| `remove_dir(path)` | **空ディレクトリのみ**を削除する。非空ディレクトリは削除しない（再帰削除は `remove_tree`）。成功で true |
+| `remove_tree(path)` | ディレクトリを中身ごと**再帰削除**する。final symlinkはlink自体だけを削除し、targetをたどらない。成功で true |
 | `rename(from, to)` | ファイル/ディレクトリを移動・リネーム。from/toのfinal symlinkはtargetでなくdirectory entry自体として扱う。成功で true |
-| `list_dir(path)` | ディレクトリ内のエントリ名をリストで返す。名前（Str）は `sort` と同じ全順序 `TotalOrder` で整列する（Str 帯のコードポイント順。revision 0.21 で整列キーを全順序へ一本化、REV-017。実効順序はコードポイント順で従来と同一） |
+| `list_dir(path)` | ディレクトリ内のエントリ名をリストで返す。名前（Str）は `sort` と同じ全順序 `TotalOrder` で整列する（Str 帯のコードポイント順。REV-017） |
 | `file_size(path)` | ファイルサイズ（バイト）を整数で返す。サイズが i64 で表現できない（`i64::MAX` 超）場合は wrap・負値を返さず `int_overflow` エラー |
 | `trim(str)` | 前後の空白を除去 |
 | `starts_with(str, prefix)` | 接頭辞チェック |
@@ -902,7 +903,7 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 | `abs(num)` | 絶対値 |
 | `min(a, b)` | 小さい方を返す。厳密な数値比較で選び、選ばれた引数を**元の型のまま**返す（`min(2, 2.5)`は`Int`の`2`）。同値なら第1引数、いずれかが`NaN`なら`NaN`を返す |
 | `max(a, b)` | 大きい方を返す。厳密な数値比較で選び、選ばれた引数を**元の型のまま**返す（`max(3, 2.5)`は`Int`の`3`）。同値なら第1引数、いずれかが`NaN`なら`NaN`を返す |
-| `sort(list)` | リストをソートして返す。全値型を覆う単一の全順序 `TotalOrder` で比較する安定ソート（revision 0.21 で文字列表現比較から変更、REV-017 / semantic-decisions.md §17.8）。型帯順は `Null < Bool < 数値(Int/Float 統合) < Str < List < Dict < Fn < Error`。数値帯は厳密数値順で `sort([3,10,2])` → `[2,3,10]`、`NaN` は数値帯の末尾。List / Dict は同じ全順序で再帰する辞書式順（短い方が小さい、空は最小）。Fn / Error は帯内で等価とし、安定ソートが元順序を保つ。revision 0.20 以下を要求する script は従来の文字列表現比較で動く。 |
+| `sort(list)` | リストをソートして返す。全値型を覆う単一の全順序 `TotalOrder` で比較する安定ソート（REV-017 / semantic-decisions.md §17.8）。型帯順は `Null < Bool < 数値(Int/Float 統合) < Str < List < Dict < Fn < Error`。数値帯は厳密数値順で `sort([3,10,2])` → `[2,3,10]`、`NaN` は数値帯の末尾。List / Dict は同じ全順序で再帰する辞書式順（短い方が小さい、空は最小）。Fn / Error は帯内で等価とし、安定ソートが元順序を保つ。revision 0.20 以下を要求する script は文字列表現比較で動く。 |
 | `reverse(list or str)` | リストまたは文字列を反転して返す |
 | `is_file(path)` | パスがファイルなら true |
 | `is_dir(path)` | パスがディレクトリなら true |
@@ -960,11 +961,11 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 
 外部操作の権限は冒頭の「外部操作の権限」と[Capability Model仕様](capability-model.md)に従う。以下は誤操作や過剰な資源消費を抑えるためのdefense-in-depth機構であり、敵対的なスクリプトを隔離するセキュリティ境界ではない。非信頼コードを実行する場合は、非rootプロセス、権限制限されたコンテナ、read-only filesystem、CPU・メモリ・実行時間上限などOS側の分離を併用する。
 
-構文とASTは深度256、非循環import chainはroot scriptを除いて128に制限し、parser・compiler・evaluatorがhost stackを消費する前にエラー化する。実行中に作るListとDictの入れ子の深さも256に制限し、値の破棄・比較・表示がhost stackを使い切る前に、値を作る時点で拒否する。ステップ予算はloop反復と関数・callback呼び出しを中心に数え、構文解析、コンパイル、直線的な大量コード、文字列サイズ、重いbuiltin、I/O待ち、プロセス全体の総heap量は包括的に制限しない。filesystem制御にもsymlinkのTOCTOU制約がある。
+構文とASTは深度256、非循環import chainはroot scriptを除いて128に制限し、parser・compiler・evaluatorがhost stackを消費する前にエラー化する。実行中に作るListとDictの入れ子の深さも256に制限し、値の破棄・比較・表示がhost stackを使い切る前に、値を作る時点で拒否する。ステップ予算はloop反復と関数・callback呼び出しを中心に数え、構文解析、コンパイル、直線的な大量コード、重いbuiltin、I/O待ちは包括的に制限しない。文字列・source・live heap・入出力の量は、ステップ予算とは別の包括budgetで実行ごとに制限する（[実行予算・協調実行仕様](execution-control.md) §3.1）。filesystem制御にもsymlinkのTOCTOU制約がある。
 
 ### ステップ予算
 
-CLI では環境変数 `TSUMUGI_MAX_STEPS` でループ反復 + 関数呼び出しの合計回数に上限を設定する。超過するとランタイムエラー。デフォルト実行系と `--vm` の両方、ファイル・標準入力・REPL のすべての経路に同じく効く。
+CLI では環境変数 `TSUMUGI_MAX_STEPS` でループ反復 + 関数呼び出しの合計回数に上限を設定する。超過すると catch できない停止（`limit`）になる（[実行予算・協調実行仕様](execution-control.md) §2 の不変条件 3）。デフォルト実行系と `--vm` の両方、ファイル・標準入力・REPL のすべての経路に同じく効く。
 
 この環境変数を含む `TSUMUGI_MAX_*` による上限の上書きは非推奨の互換入口であり、設定すると起動時に標準エラーへ警告が1回出る（[実行予算・協調実行仕様](execution-control.md)第13節）。数値として解釈できない値は無視され、既定値が使われる。組み込みAPIはこれらの環境変数を読まず、ホストが明示した予算を使う。
 
@@ -974,23 +975,23 @@ CLI では環境変数 `TSUMUGI_MAX_STEPS` でループ反復 + 関数呼び出�
 
 ### コレクションサイズ上限
 
-CLI では環境変数 `TSUMUGI_MAX_COLLECTION_SIZE` で、List/Dictの要素数とListを生成する操作の上限を設定する（ステップ予算と同じく非推奨の互換入口）。超過すると `collection_limit` ランタイムエラーになる。
+CLI では環境変数 `TSUMUGI_MAX_COLLECTION_SIZE` で、List/Dictの要素数とListを生成する操作の上限を設定する（ステップ予算と同じく非推奨の互換入口）。超過すると catch できない停止（`collection_limit`）になる（[実行予算・協調実行仕様](execution-control.md) §2 の不変条件 3）。
 
 - デフォルト: 1,000,000要素
 - 対象: List/Dictリテラル、`push`、辞書への新規キー追加、`range`、`split`、`read_lines`、`keys`/`values`、`map`/`filter`、`list_dir`、反復用List変換など
 - 既存要素の置換や、入力より要素数が増えない操作は新たな要素を追加しない
-- これは要素数の上限であり、文字列サイズやプロセス全体の総ヒープ量を制限するものではない
+- これは要素数の上限である。文字列の大きさと live heap 量は、別の包括budgetで制限する（[実行予算・協調実行仕様](execution-control.md) §3.1）
 - 例: `TSUMUGI_MAX_COLLECTION_SIZE=100000`
 
 ### ファイルI/Oサンドボックス
 
-CLI の既定（safe profile）では、ファイル操作の範囲は `--fs-root` / `--fs-op` で許可した root と操作に限られ、許可が無ければ全て拒否する（[Capability Model仕様](capability-model.md) §14.1・§14.2）。ファイル操作に関して `TSUMUGI_SANDBOX` を読むのは `--profile legacy` のときだけである（同 §14.3）。import の許可は import root だけで決まり、ファイル・標準入力から実行するスクリプトの import は `TSUMUGI_SANDBOX` を読まない（「モジュール / import」の「制約」）。現在の実装との差は冒頭の「現在の既知非適合」にある。
+CLI の既定（safe profile）では、ファイル操作の範囲は `--fs-root` / `--fs-op` で許可した root と操作に限られ、許可が無ければ全て拒否する（[Capability Model仕様](capability-model.md) §14.1・§14.2）。ファイル操作に関して `TSUMUGI_SANDBOX` を読むのは `--profile legacy` のときだけである（同 §14.3）。import の許可は import root だけで決まり、ファイル・標準入力から実行するスクリプトの import は `TSUMUGI_SANDBOX` を読まない（「モジュール / import」の「制約」）。現在の実装との差は冒頭の「逸脱一覧」にある。
 
 `--profile legacy` では、環境変数 `TSUMUGI_SANDBOX` でファイル操作（read_file, write_file, append_file 等）の対象パスを制限する。
 
 - カンマ区切りで複数パスを許可可能
 - 許可パスのプレフィックスに合致しないアクセスはサンドボックス違反エラー
-- 読み書き・metadataは、解決可能なfinal symlinkではtargetを認可対象とする。importは既存pathをcanonicalizeしてから認可する
+- 読み書き・metadataは、解決可能なfinal symlinkではtargetを認可対象とする
 - `remove` / `remove_dir` / `remove_tree` / `rename`は中間symlinkを解決したうえでfinal directory entryを認可対象とし、final symlinkのtargetは操作しない
 - targetが未作成のdangling final symlinkを通じた`write_file` / `append_file`は、targetの場所を認可できない既知の制約がある（AUD-020）
 - 検査と実I/Oの間のsymlink差し替えraceまでは防止しない
@@ -1045,8 +1046,8 @@ ListとDictの入れ子の深さを256に制限する。深さが際限なく増
 現在処理中の非循環import chainを128ファイルに制限する。root scriptは数えず、正規化済みの既訪問パスは深度を消費せずスキップする。
 
 - 上限: 128ファイル
-- 129段目: `import 失敗: ネストが深すぎます (上限: 128)`という`import`ランタイムエラー
-- 対象: ツリーウォーク版の再帰実行とVM版の再帰inline compile
+- 129段目: 実行開始前のlink時に拒否する。catchできず、1文も実行せずに診断 `import のネストが深すぎます (上限: 128)` を標準エラーへ出して終了コード 1 で終わる
+- 対象: ファイル・標準入力・REPLのimport。深度はlinkがmodule graphを確かめるときに検証する（[組み込みAPI仕様](embedding-api.md) §5）。ツリーウォーク版と`--vm`版で同じ。REPLの現在の差は冒頭の「逸脱一覧」にある
 - 設定変更: 不可（コンパイル時定数）
 
 ### TSUMUGI_* 環境変数の保護
