@@ -1437,4 +1437,111 @@ mod tests {
             format!("let xs = [1]\nprint({})\n", wrap("abs(len(", "xs", "))", k))
         });
     }
+
+    // ---- 異常系: compile が返すエラー（panic せず構造化エラーにする） ----
+
+    fn parse(source: &str) -> Program {
+        Parser::new(Lexer::new(source).tokenize())
+            .parse()
+            .expect("parse に失敗")
+    }
+
+    /// link されていない import は、panic せずその行の internal エラーになる
+    /// （import は link 時に解決する前提。compile へ直接渡すのは host 側の誤用）。
+    #[test]
+    fn unlinked_import_is_internal_error_not_panic() {
+        let program = parse("let a = 1\nimport \"lib.tsg\"\n");
+        let error = Compiler::new()
+            .compile(&program)
+            .expect_err("link 前の import が compile できてしまった");
+        assert_eq!(error.kind(), Some(crate::error::ErrorKind::Internal));
+        assert_eq!(error.line(), 2);
+        assert!(error.message().contains("import"), "{}", error.message());
+    }
+
+    /// parser を通らずに組み立てた深すぎる AST も、compile の入口で
+    /// AST 深度の上限エラーになる（Rust の stack を使い切らない。threat-model TM-AT-07）。
+    #[test]
+    fn programmatic_ast_over_depth_limit_is_rejected_before_compiling() {
+        let mut expr = Expr::Int(1);
+        for _ in 0..crate::limits::MAX_AST_DEPTH + 10 {
+            expr = Expr::UnaryOp {
+                op: crate::ast::UnaryOpKind::Neg,
+                expr: Box::new(expr),
+            };
+        }
+        let program = vec![Stmt::Let {
+            name: "x".to_string(),
+            value: expr,
+            line: 3,
+        }];
+        for repl in [false, true] {
+            let result = if repl {
+                Compiler::new().compile_repl_line(&program)
+            } else {
+                Compiler::new().compile(&program)
+            };
+            let error = result.expect_err("深すぎる AST が compile できてしまった");
+            assert_eq!(
+                error.kind(),
+                Some(crate::error::ErrorKind::StackOverflow),
+                "repl={repl}"
+            );
+            assert!(
+                error.message().contains("ASTのネストが深すぎます"),
+                "repl={repl}: {}",
+                error.message()
+            );
+        }
+    }
+
+    /// REPL で compile に失敗した入力は、その入力で宣言した local を次の入力へ持ち越さない。
+    #[test]
+    fn failed_repl_line_rolls_back_compiler_state() {
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_repl_line(&parse("let a = 1\n"))
+            .expect("1 行目の compile に失敗");
+        let names = |c: &Compiler| c.locals.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&compiler), ["a"]);
+
+        // `let b` の後に link されていない import があり、入力全体が失敗する。
+        let error = compiler
+            .compile_repl_line(&parse("let b = 2\nimport \"lib.tsg\"\n"))
+            .expect_err("link 前の import が compile できてしまった");
+        assert_eq!(error.kind(), Some(crate::error::ErrorKind::Internal));
+        assert_eq!(names(&compiler), ["a"], "失敗した入力の local が残っている");
+
+        compiler
+            .compile_repl_line(&parse("let c = a\n"))
+            .expect("失敗の後の入力が compile できない");
+        assert_eq!(names(&compiler), ["a", "c"]);
+    }
+
+    /// registry に無い builtin 名は、panic せず internal エラーになる（source からは到達しない）。
+    #[test]
+    fn unknown_builtin_id_is_internal_error() {
+        let compiler = Compiler::new();
+        let error = compiler
+            .resolve_builtin_id("no_such_builtin", 7)
+            .expect_err("未登録の builtin が解決できてしまった");
+        assert_eq!(error.kind(), Some(crate::error::ErrorKind::Internal));
+        assert_eq!(error.line(), 7);
+        assert!(compiler.resolve_builtin_id("len", 1).is_ok());
+    }
+
+    /// jump でない命令や範囲外の offset を patch しようとすると、panic せず internal エラーになる。
+    #[test]
+    fn patch_jump_on_bad_offset_is_internal_error() {
+        let mut compiler = Compiler::new();
+        compiler.chunk.emit(OpCode::Add, 1);
+        let not_a_jump = compiler
+            .patch_jump(0)
+            .expect_err("jump でない命令を patch できてしまった");
+        assert_eq!(not_a_jump.kind(), Some(crate::error::ErrorKind::Internal));
+        let out_of_range = compiler
+            .patch_jump(99)
+            .expect_err("範囲外の offset を patch できてしまった");
+        assert_eq!(out_of_range.kind(), Some(crate::error::ErrorKind::Internal));
+    }
 }
