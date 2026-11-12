@@ -829,7 +829,7 @@ impl_pr    = 385
 # semantic-decisions §11.2）。parent は heap accounting を入れた REV-015。
 # order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
 # （done を含む全スライスで重複を弾く）。この PR では付け直しをせず、仮にすべてのスライスより後（97）に置いた。扱いは PR の
-# 判断の候補 Q1 に書く（PR #368・#381 の Q1=A と同じ状況）。見積もり: src/ 60〜140 行、触る仕組みは `for` の反復列の作り方
+# 判断の候補 Q1 に書き、Q1=A（判断役が選択（PR #388））に決まった。マージ後に PM が付け直しだけの状態整理 PR で 35 より前へ移す。見積もり: src/ 60〜140 行、触る仕組みは `for` の反復列の作り方
 # 1 つ、受入基準 4。
 [[slice]]
 id         = "fix-for-iter-snapshot-charge"
