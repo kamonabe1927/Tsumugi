@@ -316,7 +316,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "fix-heap-charge
 acceptance = ["HCN-AT-01..03"]
 design_pr  = 347
 depends_on = ["A-1"]
-order      = 32
+order      = 35
 
 # issue #290（kamonabe、「優先」）から作った不具合の fix 2 本と、その設計で見つかった関連の 1 本。
 # order は loop-runbook §8.1 の「優先」の既定（今ある ready・todo のすべてより前の空いている値）。
@@ -518,7 +518,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["F-2"]
-order      = 33
+order      = 36
 
 # audit-strict-cbor（strict deterministic CBOR、§9.2）は 1 PR の大きさの目安に収まらないため、
 # c1〜c4 の 4 スライスへ分割した（spec「audit-strict-cbor の sub-slice 分割」）。元の id は置き換えて残さない。
@@ -546,7 +546,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-06..10"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 34
+order      = 37
 
 [[slice]]
 id         = "audit-strict-cbor-c3"
@@ -558,7 +558,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-11..15"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 35
+order      = 38
 
 [[slice]]
 id         = "audit-strict-cbor-c4"
@@ -570,7 +570,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-16..20"]
 depends_on = ["audit-strict-cbor-c2", "audit-strict-cbor-c3"]
 design_pr  = 256
-order      = 36
+order      = 39
 
 [[slice]]
 id         = "audit-sink-required"
@@ -770,6 +770,10 @@ order      = 16
 # マージ後に PM が付け直しだけの状態整理 PR で今ある ready より前に移す（§8 の「先に出す」からの外れはここに記録として残す）。
 # 並びは D-69（host が止まらない経路）を先にした。budget-reservation-settle は不具合でなく未実装範囲の延期先なので、
 # §8 の「それ以外」の既定（すべてのスライスより後、96）。parent は scheduler・budget の最終形を扱う REV-015。
+# 付け直し（状態整理 PR、PM）: fix 2 本の 94・95 を 32・33 にした（今ある ready の fix-heap-charge-audit-notify より前）。0〜31 に
+# 空きが無いため、PR #381 の fix-fs-write-content-budgeted-render（97 → 34）と合わせて 32〜34 を空け、ready・todo どうしの相対順を保つよう、
+# fix-heap-charge-audit-notify を 32 → 35、fuel-bulk-charge を 33 → 36、audit-strict-cbor-c2・c3・c4 を 34・35・36 → 37・38・39 にした。
+# done のスライスの order と budget-reservation-settle（96）は変えていない。
 # fix-sync-run-concurrent-handle: 同期の Engine::execute・execute_repl_submission で他の nonterminal handle を検出して
 #   StartError::ConcurrentRunRequiresPolling を返す（execution-control §9.2、D-69）。見積もり src/ 30〜80 行、触る仕組みは
 #   scheduler の同期入口 1 つ、受入基準 2〜3（検出して開始しない・script work が 0・単独の handle では従来どおり）。
@@ -783,14 +787,14 @@ id         = "fix-sync-run-concurrent-handle"
 title      = "同期の Engine::execute・execute_repl_submission が他の nonterminal handle を検出して ConcurrentRunRequiresPolling を返し、戻らない経路を無くす（execution-control §9.2、loop:drift #373 D-69）"
 status     = "todo"
 parent     = "REV-015"
-order      = 94
+order      = 32
 
 [[slice]]
 id         = "fix-scheduler-context-reset-step-budget"
 title      = "scheduler 側の ExecutionContext::reset_step_budget（fuel だけを戻す公開メソッド）を削除する（execution-control §13、loop:drift #373 D-71）"
 status     = "todo"
 parent     = "REV-015"
-order      = 95
+order      = 33
 
 [[slice]]
 id         = "budget-reservation-settle"
@@ -806,6 +810,8 @@ order      = 96
 # （done を含む全スライスで重複を弾く）。この PR では付け直しをせず、仮にすべてのスライスより後（97）に置いた。扱いは PR の
 # 判断の候補 Q1 に書き、Q1=A（判断役が選択（PR #381））に決まった。マージ後に PM が付け直しだけの状態整理 PR で 32 より前へ移す。見積もり: src/ 50〜120 行、触る仕組みは fs host call の request payload
 # の作り方 1 つ、受入基準 4。
+# 付け直し（状態整理 PR、PM）: 97 を 34 にした（今ある ready の fix-heap-charge-audit-notify の旧 32 より前。#378 の fix 2 本の後）。
+# 詳しい対応は fix-sync-run-concurrent-handle の前のコメント。
 [[slice]]
 id         = "fix-fs-write-content-budgeted-render"
 title      = "write_file / append_file の Str でない第 2 引数を予算付きの render_display で 1 回だけ描画し、request bytes・書き込み内容・監査の body で共有する（execution-control §6.1・§7、issue #356）"
@@ -814,4 +820,4 @@ parent     = "REV-001"
 spec       = { doc = "docs/execution-control.md", section = "fix-fs-write-content-budgeted-render 実装スライス（`write_file` / `append_file` の内容の予算付き描画）" }
 acceptance = ["FWR-AT-01..04"]
 design_pr  = 381
-order      = 97
+order      = 34
