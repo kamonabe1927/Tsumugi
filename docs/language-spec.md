@@ -27,7 +27,7 @@
 
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
-| REPL（tree・VM）の import は link 時の resolver gate を通らず、import root を要さずに現在の作業ディレクトリからの相対パスで解決され、profile にかかわらず `TSUMUGI_SANDBOX` を読む。目標は、REPL もファイル・標準入力と同じく各入力を link 時に import root の下で解決し（未許可なら拒否）、`TSUMUGI_SANDBOX` を読まないことである。両 engine 共通で、[Capability Model仕様](capability-model.md) の目標（§10・§14.3・§14.4）との差でもあり、詳細は同仕様の逸脱一覧の REPL の import の行にある | 「モジュール / import」の「制約」、[Capability Model仕様](capability-model.md) §10・§14.3・§14.4 | E7（tree）、E9 の VM file/stdin 統合で据え置いた VM REPL |
+| REPL（tree・VM）の import は link 時の resolver gate を通らず、import root を要さずに現在の作業ディレクトリからの相対パスで解決され、profile にかかわらず `TSUMUGI_SANDBOX` を読む。import chain の深度も link で検証されず、129 段目は評価器内蔵 `ModuleLoader` の `import` ランタイムエラー `import 失敗: ネストが深すぎます (上限: 128)` になり、REPL は次の入力へ進む（詳細は[次期意味論・実装決定](semantic-decisions.md)の逸脱一覧の import chain の深度上限の行）。目標は、REPL もファイル・標準入力と同じく各入力を link 時に import root の下で解決し（未許可なら拒否）、深度も link 時に検証し、`TSUMUGI_SANDBOX` を読まないことである。両 engine 共通で、[Capability Model仕様](capability-model.md) の目標（§10・§14.3・§14.4）との差でもあり、詳細は同仕様の逸脱一覧の REPL の import の行にある | 「モジュール / import」の「制約」、「実行安全性」の「import chain深度制限」、[Capability Model仕様](capability-model.md) §10・§14.3・§14.4 | E7（tree）、E9 の VM file/stdin 統合で据え置いた VM REPL |
 
 この表は loop:drift #382 の D-82 を受けて、それまでの箇条書きの「現在の既知非適合」（詳細の参照先をロードマップとしていた）から移した。表に載せたのは、整合点検の輪番で tree・VM とも今も成り立つことを確かめた REPL の import の 1 行だけである。逸脱一覧の形に移す案（Q1=A）は判断役が選択した（issue #382）。理由: spec の実装状態の正本を各 spec の逸脱一覧 1 つとする [ドキュメント運用ガイド](documentation-guide.md)「状態の正本は粒度ごとに 1 箇所だけ」に合わせ、同ガイドの移行の規則（輪番で事実を確かめたものから寄せる）どおりに移す。参照先だったロードマップには該当する節も ID も無く、状態の正本が読み手に分からなかった（[マニフェスト](manifesto.md) 原則 9）。採らなかった案B（次に本書に触れる done の実装 PR まで今の形のままにする）は、その PR がいつ来るか決まっておらず、その間ロードマップと本書に状態が分かれたままになるため採らない。
 
