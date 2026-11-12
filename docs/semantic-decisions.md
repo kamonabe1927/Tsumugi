@@ -16,13 +16,14 @@ Q2=A。当時の[開発ループ手順書](loop-runbook.md) §7.5）。理由: �
 （§4〜§12・§17・§20 を実装と release ビルドの実行〔tree・`--vm`〕で照合）と、2026-11-01 に PR #309 で §5・§10・§14.3・
 §17.5・§20 を実装と照合して確かめた差だけである。照合していない節（§3・§13〜§16・§17.7・§17.8 ほか）の逸脱と、本文の
 節ごとに残る「ステータス」注記（§13・§14.1・§14.2 など）は、まだ表へ移していない。§10（AUD-036）・§20（`format_time` の
-`%z` / `%Z`）は照合の結果、逸脱が無かった。§17.7.9（issue #294 で足した節）の逸脱は PR #329 で解消し、行を削除した。§17.7 のほかの小節はまだ照合していない。
+`%z` / `%Z`）は照合の結果、逸脱が無かった。§17.7.9（issue #294 で足した節）の逸脱は PR #329 で解消し、行を削除した。§17.7 のほかの小節はまだ照合していない。§3.4 の import chain 深度上限の行は loop:drift #382 の D-78 で事実を確かめて足した（§3 のほかの行は照合していない）。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱と未実装範囲）
 
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
 | user call の評価順が目標と違う。目標（§5.1・§17.5.2）は「動的 callee を先に一度だけ評価・分類し、user callable の場合だけ step と深度を検査する」（callee 先行）だが、実装は現行の [言語仕様](language-spec.md)「ユーザー定義関数の呼び出し順序」のとおり「step と深度を検査してから callee を評価する」。tree（`src/eval.rs` の user call の準備で `begin_user_call` が callee の評価より前）と VM で同じで、深度 128 の内側で `[print("x"), g][1](…)` を呼ぶと、両 backend とも `x` を出さずに `overflow` になる。深度の境界値（128 user frame、§5.1）は両 backend で目標どおり。callee 先行への切り替えは `LanguageRevision` を上げる破壊的変更で、まだスライスが無い（ロードマップの REV-012 の `callee-precedence`） | §5.1・§17.5 | —（本ガイド導入前からの実装） |
+| import chain の深度上限が link 時の拒否にならない経路が残る。目標（§3.4 の「import chain深度上限」の行、[組み込みAPI仕様](embedding-api.md) §5、[Capability Model仕様](capability-model.md) §10）は全入口で深度を link 時に検証し 129 段目を catch 不能に拒否することだが、評価器内蔵の `ModuleLoader`（`src/module.rs` の `MAX_IMPORT_DEPTH` の検査）は 129 段目で constructor `import.depth`（`src/stable_error.rs` の `IMPORT_DEPTH`）の kind `import` のランタイムエラー `import 失敗: ネストが深すぎます (上限: 128)` を出す。kind `import` は catch 不能の種別（`src/error.rs` の `is_uncatchable`）に含まれないが、import はトップレベル限定なので script の `try` の内側には置けない。この経路を通るのは REPL（tree・VM）と scheduler の handle 経路（`Engine::compile` / `create_execution` / `start`）の import だけで、ファイル・標準入力は link 時に拒否する（`src/main.rs` の `LinkError::DepthExceeded`、`tests/depth_boundary.rs` の DBT-AT-02）。経路の差の正本は Capability Model仕様の逸脱一覧の REPL の import と scheduler の handle 経路の行 | §3.4 | E7（tree REPL）、E9 の VM file/stdin 統合で据え置いた VM REPL、exec-control Slice 3 PR-a（handle 経路） |
 | process-global の `OnceLock` が残る。目標（§14.3）は process-global な `OnceLock` を廃止し `FilesystemCapability` を実行 request へ注入することだが、`src/sandbox.rs` の `SANDBOX_PATHS`（`TSUMUGI_SANDBOX` を一度だけ読む `OnceLock`）が残り、評価器内蔵の `ModuleLoader`（`src/module.rs`）が import のファイルを読むときに `sandbox::check_path` で検査する。fs builtin は capability handle 経由に移っており（C10）、`OnceLock` を読まない。`ModuleLoader` を使うのは REPL と scheduler の handle 経路の import だけで（file/stdin の run 層は `fix-import-run-from-link-graph` で link の graph から展開するようになり `OnceLock` を読まない）、scheduler の handle 経路の差は [Capability Model仕様](capability-model.md) の逸脱一覧（§10）にある | §14.3 | —（本ガイド導入前からの実装。fs builtin の移行は C10） |
 
 ## 1. 本書の位置づけ
@@ -122,7 +123,7 @@ message内の型名は `Int`、`Float`、`Str`、`Bool`、`Null`、`List`、`Dic
 | collection上限 | `collection_limit` | `コレクション要素数が上限を超えました: {requested} (上限: {limit})` |
 | user function depth上限 | `overflow` | `スタックオーバーフロー: 再帰が深すぎます (上限: 128)` |
 | AST深度上限 | `overflow` | `AST のネストが深すぎます (上限: 256)` |
-| import chain深度上限 | `import` | `import 失敗: ネストが深すぎます (上限: 128)` |
+| import chain深度上限（root scriptを除く129段目のimport） | —（runtime errorにしない。link時に`LinkError::DepthExceeded { limit: 128 }`で拒否し、catch不能で1文も実行しない） | CLIの診断 `import のネストが深すぎます (上限: 128)`。評価器内蔵`ModuleLoader`のconstructor `import.depth`（`src/stable_error.rs`の`IMPORT_DEPTH`）が残る経路は冒頭の逸脱一覧 |
 | import先が存在しない・読めない | `import` | `import に失敗しました: モジュールを読み込めません: {module}` |
 | import先のparse失敗 | `import` | `import に失敗しました: モジュールの構文が不正です: {module}` |
 | 同じ`ExecutionContext`で同じmodule IDの別内容（source hashが違う）を展開しようとした | `import` | `import に失敗しました: 同じモジュールが別の内容で既に展開されています: {module}` |
@@ -149,6 +150,8 @@ message内の型名は `Int`、`Float`、`Str`、`Bool`、`Null`、`List`、`Dic
 | VM/Compiler不変条件違反 | `internal` | `内部エラー: {stable_detail}` |
 
 `{state}`、`{reason}`、`{operation}`、`{category}` は各BuiltinSpecまたはoperation constructorが列挙型から選び、任意のOS文字列を入れない。import先のparse error詳細はcauseとして保持し、CLIはwrapperに続けて同じcanonical parse diagnosticsをsource順に表示する。
+
+「import chain深度上限」の行は、loop:drift #382 の D-78 を受けて、`import` ランタイムエラーの文言から link 時の拒否に直し、評価器内蔵 `ModuleLoader` の文言は冒頭の逸脱一覧の 1 行に移した（Q1=A、判断役が選択（PR #384））。理由: 目標では深度は link で検証し（[組み込みAPI仕様](embedding-api.md) §5）、REPL の各入力と scheduler の handle 経路も link を通す（[Capability Model仕様](capability-model.md) §10、issue #327 の Q1=A・Q2=A）ので、`ModuleLoader` の文言は目標ではなく現状であり、本文に実装状態を書かない[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」と、逸脱一覧を新設した loop:drift #302 の D-20 Q2=A に合わせる。同じ PR で [言語仕様](language-spec.md) を同じ形に直したのとも揃う（[マニフェスト](manifesto.md) 原則 9）。採らなかった案B（行を残し、REPL・handle 経路だけで出る文言と注記する）は、目標の章に実装状態を書くことになり、関係するスライス（fix-repl-import-gate-tree / -vm は `blocked`、fix-handle-import-from-link は `todo`）が done になるまで注記が本文に残って状態の正本が 2 箇所になるため採らない。案C（`ModuleLoader` 側の文言を link 時の診断にそろえる `fix` スライスを足す）は、その経路が catch 不能の link 時の拒否にならない差は文言以外で残り、目標で使わなくなる経路に実装とテストを足すことになるため採らない（原則 8）。
 
 この表は言語core runtime error constructorの全inventoryである。新しいcore constructorを追加するPRは、既存行へ対応付けるか新しいcanonical行を追加しなければCIを通過してはならない。core外のHostFunction adapterは、登録時に静的 `HostErrorSpec` extension table（kind、message template、placeholder列挙、catch可否）を同時登録し、同じinventory testへ連結する。HTTP adapterのextension正本は16.12節であり、未登録adapterのerror constructorは実行できない。filesystem builtinのうち仕様上Null/Falseを返すOS失敗はruntime error constructorではないため表の対象外だが、capability拒否は必ず表の`filesystem capability拒否`を使う。
 
