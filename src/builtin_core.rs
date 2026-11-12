@@ -1026,15 +1026,40 @@ pub fn is_host_call_builtin(name: &str) -> bool {
 ///
 /// write/append は書き込む内容の byte 長、read 系は request payload を持たないため 0。
 /// path 引数の byte は本 Slice では request に含めない（write 内容だけを payload とする）。
+///
+/// write/append の第 2 引数は [`render_fs_content_budgeted`] で `Str` へ描画済みであること
+/// （境界が request 課金の前に必ず通す）。`Str` 以外は予算を見ない描画をしないため 0 とする。
 pub fn host_call_request_bytes(name: &str, args: &[Value]) -> u64 {
     match name {
         "write_file" | "append_file" => match args.get(1) {
             Some(Value::Str(s)) => s.len() as u64,
-            Some(other) => other.to_string().len() as u64,
-            None => 0,
+            _ => 0,
         },
         _ => 0,
     }
+}
+
+/// write/append の第 2 引数が `Str` でなければ、予算付きの `render_display` で 1 回だけ描画し、
+/// 描画結果の `Str` で `args[1]` を置き換える（execution-control §6.1・§7、issue #356）。
+///
+/// request bytes の算出・`dispatch_fs` の書き込み内容・監査の request body は、この 1 回の描画
+/// 結果を共有する。描画は fuel と `max_single_string_bytes` で有限に止まり、`ControlStop` は
+/// 呼び出し側が terminal にする。`Str` 引数・引数 2 未満・他の builtin では何もしない。
+pub fn render_fs_content_budgeted(
+    name: &str,
+    args: &mut [Value],
+    budget: &mut crate::budget::BudgetLedger,
+) -> Result<(), crate::budget::ControlStop> {
+    if !matches!(name, "write_file" | "append_file") {
+        return Ok(());
+    }
+    if let Some(content) = args.get_mut(1)
+        && !matches!(content, Value::Str(_))
+    {
+        let rendered = budget.render_display(content, crate::budget::ExecutionPhase::Run)?;
+        *content = Value::str_constant(rendered);
+    }
+    Ok(())
 }
 
 /// host call の response payload byte 長（host から受け取る内容）。§6.1、REV-015 Slice 2。
@@ -1180,8 +1205,8 @@ pub(crate) fn host_call_body_values(
     {
         bodies.request = match args.get(1) {
             Some(Value::Str(s)) => Some(utf8(s.as_str())),
-            Some(other) => Some(utf8(&other.to_string())),
-            None => None,
+            // 非 Str は境界で描画済みの Str になっている（[`render_fs_content_budgeted`]）。
+            _ => None,
         };
     }
     if policy.allows_body_reveal(&key(AuditDirection::Response, "body"), response_bytes) {
@@ -1791,7 +1816,7 @@ pub fn dispatch_filesystem_capability(
         "write_file" => {
             check_arity(name, args, 2, line)?;
             let path = require_str(&args[0], name, 1, line)?;
-            let content = fs_content_arg(&args[1]);
+            let content = fs_content_arg(&args[1], name, line)?;
             let mut file = fs_open(
                 name,
                 filesystem,
@@ -1809,7 +1834,7 @@ pub fn dispatch_filesystem_capability(
         "append_file" => {
             check_arity(name, args, 2, line)?;
             let path = require_str(&args[0], name, 1, line)?;
-            let content = fs_content_arg(&args[1]);
+            let content = fs_content_arg(&args[1], name, line)?;
             let mut file = fs_open(
                 name,
                 filesystem,
@@ -1971,12 +1996,10 @@ pub fn dispatch_filesystem_capability(
     }
 }
 
-/// write/append の content 引数を文字列化する（`Str` はそのまま、他は `to_string`）。
-fn fs_content_arg(value: &Value) -> String {
-    match value {
-        Value::Str(s) => s.to_string(),
-        other => other.to_string(),
-    }
+/// write/append の content 引数を取り出す。境界が [`render_fs_content_budgeted`] で `Str` へ
+/// 描画済みにするので、予算を見ない `Display` の描画はここでは行わず、`Str` 以外は型エラーにする。
+fn fs_content_arg(value: &Value, name: &str, line: usize) -> Result<String, TsumugiError> {
+    Ok(require_str(value, name, 2, line)?.to_string())
 }
 
 /// filesystem 操作失敗を canonical `host` error（category `filesystem`）へ写す。

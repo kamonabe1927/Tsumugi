@@ -815,9 +815,10 @@ order      = 96
 [[slice]]
 id         = "fix-fs-write-content-budgeted-render"
 title      = "write_file / append_file の Str でない第 2 引数を予算付きの render_display で 1 回だけ描画し、request bytes・書き込み内容・監査の body で共有する（execution-control §6.1・§7、issue #356）"
-status     = "ready"
+status     = "done"
 parent     = "REV-001"
 spec       = { doc = "docs/execution-control.md", section = "fix-fs-write-content-budgeted-render 実装スライス（`write_file` / `append_file` の内容の予算付き描画）" }
 acceptance = ["FWR-AT-01..04"]
 design_pr  = 381
 order      = 34
+impl_pr    = 385
