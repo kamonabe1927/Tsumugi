@@ -2431,4 +2431,129 @@ mod tests {
         };
         assert_eq!(l.len(), n);
     }
+
+    // ---- 異常系: 上限を超える値の操作は拒否され、台帳を壊さない ----
+
+    /// heap の上限を超える allocation は `BudgetExceeded` になり、live heap を増やさない
+    /// （List / Str / Dict のどれでも）。
+    #[test]
+    fn over_limit_allocation_leaves_live_heap_unchanged() {
+        let mut budget = heap_ledger(heap_size::list_body(1));
+        let held = Value::new_list(vec![Value::Int(1)], &mut budget, ExecutionPhase::Run)
+            .expect("上限ちょうどの List が作れない");
+        let before = budget.live_heap_bytes();
+
+        let list = Value::new_list(vec![Value::Int(2)], &mut budget, ExecutionPhase::Run);
+        assert!(matches!(
+            list,
+            Err(crate::budget::ControlStop::BudgetExceeded(_))
+        ));
+        assert_eq!(budget.live_heap_bytes(), before);
+
+        let string = Value::new_str("x".to_string(), &mut budget, ExecutionPhase::Run);
+        assert!(matches!(
+            string,
+            Err(crate::budget::ControlStop::BudgetExceeded(_))
+        ));
+        assert_eq!(budget.live_heap_bytes(), before);
+
+        let mut map = BTreeMap::new();
+        map.insert("k".to_string(), Value::Int(1));
+        let dict = Value::new_dict(map, &mut budget, ExecutionPhase::Run);
+        assert!(matches!(
+            dict,
+            Err(crate::budget::ControlStop::BudgetExceeded(_))
+        ));
+        assert_eq!(budget.live_heap_bytes(), before);
+
+        drop(held);
+        assert_eq!(budget.live_heap_bytes(), 0);
+    }
+
+    /// push で heap の上限を超えると `BudgetExceeded` になり、live heap は上限を超えない。
+    #[test]
+    fn push_over_heap_limit_is_budget_exceeded_and_stays_within_limit() {
+        let limit = heap_size::list_body(1);
+        let mut budget = heap_ledger(limit);
+        let mut list = Value::new_list(vec![], &mut budget, ExecutionPhase::Run).unwrap();
+        list.list_push_tracked(Value::Int(1), &mut budget, ExecutionPhase::Run)
+            .expect("上限ちょうどまでの push が失敗した");
+        assert_eq!(budget.live_heap_bytes(), limit);
+        let over = list.list_push_tracked(Value::Int(2), &mut budget, ExecutionPhase::Run);
+        assert!(matches!(
+            over,
+            Err(crate::budget::ControlStop::BudgetExceeded(_))
+        ));
+        assert!(
+            budget.live_heap_bytes() <= limit,
+            "live heap が上限を超えた: {}",
+            budget.live_heap_bytes()
+        );
+    }
+
+    /// 深度が上限に届いた値は、要素にしようとすると `overflow` で拒否される。1 段浅ければ通る
+    /// （semantic-decisions §21.3、threat-model TM-AT-07）。
+    #[test]
+    fn check_element_depth_rejects_value_at_max_depth() {
+        let mut budget = heap_ledger(u64::MAX);
+        // `[]` の深度は 1。包むたびに 1 増える。
+        let mut value = Value::new_list(vec![], &mut budget, ExecutionPhase::Run).unwrap();
+        while (value.depth() as usize) < MAX_VALUE_DEPTH - 1 {
+            value = Value::new_list(vec![value], &mut budget, ExecutionPhase::Run).unwrap();
+        }
+        assert!(value.check_element_depth(1).is_ok());
+        assert!(Value::check_elements_depth([&Value::Int(0), &value].into_iter(), 1).is_ok());
+
+        let value = Value::new_list(vec![value], &mut budget, ExecutionPhase::Run).unwrap();
+        assert_eq!(value.depth() as usize, MAX_VALUE_DEPTH);
+        let error = value
+            .check_element_depth(9)
+            .expect_err("上限の深度の値を要素にできてしまった");
+        assert_eq!(error.kind(), Some(crate::error::ErrorKind::StackOverflow));
+        assert_eq!(error.line(), 9);
+        assert!(
+            Value::check_elements_depth([&Value::Int(0), &value].into_iter(), 9).is_err(),
+            "複数要素の検査で深すぎる要素を見逃した"
+        );
+    }
+
+    /// 予算付きの比較は、fuel が足りなければ途中で止まる。足りれば予算無しの比較と同じ結果になる。
+    #[test]
+    fn compare_budgeted_stops_when_fuel_runs_out() {
+        let a = list((0..100).map(int).collect());
+        let b = list((0..100).map(int).collect());
+        let mut short = fuel_ledger(10);
+        assert!(matches!(
+            TotalOrder::compare_budgeted(&a, &b, &mut short, ExecutionPhase::Run),
+            Err(crate::budget::ControlStop::BudgetExceeded(_))
+        ));
+        let mut enough = fuel_ledger(1_000);
+        assert_eq!(
+            TotalOrder::compare_budgeted(&a, &b, &mut enough, ExecutionPhase::Run),
+            Ok(TotalOrder::compare(&a, &b))
+        );
+    }
+
+    /// 空の List の pop と、List でない値への push / pop は何もしない（型の検査は呼び出し側）。
+    #[test]
+    fn pop_on_empty_and_mutation_on_non_list_are_no_ops() {
+        let mut budget = heap_ledger(1_000_000);
+        let mut empty = Value::new_list(vec![], &mut budget, ExecutionPhase::Run).unwrap();
+        let before = budget.live_heap_bytes();
+        empty
+            .list_pop_tracked(&mut budget, ExecutionPhase::Run)
+            .expect("空の List の pop が失敗した");
+        assert_eq!(budget.live_heap_bytes(), before);
+        assert!(matches!(&empty, Value::List(l) if l.data.is_empty()));
+
+        let mut scalar = Value::Int(5);
+        scalar
+            .list_push_tracked(Value::Int(1), &mut budget, ExecutionPhase::Run)
+            .expect("List でない値への push が失敗した");
+        scalar
+            .list_pop_tracked(&mut budget, ExecutionPhase::Run)
+            .expect("List でない値への pop が失敗した");
+        assert!(matches!(scalar, Value::Int(5)));
+        assert_eq!(budget.live_heap_bytes(), before);
+    }
 }
