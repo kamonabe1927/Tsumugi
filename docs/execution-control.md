@@ -1,6 +1,6 @@
 # Tsumugi 実行予算・協調実行仕様
 
-最終更新: 2026-11-11
+最終更新: 2026-11-12
 
 設計ステータス: **到達目標の確定仕様（§1〜§13）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -37,6 +37,7 @@ handle 経路を §3 の `ExecutionRequest` と組み込みAPI仕様 §8 の `Ex
 | `PollResult::Terminal` の `outcome` は [組み込みAPI仕様](embedding-api.md) §8 の `ExecutionOutcome` でなく、`src/engine.rs` の別の `ExecutionOutcome`（crate root では `ExecutionOutcome`）で、variant は `Completed` / `RuntimeError` / `LinkError` / `Cancelled` / `DeadlineExceeded` の 5 つだけである（予算超過は `RuntimeError` に含まれ、`Denied` / `Exited` / `HostError` / `BudgetExceeded` などが無い。variant は `usage` を持たず、最終 usage は `PollResult::Terminal.usage` で観測する）。scheduler の `Engine` が監査 sink を持たない点は [決定性・実行時監査仕様](determinism-and-audit.md) の逸脱一覧に B-1 としてある | §9.1 | Slice 3 PR-a |
 | imported module record（§5.1）の heap 課金は、評価器内蔵 `ModuleLoader` を使う経路では `ModuleId` の UTF-8 byte 長でなく canonical path（host path）の byte 長で数える。該当するのは tree REPL（`Engine::run_for_repl` → `Evaluator::begin_execution`）・VM REPL（`src/main.rs` の `Vm::charge_link(&[LoadedModule])`）と、scheduler の handle 経路（`src/engine.rs` の初回 poll の `begin_execution`）である。file/stdin の `Engine::run`・`run_audited` と VM file/stdin は `ModuleId` の byte 長で数える（fix-import-run-from-link-graph） | §5.1 | REV-015 PR-d |
 | 同期の `Engine::execute`・`execute_repl_submission`（`src/engine.rs`、crate root の `Engine`）は、同じ `Engine` に他の nonterminal な handle があっても `StartError::ConcurrentRunRequiresPolling` を返さずに開始する。terminal まで poll する `drive_to_outcome` は `Yielded` で `continue` するだけなので、run-turn queue の先頭でない handle は `SchedulerPreempted` の `Yielded` を受け続け、呼び出しが戻らない（例: 同じ `Engine` で handle h1 を `max_fuel: 100` で 1 回 poll して `Yielded` にしたあと、別の context で `execute` を呼ぶ）。variant は `src/scheduler.rs` に定義済みだが検出は配線しておらず、その doc の「同期入口は構造的にこの状況を起こさない」は事実と異なる。fix スライス fix-sync-run-concurrent-handle で直す（`src/scheduler.rs` の variant の doc の誤りも同じスライスで直す。loop:drift #373 D-69） | §9.2 | Slice 3 PR-a（Slice 5 の run-turn FIFO で顕在化） |
+| `for` の反復列（§5.2 の最後の項）が課金されない。tree evaluator（`src/eval.rs` の `materialize_for_items`）は、List の反復を backing の `Rc` 共有でなく `(**list).clone()` による全要素の複製で始め、Dict の key・Str の文字の反復列も `Value::str_constant` の未課金の `Str` で作る。どれも live heap に課金されず、For frame（`FrameKind::For` の `items`）は `heap_charge: 0` のまま保持する。関数の再帰の中で同じ List を `for` すると深さの数だけ複製が積み上がり、64 MiB の heap 上限に当たらないまま Rust の allocation 失敗でプロセスが abort する（issue #358 の再現。`--vm` は同じ script を完了するので backend 差でもある）。VM（`src/vm.rs` の `ToIterList`）は List を共有するが、Dict・Str の反復列は List body だけを課金し、要素の `Str` を live heap にも §5.3 の `string_allocations`・`string_bytes` にも数えない。fix スライス fix-for-iter-snapshot-charge で直す | §5.2/§5.3 | AUD-047（[次期意味論・実装決定](semantic-decisions.md) §11 の COW 化）、REV-015 PR-b（heap 課金） |
 | scheduler（`src/engine.rs`、crate root の `ExecutionContext`）の `ExecutionContext` は、§13 の目標に無い公開メソッド `reset_step_budget()` を持つ。中身は `Evaluator::reset_step_budget` → `budget.reset_fuel()` で、同じ ledger の fuel だけを戻す（heap・I/O などの使用量は戻さない）。src・tests に呼び出し元は無い。facade の `embedding::ExecutionContext` には無い。fix スライス fix-scheduler-context-reset-step-budget で直す（loop:drift #373 D-71） | §13 | Slice 1（legacy adapter） |
 
 ## 未実装範囲（目標仕様 §1〜§13 のうち未着手・延期中）
@@ -385,6 +386,7 @@ continuation frameの課金対象は、スコープを作るframe（96 + local s
 - objectへの最後のexecution内参照が消えた時点でlive heapをreleaseする。cycle等により到達可能性が残るobjectはreleaseしない。
 - 物理artifactを複数executionが共有しても、各executionは自分のquotaへ1回ずつ論理サイズを課金する。一方のexecutionのbudgetを他方が肩代わりしない。
 - `AllocationId`の発行overflowは`InternalFailure(AllocationIdExhausted)`であり、0へwrapしない。
+- `for`の反復列もこの規則に従う。Listの反復は開始時のbackingを`Rc`で共有して保持し（[次期意味論・実装決定](semantic-decisions.md) §11.2）、要素を複製せず追加課金しない。Dictのkey・Strの文字から反復列を作る場合は新objectなので、作るList bodyと各要素のString body（§5.1）をallocation前に課金し、各要素を§5.3の`string_allocations`・`string_bytes`にも数える（builtinの結果の`String`と同じ）。反復列はloopの終わり（`break`・`return`・errorによる脱出を含む）で最後の参照が消えてreleaseする。tree-walk版とVM版で課金の有無・量・順序とrelease寿命を揃える（issue #358）。
 
 `ExecutionContext`に以前から残る変数・closure・collectionは、新executionを`Linked`へ進めるときに到達graphを反復worklistで走査し、baseline live heapとして課金する。baselineが上限を超える場合はscriptを1文も実行せず`BudgetExceeded(HeapBytes)`となる。再帰走査は使わず、同じ`AllocationId`をvisited setで除外する。
 
@@ -2668,6 +2670,36 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
   - **FWR-AT-02（grant 有りでも外部効果の前に止まる）:** fs の write を grant した実行で、描画が fuel または `max_single_string_bytes` を超える第 2 引数の `write_file` / `append_file` が、adapter を呼ばずに `BudgetExceeded` の terminal で止まり、`try` / `catch` で捕捉されない。committed の `host_request_bytes` と `host_calls` は増えない。これを、描画が fuel を超える場合（`BudgetExceeded(Fuel)`）と描画が `max_single_string_bytes` を超える場合（`BudgetExceeded(SingleStringBytes)`）のそれぞれで確かめる。確かめ方: 呼び出しを記録する fake の filesystem adapter（または一時 directory の root）を使い、2 つの資源の超過それぞれについて、超過の resource・adapter 呼び出し 0・ファイル無し・usage を確かめるテスト（両 backend）。
   - **FWR-AT-03（書き込み内容と request bytes は変わらない）:** 予算内の List / Dict / 入れ子 / スカラー（Int・Float・Bool・Null）を第 2 引数にした `write_file` / `append_file` の書き込まれた内容と committed の `host_request_bytes` が変更前と同じ（`Display` の描画と同じ文字列・同じ長さ）で、`Str` の第 2 引数の fuel・`host_request_bytes` も変更前と同じである。tree-walk 版と VM 版で同じ。確かめ方: 一時 directory に書いた内容と usage を比べる統合テスト（両 backend）。
   - **FWR-AT-04（描画の fuel は `print` と同じ・監査の body も同じ）:** 同じ値を `print` したときと `write_file` したときの描画による fuel の増分が一致する。body の Reveal を許す redaction policy の監査付き実行（tree）で、`HostCallStarted` の request body が書き込まれた内容と同じ文字列になる。監査付き実行（tree）で、描画の fuel を含む `BudgetCharged` は、その host call の `HostCallStarted` の後に出る（host call より前の消費の `BudgetCharged` は従来どおり `HostCallStarted` の前で、描画の fuel を含まない）。確かめ方: usage の fuel を比べるテスト（両 backend）と、`tests/audit_redaction.rs` か `tests/audit_hostcall.rs` の形の監査のテスト（request body と、`BudgetCharged` と `HostCallStarted` の相対順と、それぞれの fuel の `committed_delta`）。
+
+### fix-for-iter-snapshot-charge 実装スライス（`for` の反復列を共有・課金する）
+
+[issue #358](https://github.com/kamonabe1927/Tsumugi/issues/358) から作ったスライス（不具合の修正、`slices.toml` の `fix-for-iter-snapshot-charge`）。issue の仕分けで「受け入れ」とした。直し方は §5.2（`Rc` 共有は追加課金しない・新 object は allocation 前に課金する）・§5.3（新規 String body を累積に数える）と [次期意味論・実装決定](semantic-decisions.md) §11.2 の「for は開始時の Rc snapshot を保持する」で決まる。この設計 PR で §5.2 に `for` の反復列の項を書き足した（新しい規則ではなく、§5.1〜§5.3 と §11.2 を `for` に当てはめたもの）。
+
+- **現状の不具合:** 冒頭の逸脱一覧の `for` の反復列の行のとおり。tree の `materialize_for_items`（`src/eval.rs`）は List を `(**list).clone()` で全要素複製し（要素は `Rc` の複製だが、要素数ぶんの `Vec<Value>` を未課金で確保する）、Dict の key・Str の文字は `Value::str_constant` の未課金の `Str` で作る。結果の `Vec<Value>` は `FrameKind::For` の `items` に入り、frame は `heap_charge: 0` である。同期の `exec_stmt` 経路と、式 frame から反復元を受け取る `CallDest::ForIter` 経路の両方が同じ関数を通る。issue #358 の再現（`xs = range(0, 1000000)` を深さ 120 の再帰の各段で `for`）は、tree では深さの数だけ未課金の複製が積み上がって Rust の allocation 失敗で abort（exit 134）し、`--vm` は `done` を出して完了する。VM の `ToIterList`（`src/vm.rs`）は List をそのまま積む（共有）が、Dict・Str は `str_constant` の要素で `Value::new_list` を作るので、List body（24 + 32 × 要素数）だけが課金され、要素の String body と §5.3 の累積は数えない。VM は要素を作ってから `check_collection` を呼ぶ。
+- **実装範囲:**
+  - **List:** tree の反復列は反復元の List の backing を `Rc` で共有して持ち（`Value::List` の clone）、要素を複製しない。For frame は共有した List と次の index を持ち、反復ごとに要素を 1 つ取り出す（要素の `Value` の clone）。`heap_charge` は 0 のまま（共有は追加課金しない、§5.2）。反復中に元の binding を変更・再代入しても、変更側が COW で detach するので反復列は開始時の要素のまま（§11.2。今の観測挙動を変えない）。VM の List の扱いは今のまま。
+  - **Dict・Str:** 反復列を作る処理を tree と VM で 1 つの関数にまとめ（例: `src/value.rs` か `src/budget.rs` に `BudgetLedger` を受け取る関数を置く。形は実装に任せる）、両 backend がそれを通る。手順は次の順とする。
+    1. `check_collection(要素数)`（今と同じ上限・同じエラー。VM も要素を作る前に検査する）。
+    2. 反復の順（Dict は key のコードポイント順、Str は文字の順）に要素ごとに、§5.3 の累積（`charge_string`：`string_allocations` +1・`string_bytes` + byte 長・`max_single_string_bytes`）を課金してから文字列を複製し、§5.1 の String body（24 + byte 長）を live heap に課金した tracked な `Str` にする。
+    3. 最後に List body（24 + 32 × 要素数）を課金した tracked な List にする。
+    量と順序は builtin の List 結果に `track_result`（`src/budget.rs`）がかけるもの（子の `Str` を累積 → String body の順に課金し、最後に List body）と同じである。どこかで上限を超えたら、その時点の `ControlStop` を `control_stop_to_error` で terminal にし（catch できない予算超過）、作りかけの要素は drop で release する。1 要素を複製する前に累積の課金（`max_single_string_bytes` の検査を含む）を済ませるので、未課金の確保は高々 1 要素ぶんで、その大きさは単一文字列の上限で抑えられる。
+  - tree の For frame は、Dict・Str でもこの tracked な List を共有した List と同じ形で持つ（List / Dict / Str で frame の形を分けない）。反復列はループの終わり（最後の要素を処理した後・`break`・`return`・error による frame の巻き戻し）で frame とともに drop され release される。反復元の値（今の `_collection`）を frame が保持し続けるかは今のままでよい（live heap の寿命を変えない）。
+  - done にする実装 PR で、本書の逸脱一覧の `for` の反復列の行と、[言語仕様](language-spec.md) の逸脱一覧の同じ行を削除する。
+- **範囲外:**
+  - Dict・Str の反復列を、開始時に全部作らず反復ごとに 1 要素ずつ作る形（遅延）への変更。今の両 backend の形（開始時にまとめて作る。VM の `ToIterList` の「Dict → keys のリスト、Str → 1 文字ずつのリスト」）を保ち、課金だけを §5.1〜§5.3 に合わせる。遅延にすると live heap・peak・`string_allocations` の数え方と超過の位置が変わり、VM の命令も変わるので、ここでは扱わない。
+  - `for` の fuel（反復ごとの `count_step`）。変えない。
+  - `map` / `filter` / `each` など、`for` 以外で collection を反復する builtin の課金。
+  - [次期意味論・実装決定](semantic-decisions.md) §11.10（実装状況）の「for は `(**list).clone()` で開始時点の要素を snapshot する」は当時の記録なので書き換えない（規範は §11.2 で、本スライスはそれに合わせる）。
+- **課金の変化:**
+  - List の `for`: heap・peak_heap・fuel・string の累積は変わらない（今も複製は未課金で、共有にしても課金は増減しない）。物理的な確保だけが要素数ぶん減る。
+  - Dict・Str の `for`: tree は反復列の List body と各要素の String body が live heap・peak_heap に載り、要素数と byte 長の合計が `string_allocations`・`string_bytes` に加わる。VM は各要素の String body と同じ累積が加わる（List body は今も課金している）。どちらもループの終わりで live heap は元に戻る（累積は減らない）。この結果、たとえば 100 万文字の文字列の `for` は既定の `max_string_allocations`（1,000,000）に当たりうる。§5.1 の論理サイズ表と §4.1 の課金表は変えず、既存の表の対象（新規の List body・String body と §5.3 の累積）への課金の漏れを埋める修正なので、`heap_accounting_revision`・`fuel_accounting_revision`・`language_revision` は変えない（fix-push-snapshot-writeback と同じ扱い）。
+- **着手順（`order`）:** [開発ループ手順書](loop-runbook.md) §8 の「不具合の報告」の既定は「今ある `ready` より前」だが、この設計の時点で `ready` の最小は 35（fix-heap-charge-audit-notify）で、0〜34 は done を含めてすべて使われていた。この PR では仮にすべてのスライスより後（97）に置いた。扱いは PR の判断の候補 Q1 に書く（PR #368・#381 の Q1=A と同じ状況）。
+- **想定の変更規模:** `src/` は 60〜140 行程度（Dict・Str の反復列を作る共通の関数 30〜60 行、tree の `materialize_for_items`・`FrameKind::For`・`enter_for`・反復の取り出しの書き換え 20〜50 行、VM の `ToIterList` を共通の関数へ寄せる 10〜30 行）。テストは `tests/` に 150〜300 行。触る仕組みは「`for` の反復列の作り方」1 つ（tree の 2 経路と VM が同じ規則を通る）。受入基準は 4 項目。[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
+- **受入基準:**
+  - **FIS-AT-01（List の反復で複製しない）:** 関数の再帰の各段で同じ List を `for` する script（issue #358 の再現を、CI で走る大きさに縮めたもの。例: 要素 10 万・深さ 120）が、tree-walk 版でも VM 版と同じ stdout（`done`）・exit 0 で終わる。tree で、深さを固定して要素数を 10 倍にしたときの確保バイト数の増分が、反復元の List を 1 回作る量の定数倍に収まり、深さに比例しない。確かめ方: CLI を subprocess で起動して stdout・exit code を比べるテスト（両 backend）と、`tests/scaling.rs` のカウントアロケータで確保量を測るテスト（両 backend）。
+  - **FIS-AT-02（反復の意味は変わらない）:** ループ中に元の binding へ `push`・`pop`・index 代入・再代入をしても反復列が開始時の要素のままであること（List・Dict）、Dict の key のコードポイント順、Str の文字の順、`break`・`continue`・`return`・`try` の中での脱出が、変更前と同じ出力になる。tree-walk 版と VM 版で同じ。既存の golden fixture（`for_iteration_snapshot`・`collection_cow_alias` など）・`tests/differential.rs`・`tests/scaling.rs` が、Dict・Str の `for` の heap・string の累積の期待値（上の「課金の変化」のとおり）を除いて変更なしで通る。確かめ方: 既存のテストと、足りない形を足した golden fixture（両 backend）。期待値を変えたテストは PR 本文に列挙する。
+  - **FIS-AT-03（Dict・Str の反復列の課金）:** Dict（長さの違う key を含む）と Str（ASCII と複数 byte の文字を含む）の `for` で、ループの前後の `string_allocations`・`string_bytes` の増分が要素数・byte 長の合計と一致し、tree と VM で完全一致する。ループ本体の中で観測した live heap が、ループの前より List body（24 + 32 × 要素数）と String body（24 + byte 長）の合計ぶん多く（tree と VM で課金の有無が一致し）、ループの後（最後まで回した場合と `break` で抜けた場合）に元へ戻る。確かめ方: usage を観測する統合テスト（両 backend。`tests/differential.rs` の軸 (A) の exact 突合と、live heap の差分を測るテスト）。
+  - **FIS-AT-04（上限で止まる）:** 関数の再帰の各段で同じ Dict（長い key を含む）・同じ Str を `for` する script が、`max_live_heap_bytes` を小さくした実行で `BudgetExceeded(HeapBytes)`、`max_string_allocations` を小さくした実行で `BudgetExceeded(StringAllocations)` の terminal で止まり、`try` / `catch` で捕捉されず、プロセスは abort しない。terminal の `TsumugiError` 全 field と string の累積が tree と VM で一致する。要素数が `max_collection_elements` を超える Dict・Str は、要素を作る前に今と同じ collection の上限のエラーになる。確かめ方: 上限を設定した in-process の実行で terminal と usage を比べるテスト（両 backend）。
 
 ### legacy env の入口の実装記録（旧「§13 実装注記（2026-10-20）」）
 
