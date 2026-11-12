@@ -838,4 +838,5 @@ status     = "ready"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-for-iter-snapshot-charge 実装スライス（`for` の反復列を共有・課金する）" }
 acceptance = ["FIS-AT-01..04"]
+design_pr  = 388
 order      = 97
