@@ -1760,24 +1760,24 @@ impl Vm {
                         self.check_collection(size, line)?;
                         value
                     }
-                    Value::Dict(ref map) => {
-                        let size = map.len();
-                        let keys: Vec<Value> =
-                            map.keys().map(|k| Value::str_constant(k.clone())).collect();
-                        self.check_collection(size, line)?;
-                        Value::new_list(keys, &mut self.budget, ExecutionPhase::Run)
-                            .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?
-                    }
-                    Value::Str(ref s) => {
-                        let size = s.chars().count();
-                        let chars: Vec<Value> = s
-                            .chars()
-                            .map(|c| Value::str_constant(c.to_string()))
-                            .collect();
-                        self.check_collection(size, line)?;
-                        Value::new_list(chars, &mut self.budget, ExecutionPhase::Run)
-                            .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?
-                    }
+                    Value::Dict(ref map) => Value::List(
+                        Value::new_iter_str_list(
+                            map.keys().cloned(),
+                            map.len(),
+                            &mut self.budget,
+                            ExecutionPhase::Run,
+                        )
+                        .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?,
+                    ),
+                    Value::Str(ref s) => Value::List(
+                        Value::new_iter_str_list(
+                            s.chars().map(|c| c.to_string()),
+                            s.chars().count(),
+                            &mut self.budget,
+                            ExecutionPhase::Run,
+                        )
+                        .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?,
+                    ),
                     _ => {
                         return Err(TsumugiError::not_iterable(line, &value));
                     }

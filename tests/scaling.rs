@@ -254,6 +254,61 @@ fn for_loop_allocation_stays_linear_in_both_engines() {
     }
 }
 
+/// 関数の再帰の各段で同じ List を `for` する script（issue #358 の再現を縮めたもの）
+fn recursive_for_source(elements: usize, depth: usize) -> String {
+    format!(
+        "let xs = range(0, {elements})\n\
+         fn rec(d)\n    if d == 0\n        return 0\n    end\n\
+         \x20   for x in xs\n        rec(d - 1)\n        break\n    end\n    return 0\nend\n\
+         rec({depth})\n"
+    )
+}
+
+/// 再帰の各段の `for` が List を複製しないこと（FIS-AT-01、issue #358）。
+///
+/// 要素数を 10 倍にしたときの確保量の増分が、反復元の List を 1 回作る量の定数倍に収まり、
+/// 再帰の深さに比例しない。各段が全要素を複製するなら、増分は深さに比例して増える。
+#[test]
+fn recursive_for_allocation_does_not_scale_with_depth_in_both_engines() {
+    const SMALL: usize = 1_000;
+    const LARGE: usize = 10_000;
+    const SHALLOW: usize = 5;
+    const DEEP: usize = 100;
+
+    let _guard = MEASURE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    // 深い再帰を Rust スタックに載せる経路でも落ちないよう、大きなスタックの別スレッドで測る。
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| {
+            for use_vm in [false, true] {
+                let mode = if use_vm { "VM" } else { "tree-walk" };
+                let growth = |depth: usize| {
+                    let small = execute_bytes_min(&recursive_for_source(SMALL, depth), use_vm);
+                    let large = execute_bytes_min(&recursive_for_source(LARGE, depth), use_vm);
+                    assert!(small > 0, "{mode}: 確保量が計測できていません");
+                    large.saturating_sub(small)
+                };
+                let shallow = growth(SHALLOW);
+                let deep = growth(DEEP);
+                assert!(
+                    shallow > 0,
+                    "{mode}: 要素数を増やしても確保量が増えていません（測定の前提が崩れています）"
+                );
+                // 深さが 20 倍でも増分はほぼ同じ（List を 1 回作る量）。複製していれば約 20 倍になる。
+                assert!(
+                    deep < shallow * 2,
+                    "{mode}: 確保量の増分が再帰の深さに比例しています。\
+                     深さ{SHALLOW}で{shallow}バイト, 深さ{DEEP}で{deep}バイト。\
+                     for が反復元の List を各段で複製していないか確認してください"
+                );
+            }
+        })
+        .expect("spawn");
+    handle.join().expect("測定スレッドが panic");
+}
+
 #[test]
 fn closures_stored_in_a_container_are_released_in_both_engines() {
     // 実行後に残る量はクロージャ数に依存しないはず。参照循環があると

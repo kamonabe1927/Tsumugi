@@ -247,7 +247,9 @@ enum FrameKind {
         /// 本体（`Rc<[Stmt]>` を所有）。
         body: Block,
         line: usize,
-        items: Vec<Value>,
+        /// 反復列。List は反復元の backing を `Rc` 共有で持ち（複製・追加課金なし）、
+        /// Dict・Str は課金済みの tracked な List（frame の drop で release される）。
+        items: Rc<crate::value::TrackedList>,
         index: usize,
         pending_step: bool,
         /// 反復元コレクション値を保持する。従来の tree 評価器は `for` の対象を局所変数
@@ -2735,30 +2737,35 @@ impl Evaluator {
         Ok(())
     }
 
-    /// `for` の反復元を反復列に展開する（`exec_stmt` と式 frame の受け渡しで共有する）。
+    /// `for` の反復元を反復列（List の backing）にする（`exec_stmt` と式 frame の受け渡しで共有する）。
+    ///
+    /// List は backing を `Rc` 共有する（複製・追加課金なし。反復中の元 binding の変更は COW で
+    /// detach するので反復列は開始時のまま、AUD-047 / semantic-decisions §11.2）。Dict・Str は
+    /// tree / VM 共通の `Value::new_iter_str_list` で課金して作る（execution-control §5.2・§5.3）。
     fn materialize_for_items(
         &mut self,
         collection: &Value,
         line: usize,
-    ) -> Result<Vec<Value>, TsumugiError> {
+    ) -> Result<Rc<crate::value::TrackedList>, TsumugiError> {
         match collection {
             Value::List(list) => {
                 self.check_collection(list.len(), line)?;
-                // 開始時点の要素を snapshot する。ループ本体で元 binding を
-                // 変更しても make_mut が detach するため反復列は不変（AUD-047）。
-                Ok((**list).clone())
+                Ok(Rc::clone(list))
             }
-            Value::Dict(map) => {
-                self.check_collection(map.len(), line)?;
-                Ok(map.keys().map(|k| Value::str_constant(k.clone())).collect())
-            }
-            Value::Str(s) => {
-                let size = s.chars().count();
-                self.check_collection(size, line)?;
-                Ok(s.chars()
-                    .map(|c| Value::str_constant(c.to_string()))
-                    .collect())
-            }
+            Value::Dict(map) => Value::new_iter_str_list(
+                map.keys().cloned(),
+                map.len(),
+                &mut self.budget,
+                ExecutionPhase::Run,
+            )
+            .map_err(|stop| self.control_stop_to_error(stop, line)),
+            Value::Str(s) => Value::new_iter_str_list(
+                s.chars().map(|c| c.to_string()),
+                s.chars().count(),
+                &mut self.budget,
+                ExecutionPhase::Run,
+            )
+            .map_err(|stop| self.control_stop_to_error(stop, line)),
             _ => Err(TsumugiError::not_iterable(line, collection)),
         }
     }
@@ -3813,7 +3820,7 @@ impl Evaluator {
         &mut self,
         owner: &Block,
         stmt_index: usize,
-        items: Vec<Value>,
+        items: Rc<crate::value::TrackedList>,
         collection: Value,
         line: usize,
     ) -> Result<Frame, TsumugiError> {

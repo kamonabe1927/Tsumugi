@@ -449,6 +449,7 @@ fixture_tests!(
         float_nan_canonical,
         float_special,
         for_closure_binding,
+        for_iter_shared,
         for_iteration_snapshot,
         for_loop,
         format_time_extreme,
