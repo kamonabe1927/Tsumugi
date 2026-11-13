@@ -1508,10 +1508,7 @@ impl AuditJournal {
             .host_call_close_reserve_bytes
             .saturating_add(HOST_CALL_STARTED_MAX_BYTES);
         let projected_bytes = self.committed_bytes.saturating_add(needed_bytes);
-        if projected_bytes > normal_byte_limit {
-            return false;
-        }
-        true
+        projected_bytes <= normal_byte_limit
     }
 
     /// Terminal を予約 slot を使って append し、割り当てた sequence を返す（§8 規則9/10）。
