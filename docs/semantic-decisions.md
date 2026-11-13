@@ -280,7 +280,7 @@ canonical error契約の延長として、エラーメッセージ多言語化�
 1. **canonical error 契約（AUD-019 / 本章）と衝突する。** runtime error は operation ごとの共通 constructor から `kind` / canonical message / line を生成し、その message テンプレートを「完全一致の正本」として扱う。tree/VM 両 backend で stdout・stderr・kind・message・line・trace が完全一致することを `tests/canonical_error_inventory.rs` で検証している。出力言語が環境で変わると、この完全一致 golden test が環境依存になって壊れる。
 2. **「規範出力を locale 差で変えない」という既存の設計判断に反する。** 第3.2節は「OS エラー文字列を canonical message へ埋め込む」案を、OS・locale 差が規範出力になることを理由に却下している。timezone による言語切り替えは、まさにこの却下理由に該当する。
 3. **timezone から言語を推定するのは筋が悪い。** UTC 運用のサーバー上の日本語話者、JST 環境の英語話者など、timezone と希望言語は一致しない。マニフェスト原則2「時刻も含む外部効果は capability として明示的に付与する」の思想とも噛み合わず、環境からの暗黙推定は避けたい方向である。
-4. **今は canonical message 自体がまだ動く時期である。** Phase 3/4 で `capability` / `budget` / `timeout` / `cancelled` / `host` などの kind 追加が控えている（第3.3節）。message の正本が固まる前に翻訳レイヤを作ると二重メンテになる。
+4. **今は canonical message 自体がまだ動く時期である。** 見送りを決めた時点では、Phase 3/4 で `capability` / `budget` / `timeout` / `cancelled` / `host` などの kind 追加が控えていた（当時の第3.3節。今の kind の一覧は第3.3節を見る）。message の正本が固まる前に翻訳レイヤを作ると二重メンテになる。
 5. **優先度が低い。** i18n は利用者体験の改善であり、マニフェストの中核価値（安定性・予算・capability・監査・予測可能性）のいずれの牽引役でもない。
 
 #### 再検討する場合の方向性（メモ）
@@ -2229,7 +2229,7 @@ DESIGN ONLY（本節はテストを記述しない。意図するテストを記
 ## 19. 文書全体の最終受入基準
 
 - AUD-016/017/018/019/024/033/034/036/047/048/049/050の採用判断、却下案、規範挙動、状態、変更箇所、error、移行、test、受入基準が実装PRから追跡できる。
-- §17のREV-003/004/005/006/009/012/017/021についても、同じ8観点（採用判断・却下案・データモデル・変更箇所・error・移行・test・受入基準）が実装PRから追跡できる。REV-017（§17.8）は実装済み（revision 0.21）で、sort / `list_dir` の全順序化を定める。REV-012は既存の第5節（AUD-017）を正本とし、本書で新しい意味論を追加しない。REV-006（§17.7）は停止性をper-instruction課金で担保し、verifierを唯一の停止性根拠にしない。
+- §17のREV-003/004/005/006/009/012/017/021についても、同じ8観点（採用判断・却下案・データモデル・変更箇所・error・移行・test・受入基準）が実装PRから追跡できる。REV-017（§17.8）は sort / `list_dir` の全順序化を定める。REV-012は既存の第5節（AUD-017）を正本とし、本書で新しい意味論を追加しない。REV-006（§17.7）は停止性をper-instruction課金で担保し、verifierを唯一の停止性根拠にしない。
 - §20（`format_time` の `%z`/`%Z` 追加）の採用判断・採用理由・却下案・OS非依存条件・バックエンド非差分・後方互換・変更箇所・残論点・受入基準が実装PRから追跡できる。
 - tree/VMで意図しないbackend別期待値が残らない。
 - 現行 `language-spec.md` は実装完了まで変更せず、現行挙動の正本として維持する。
