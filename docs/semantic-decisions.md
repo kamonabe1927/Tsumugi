@@ -1495,12 +1495,12 @@ HTTP request完了後に同じexecutionが未捕捉errorでrollbackしてもHTTP
 | method token / URL syntax不正 | `argument` | `http_request.{key} が不正です: {reason}` |
 | DNS/IP/redirect/TLS/protocol/UTF-8/transport | `host` | `host function の実行に失敗しました: http_request ({category})` |
 | byte/call/concurrency budget | `budget` | `{budget_name} の上限を超えました (上限: {limit})` |
-| deadline | `timeout` | `実行期限を超過しました` |
-| cancellation | `cancelled` | `実行がキャンセルされました` |
 
 `{reason}` は `invalid_method`、`invalid_url` のいずれか、`{category}` は `dns`、`address_policy`、`redirect_policy`、`redirect_loop`、`tls`、`protocol`、`utf8`、`transport` のいずれかに限定する。OS/libraryの生messageを埋め込まない。request Dictの検査順は `method`存在→`url`存在→unknown keyのcodepoint順→method型→url型→headers型/各値のStr型→body型→method token→URL syntax→header名のcodepoint順にname syntax/forbidden name/value syntax→method/scheme/host/port/path policy とし、最初の失敗だけを返す。`{header}` はlowercase正規化後のheader名で、control characterを含む未正規化値をmessageへ出さない。
 
-lineは `http_request(...)` call式。host内部traceは出さない。`budget/timeout/cancelled` はscriptでcatch不能、`capability/host/argument/builtin_type` はcatch可能とする。
+lineは `http_request(...)` call式。host内部traceは出さない。上の byte/call/concurrency budget の超過はscriptでcatch不能、`capability/host/argument/builtin_type` はcatch可能とする。deadline超過とcancellationは canonical error の kind を持たず、scriptから見えないterminal（§3.3）なので、この表に行を持たない（どれも catch できない）。
+
+deadline・cancellation の扱いは、PR #398 の判断の候補 drift-20261113 を受けて、kind `timeout`・`cancelled` の 2 行から上の形に直した（Q1=A、判断役が選択（PR #398））。理由: §3.3 は loop:drift #395 の D-83 Q1=A で deadline・cancel を script から見えない terminal と決めており、本表は §3.4 の inventory へ連結する HTTP adapter の extension の正本なので、§3.3 に無い kind の行を残すと同じ文書の中で矛盾する。この 2 行は旧 §3.3 の kind をそのまま引いたもので、[実行予算・協調実行仕様](execution-control.md) §2 の不変条件 3・§7 とも合い、catch 可否も変わらないので、D-83 の決定から新しい判断を足さずに書ける（[マニフェスト](manifesto.md) 原則 6・9）。byte/call/concurrency budget の行をどの予算超過の種別と文言に写すかは D-83 から決まらないため、この変更では変えていない。採らなかった案B（この表を変えず、deadline・cancel の行も次の判断に回す）は、D-83 で既に決まっている行まで待たせ、§3.3 との矛盾を本文に残すため採らない。案C（budget の行も含めて全部揃える）は、種別と文言を判断を通さずに決めることになり、concurrency の上限には写し先の constructor も無いため採らない。
 
 ### 16.13 移行
 
