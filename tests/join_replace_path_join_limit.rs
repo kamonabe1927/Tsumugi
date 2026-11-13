@@ -150,18 +150,8 @@ fn jrp_at_02_join_boundary() {
         .map(|n| n.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    let (r, _) = run(
-        &format!("let r = join([{{\"k\": [{nums}]}}], \"\")\n"),
-        false,
-        Some(l),
-    );
-    assert_eq!(r.expect_err("Dict").kind(), Some(ErrorKind::StringLimit));
-    let (r, _) = run(
-        &format!("let r = join([{{\"k\": [{nums}]}}], \"\")\n"),
-        true,
-        Some(l),
-    );
-    assert_eq!(r.expect_err("Dict").kind(), Some(ErrorKind::StringLimit));
+    // 描画の途中、17 個目の数の入口（累積 66）で止まる。結果全体より短い。
+    assert_over(&format!("let r = join([{{\"k\": [{nums}]}}], \"\")"), l, 66);
 }
 
 /// JRP-AT-02: `replace` の上限ちょうどは成功し、+1 は結果の長さ（`requested`）で止まる。
@@ -206,8 +196,7 @@ fn jrp_at_02_replace_boundary() {
     assert_over("let r = replace(\"ああ\", \"\", \"x\")", 8, 9);
 }
 
-/// JRP-AT-03: `path_join` の上限（Unix。absolute component の例は OS ごとに規則が違う）。
-#[cfg(unix)]
+/// JRP-AT-03: `path_join` の上限（absolute component の例は OS ごとに規則が違うので cfg で分ける）。
 #[test]
 fn jrp_at_03_path_join_limit() {
     let l = 64;
@@ -242,18 +231,20 @@ fn jrp_at_03_path_join_limit() {
         65,
     );
     // 途中で超え、後ろの absolute component で置き換わる呼び出しも超過（requested は超えた時点の長さ）。
+    // 40 + 1（separator）+ 40 = 81。置き換える引数は OS ごとに違う。
+    #[cfg(unix)]
+    let (abs, keep) = ("/x", "\"/x/y\"");
+    #[cfg(windows)]
+    let (abs, keep) = ("C:\\\\x", "\"C:\\\\x\\\\y\"");
     assert_over(
-        &format!("let r = path_join(\"{0}\", \"{0}\", \"/x\")", a(40)),
+        &format!("let r = path_join(\"{0}\", \"{0}\", \"{abs}\")", a(40)),
         l,
         81,
     );
     // 途中で一度も超えなければ従来どおり成功する。
     for vm in [false, true] {
         let (r, _) = run(
-            &eq_script(
-                &format!("path_join(\"{}\", \"/x\", \"y\")", a(40)),
-                "\"/x/y\"",
-            ),
+            &eq_script(&format!("path_join(\"{}\", \"{abs}\", \"y\")", a(40)), keep),
             vm,
             Some(l),
         );
