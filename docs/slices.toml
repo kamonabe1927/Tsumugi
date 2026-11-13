@@ -858,4 +858,5 @@ status     = "ready"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-join-replace-path-join-limit 実装スライス（`join` / `replace` / `path_join` の結果の長さを確保前に検査）" }
 acceptance = ["JRP-AT-01..05"]
+design_pr  = 403
 order      = 98
