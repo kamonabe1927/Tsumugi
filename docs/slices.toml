@@ -841,3 +841,22 @@ acceptance = ["FIS-AT-01..04"]
 design_pr  = 388
 impl_pr    = 402
 order      = 97
+
+# issue #399（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。issue #357 の join / replace に path_join を加え、
+# 結果の文字列を作り切ってから max_single_string_bytes を検査し、上限を大きく超える入力で BudgetExceeded でなくプロセスが abort する
+# 不具合を、確保の前の長さの検査で直す（execution-control §5.2・§5.3・§7）。閉じた設計 PR #386 の fix-join-replace-string-limit
+# （main には入っていない）を設計し直したもので、path_join を含むことが分かる ID に改めた。issue #387（needs-design）を解く。
+# parent は string accounting を入れた REV-015（Slice 2）。fuel-bulk-chunk-yield（chunk 境界の slice yield）とは別の不具合として切った。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜40 に空きが無い
+# （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A）と同じく、この PR では付け直しをせず、仮にすべての
+# スライスより後（98）に置いた。マージ後に PM が付け直しだけの状態整理 PR で 35 より前へ移す（issue #400 のスライスより前）。
+# 見積もり: src/ 80〜200 行、触る仕組みは文字列 builtin（join / replace / path_join）の結果の長さの確保前の検査 1 つ、受入基準 5。
+[[slice]]
+id         = "fix-join-replace-path-join-limit"
+title      = "join / replace / path_join が結果の長さを確保の前に max_single_string_bytes と比べ、上限を超える入力で abort せず BudgetExceeded(SingleStringBytes) で止まる（execution-control §5.3・§7、issue #357・#399）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-join-replace-path-join-limit 実装スライス（`join` / `replace` / `path_join` の結果の長さを確保前に検査）" }
+acceptance = ["JRP-AT-01..05"]
+design_pr  = 403
+order      = 98
