@@ -1,6 +1,6 @@
 # Tsumugi — 次期意味論・実装決定
 
-最終更新: 2026-11-02
+最終更新: 2026-11-13
 
 設計ステータス: **次期仕様確定（本文）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -14,9 +14,9 @@
 Q2=A。当時の[開発ループ手順書](loop-runbook.md) §7.5）。理由: 状態の正本は粒度ごとに 1 箇所だけとし（ドキュメント運用ガイド
 「大原則」）、spec 本文に状態を書き続けると #302 の D-20 のような食い違いがまた生まれる。載せたのは 2026-10-31 の整合点検
 （§4〜§12・§17・§20 を実装と release ビルドの実行〔tree・`--vm`〕で照合）と、2026-11-01 に PR #309 で §5・§10・§14.3・
-§17.5・§20 を実装と照合して確かめた差だけである。照合していない節（§3・§13〜§16・§17.7・§17.8 ほか）の逸脱と、本文の
-節ごとに残る「ステータス」注記（§13・§14.1・§14.2 など）は、まだ表へ移していない。§10（AUD-036）・§20（`format_time` の
-`%z` / `%Z`）は照合の結果、逸脱が無かった。§17.7.9（issue #294 で足した節）の逸脱は PR #329 で解消し、行を削除した。§17.7 のほかの小節はまだ照合していない。§3.4 の import chain 深度上限の行は loop:drift #382 の D-78 で事実を確かめて足した（§3 のほかの行は照合していない）。
+§17.5・§20 を実装と照合して確かめた差だけである。照合していない節（§3・§13〜§16・§17.7・§17.8 ほか）の逸脱は、まだ表へ移していない。本文の節ごとに置いていた「ステータス」「実装状況」の
+注記は loop:drift #395 の D-86・D-87 で消し、そこに書かれていた未実装範囲（§14.1・§14.2・§14.4・§15・§16）を表に移した。§10（AUD-036）・§20（`format_time` の
+`%z` / `%Z`）は照合の結果、逸脱が無かった。§17.7.9（issue #294 で足した節）の逸脱は PR #329 で解消し、行を削除した。§17.7 のほかの小節はまだ照合していない。§3.4 の import chain 深度上限の行は loop:drift #382 の D-78 で事実を確かめて足した。§3.3・§3.4 の予算超過・deadline・cancel・filesystem の拒否と path の形式・`to_float`・値のネストの行は loop:drift #395 の D-83〜D-85 で、tree・`--vm` の実行と `src/error.rs` で確かめて直した（§3 のほかの行は照合していない）。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱と未実装範囲）
 
@@ -25,6 +25,11 @@ Q2=A。当時の[開発ループ手順書](loop-runbook.md) §7.5）。理由: �
 | user call の評価順が目標と違う。目標（§5.1・§17.5.2）は「動的 callee を先に一度だけ評価・分類し、user callable の場合だけ step と深度を検査する」（callee 先行）だが、実装は現行の [言語仕様](language-spec.md)「ユーザー定義関数の呼び出し順序」のとおり「step と深度を検査してから callee を評価する」。tree（`src/eval.rs` の user call の準備で `begin_user_call` が callee の評価より前）と VM で同じで、深度 128 の内側で `[print("x"), g][1](…)` を呼ぶと、両 backend とも `x` を出さずに `overflow` になる。深度の境界値（128 user frame、§5.1）は両 backend で目標どおり。callee 先行への切り替えは `LanguageRevision` を上げる破壊的変更で、まだスライスが無い（ロードマップの REV-012 の `callee-precedence`） | §5.1・§17.5 | —（本ガイド導入前からの実装） |
 | import chain の深度上限が link 時の拒否にならない経路が残る。目標（§3.4 の「import chain深度上限」の行、[組み込みAPI仕様](embedding-api.md) §5、[Capability Model仕様](capability-model.md) §10）は全入口で深度を link 時に検証し 129 段目を catch 不能に拒否することだが、評価器内蔵の `ModuleLoader`（`src/module.rs` の `MAX_IMPORT_DEPTH` の検査）は 129 段目で constructor `import.depth`（`src/stable_error.rs` の `IMPORT_DEPTH`）の kind `import` のランタイムエラー `import 失敗: ネストが深すぎます (上限: 128)` を出す。kind `import` は catch 不能の種別（`src/error.rs` の `is_uncatchable`）に含まれないが、import はトップレベル限定なので script の `try` の内側には置けない。この経路を通るのは REPL（tree・VM）と scheduler の handle 経路（`Engine::compile` / `create_execution` / `start`）の import だけで、ファイル・標準入力は link 時に拒否する（`src/main.rs` の `LinkError::DepthExceeded`、`tests/depth_boundary.rs` の DBT-AT-02）。経路の差の正本は Capability Model仕様の逸脱一覧の REPL の import と scheduler の handle 経路の行 | §3.4 | E7（tree REPL）、E9 の VM file/stdin 統合で据え置いた VM REPL、exec-control Slice 3 PR-a（handle 経路） |
 | process-global の `OnceLock` が残る。目標（§14.3）は process-global な `OnceLock` を廃止し `FilesystemCapability` を実行 request へ注入することだが、`src/sandbox.rs` の `SANDBOX_PATHS`（`TSUMUGI_SANDBOX` を一度だけ読む `OnceLock`）が残り、評価器内蔵の `ModuleLoader`（`src/module.rs`）が import のファイルを読むときに `sandbox::check_path` で検査する。fs builtin は capability handle 経由に移っており（C10）、`OnceLock` を読まない。`ModuleLoader` を使うのは REPL と scheduler の handle 経路の import だけで（file/stdin の run 層は `fix-import-run-from-link-graph` で link の graph から展開するようになり `OnceLock` を読まない）、scheduler の handle 経路の差は [Capability Model仕様](capability-model.md) の逸脱一覧（§10）にある | §14.3 | —（本ガイド導入前からの実装。fs builtin の移行は C10） |
+| 未実装範囲: VM dispatch の分割。`src/vm.rs` の `Vm::dispatch` は今も 1 つの match で、カテゴリ別の private handler に分けていない | §14.1 | —（未着手） |
+| 未実装範囲: tree `exec_stmt` の分割。`src/eval.rs` の `exec_stmt` は今も Stmt の各種を 1 つの関数で扱い、private helper に分けていない | §14.2 | —（未着手） |
+| 未実装範囲: cargo-fuzz。`fuzz/` workspace と fuzz target が無い | §14.4 | —（未着手） |
+| 未実装範囲: クラス（継承なし）。`class` 構文・Instance・property access が無く、`print(1.x)` のような property access は parse エラーになる | §15 | —（未着手） |
+| 未実装範囲: HTTP host adapter。`http_request` adapter が無い（§16.1 の着手 gate が閉じている） | §16 | —（未着手） |
 
 ## 1. 本書の位置づけ
 
@@ -86,7 +91,9 @@ TraceFrame {
 }
 ```
 
-既存kindに加え、host boundary実装時に `capability`、`budget`、`timeout`、`cancelled`、`host` を追加する。`budget`、`timeout`、`cancelled` は停止要求でありscriptの `try/catch` では捕捉できない。その他のruntime errorは原則として捕捉できる。
+既存kindに加え、host boundary実装時に `capability`、`host` と、予算超過の種別 `limit`（step/fuel）・`collection_limit`・`string_limit`・`source_limit`・`heap_limit`・`io_limit` を持つ。予算超過の 6 種は停止要求であり、scriptの `try/catch` では捕捉できず、`e["type"]` としてscriptから観測されない。deadline超過とcancellationも捕捉できない停止だが、canonical errorのkindを持たず、scriptから見えないterminal（[実行予算・協調実行仕様](execution-control.md) §7・§8 の `ExecutionOutcome::DeadlineExceeded` / `Cancelled`）として扱う。その他のruntime errorは原則として捕捉できる（catch できない停止の一覧は [実行予算・協調実行仕様](execution-control.md) §2 の不変条件 3）。
+
+予算超過・deadline・cancel の扱いは、loop:drift #395 の D-83 を受けて、1 つの kind `budget` と `timeout`・`cancelled` の 3 つから、上の形に直した（Q1=A、判断役が選択（issue #395））。理由: [実行予算・協調実行仕様](execution-control.md) §2 の不変条件 3 と [言語仕様](language-spec.md)「キャッチできないエラー」は予算超過の 6 種を名前で挙げ、deadline・cancel は `e["type"]` に出ないと定めており、実装（`src/error.rs` の `is_uncatchable` と `DeadlineExceeded`・`Cancelled`）も同じで、食い違っていたのは本書だけだった。本書の §3.4 もすでに `limit`・`collection_limit` の行を持ち、本書の中でも揃っていなかった。種別を分けるほうが、すべてを `runtime` へ集約する案を host が原因を識別できないとして却下した §3.2 と同じ向きである（[マニフェスト](manifesto.md) 原則 7・9）。採らなかった案B（`budget` 1 つを目標に残し `fix` スライスを足す）は、観測できる kind とメッセージの破壊的変更で、language-spec・execution-control・実装・テストを直す必要があるのに、まとめて得られる保証が無い（catch できないことは A でも同じで、原則 6 は保たれる）ため採らない。
 
 message内の型名は `Int`、`Float`、`Str`、`Bool`、`Null`、`List`、`Dict`、`Fn`、`Error`、`Class`、`Instance`、`BoundMethod` を用いる。`{actual}` へ値全体やsecretを埋め込まず、型または安全な整数境界だけを表示する。
 
@@ -140,18 +147,39 @@ message内の型名は `Int`、`Float`、`Str`、`Bool`、`Null`、`List`、`Dic
 | property write対象がInstanceでない | `type` | `プロパティ代入できない型です: {actual_type}` |
 | property不存在 | `name` | `プロパティが見つかりません: {class_name}.{property}` |
 | `init`がNull以外をreturn | `type` | `{class_name}.init は Null 以外を返せません: {actual_type}` |
-| filesystem capability拒否 | `sandbox` | `ファイル操作が許可されていません: {operation}` |
+| filesystem capability拒否 | `sandbox` | `ファイルシステム操作が許可されていません` |
+| filesystem pathの形式不正（safe profileの絶対パス・`.`・`..` など。capabilityの検査より先） | `argument` | `ファイルパスの形式が不正です` |
 | host function capability拒否 | `capability` | `host function の実行が許可されていません: {name}` |
 | host adapter失敗 | `host` | `host function の実行に失敗しました: {name} ({category})` |
-| deadline超過 | `timeout` | `実行期限を超過しました` |
-| cancellation | `cancelled` | `実行がキャンセルされました` |
-| host/heap/I/O budget超過 | `budget` | `{budget_name} の上限を超えました (上限: {limit})` |
+| 文字列からFloatへ変換不能 | `conversion` | `to_float で Float に変換できません: 数値として解釈できません` |
+| 値のネスト深度上限（§21.3） | `overflow` | `値のネストが深すぎます (上限: 256)` |
+| 1 つの文字列の長さの上限 | `string_limit` | `文字列の長さが上限を超えました: {requested} バイト (上限: {limit} バイト)` |
+| 文字列の生成数の上限 | `string_limit` | `文字列の生成数が上限を超えました (上限: {limit})` |
+| 文字列の総バイト数の上限 | `string_limit` | `文字列の総バイト数が上限を超えました (上限: {limit} バイト)` |
+| 1 つのsourceの長さの上限 | `source_limit` | `ソースの長さが上限を超えました: {requested} バイト (上限: {limit} バイト)` |
+| sourceの本数の上限 | `source_limit` | `ソースの本数が上限を超えました (上限: {limit})` |
+| sourceの総バイト数の上限 | `source_limit` | `ソースの総バイト数が上限を超えました (上限: {limit} バイト)` |
+| importの本数の上限 | `source_limit` | `import の本数が上限を超えました (上限: {limit})` |
+| importの総バイト数の上限 | `source_limit` | `import の総バイト数が上限を超えました (上限: {limit} バイト)` |
+| live heapの上限 | `heap_limit` | `ヒープの総バイト数が上限を超えました (上限: {limit} バイト)` |
+| `input` の呼び出し回数の上限 | `io_limit` | `input の呼び出し回数が上限を超えました (上限: {limit})` |
+| `input` の総バイト数の上限 | `io_limit` | `input の総バイト数が上限を超えました (上限: {limit} バイト)` |
+| output の呼び出し回数の上限 | `io_limit` | `output の呼び出し回数が上限を超えました (上限: {limit})` |
+| output の総バイト数の上限 | `io_limit` | `output の総バイト数が上限を超えました (上限: {limit} バイト)` |
+| host call の呼び出し回数の上限 | `io_limit` | `host call の呼び出し回数が上限を超えました (上限: {limit})` |
+| host call request の総バイト数の上限 | `io_limit` | `host call request の総バイト数が上限を超えました (上限: {limit} バイト)` |
+| host call response の総バイト数の上限 | `io_limit` | `host call response の総バイト数が上限を超えました (上限: {limit} バイト)` |
+| host call の総バイト数の上限 | `io_limit` | `host call の総バイト数が上限を超えました (上限: {limit} バイト)` |
 | stdout書込失敗 | `io` | `標準出力への書き込みに失敗しました` |
 | VM/Compiler不変条件違反 | `internal` | `内部エラー: {stable_detail}` |
 
 `{state}`、`{reason}`、`{operation}`、`{category}` は各BuiltinSpecまたはoperation constructorが列挙型から選び、任意のOS文字列を入れない。import先のparse error詳細はcauseとして保持し、CLIはwrapperに続けて同じcanonical parse diagnosticsをsource順に表示する。
 
 「import chain深度上限」の行は、loop:drift #382 の D-78 を受けて、`import` ランタイムエラーの文言から link 時の拒否に直し、評価器内蔵 `ModuleLoader` の文言は冒頭の逸脱一覧の 1 行に移した（Q1=A、判断役が選択（PR #384））。理由: 目標では深度は link で検証し（[組み込みAPI仕様](embedding-api.md) §5）、REPL の各入力と scheduler の handle 経路も link を通す（[Capability Model仕様](capability-model.md) §10、issue #327 の Q1=A・Q2=A）ので、`ModuleLoader` の文言は目標ではなく現状であり、本文に実装状態を書かない[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」と、逸脱一覧を新設した loop:drift #302 の D-20 Q2=A に合わせる。同じ PR で [言語仕様](language-spec.md) を同じ形に直したのとも揃う（[マニフェスト](manifesto.md) 原則 9）。採らなかった案B（行を残し、REPL・handle 経路だけで出る文言と注記する）は、目標の章に実装状態を書くことになり、関係するスライス（fix-repl-import-gate-tree / -vm は `blocked`、fix-handle-import-from-link は `todo`）が done になるまで注記が本文に残って状態の正本が 2 箇所になるため採らない。案C（`ModuleLoader` 側の文言を link 時の診断にそろえる `fix` スライスを足す）は、その経路が catch 不能の link 時の拒否にならない差は文言以外で残り、目標で使わなくなる経路に実装とテストを足すことになるため採らない（原則 8）。
+
+deadline超過とcancellationは canonical error ではなく script から見えない terminal なので（§3.3）、この表に行を持たない。
+
+「filesystem capability拒否」の行は、loop:drift #395 の D-84 を受けて、`ファイル操作が許可されていません: {operation}` から `{operation}` を含まない `ファイルシステム操作が許可されていません` に直した（Q1=A、判断役が選択（issue #395））。理由: [Capability Model仕様](capability-model.md) §8.5 は、権限不足を内部 `Denial` から safe field だけで canonical `sandbox` error に変換し、存在する path と存在しない path を同じ public denial にすると定めており、文言を 1 つに固定するほうがこの単一の denial に合う。[言語仕様](language-spec.md)の組み込み関数の節・Capability Model仕様 §14.3 の小節・実装（`src/error.rs` の `SANDBOX_FILESYSTEM_DENIED`）・`tests/fixtures/error_sandbox.expected_err` はすでにこの文言で、tree・VM で一致しており、食い違っていたのは本書の 1 行だけだった（[マニフェスト](manifesto.md) 原則 5・9）。採らなかった案B（`{operation}` 付きを目標に残し `fix` スライスを足す）は、拒否の内容を public message に細かく出す向きで §8.5 の単一の denial から離れ、観測できる message の破壊的変更でもあるのに、それを求める決定が本書のこの 1 行のほかに無いため採らない。
 
 この表は言語core runtime error constructorの全inventoryである。新しいcore constructorを追加するPRは、既存行へ対応付けるか新しいcanonical行を追加しなければCIを通過してはならない。core外のHostFunction adapterは、登録時に静的 `HostErrorSpec` extension table（kind、message template、placeholder列挙、catch可否）を同時登録し、同じinventory testへ連結する。HTTP adapterのextension正本は16.12節であり、未登録adapterのerror constructorは実行できない。filesystem builtinのうち仕様上Null/Falseを返すOS失敗はruntime error constructorではないため表の対象外だが、capability拒否は必ず表の`filesystem capability拒否`を使う。
 
@@ -269,8 +297,6 @@ canonical error契約の延長として、エラーメッセージ多言語化�
 canonical error の正本が固まり `language-spec.md` へ統合され、Phase 2 で CLI（`--help` 等を含む）が整備された後の、表示レイヤ改善としての nice-to-have。Phase 7（運用保証・検証）近辺での検討が自然で、それより前に優先しない。
 
 ## 4. `let`再宣言のbinding identity（AUD-016）
-
-> **実装状況（2026-09-06）:** ✅ 実装完了。VM Compilerの`Stmt::Let`再宣言でのslot再利用を廃止し、全scopeで新slotを割り当てるよう統一した。観測挙動を変更したため`language-spec.md`へ規範として反映し、仕様revisionを0.14へ上げた。
 
 ### 4.1 採用判断
 
@@ -510,15 +536,6 @@ help、version、unknown option、missing file、stdin read error、非UTF-8が�
 
 ## 7. REPL submission transaction（AUD-024）
 
-> **実装状況（2026-09-07）:** ✅ 実装完了。tree/VM両engineで、未捕捉ランタイムエラーで
-> 終了したREPL入力が変更した language-state（binding、cell の値、index 代入、push/pop、
-> import marker）を入力開始時点へ巻き戻すようにした。正常完了と catch されて完了した入力は
-> commit する。stdout・ファイル書き込み等の外部効果は巻き戻さない。FunctionId は rollback
-> しても再利用しない（AUD-048）。observable挙動が変わるため `language-spec.md` へ反映し、
-> 仕様revisionを0.15へ上げた。7.5節の journal 方式（first-write undo log、cell は Rc
-> ポインタ同一性で1回だけ記録）で実装し、記録量は変更した箇所の数に比例する。deadline/
-> budget/cancellation は未実装のため、それらに伴う rollback は本 phase の対象外。
-
 ### 7.1 採用判断
 
 未捕捉runtime errorで終了したREPL入力は、その入力が変更した**全language-stateを入力開始時点へrollback**する。正常完了と、入力内でcatchされ最終的に正常完了したerrorはcommitする。外部I/Oはrollbackせず、rollback後も「partial effectsあり」とauditへ記録する。
@@ -625,8 +642,6 @@ UndoEntry =
 
 ## 8. 未完結REPL入力でのEOF（AUD-033）
 
-> 実装状況: ✅ 実装完了。`src/main.rs` の `finish_repl_at_eof` を tree / VM 両 REPL loop が共有し、継続入力 buffer が非空のまま EOF を受けたら実 Lexer/Parser の parse 診断を stderr へ出して終了コード 1 で終了する。空 buffer の EOF は 0。未閉じブロック（`if`/`fn`/`while`/`for`/`try` と複数行 lambda）は `src/parser.rs` の `expect` が canonical message `入力が未完結です: end が必要です` を返す。回帰は `tests/integration.rs` の `aud033_*`（tree/VM subprocess）と `src/parser.rs` の `unclosed_block_eof_reports_incomplete_input` で固定した。
-
 ### 8.1 採用判断
 
 継続入力bufferが空でない状態でEOFを受けた場合、bufferを破棄して正常終了してはならない。通常のLexer/ParserへEOFを渡し、parse診断をstderrへ出して終了コード1でREPLを終了する。tree/VM共通である。
@@ -667,8 +682,6 @@ lineはLexerが生成するEOF tokenの行。未閉じblockのcanonical message�
 - tree/VMで診断全文と終了コードが一致する。
 
 ## 9. `path_join` 型契約（AUD-034）
-
-> 実装状況: ✅ 実装完了（仕様revision 0.16で `language-spec.md` へ統合済み）。`src/builtin_core.rs` の `builtin_path_join` が全引数を左から右へStr検査し、最初の非Strで `builtin_type` エラーを返す。tree/VMはAUD-049の共有registry/handlerを使うため差はない。`tests/canonical_error_inventory.rs`（tree/VM一致）と `tests/path_join_contract.rs`（OS依存期待値をRust `PathBuf` から構築）で固定した。
 
 ### 9.1 採用判断
 
@@ -711,21 +724,6 @@ lineはLexerが生成するEOF tokenの行。未閉じblockのcanonical message�
 - tree/VMのkind/message/lineが一致する。
 
 ## 10. lossy変換境界（AUD-036）
-
-> **実装の経緯（2026-09-09 時点の記録。現在の実装状態は冒頭の逸脱一覧を見る）:** **Float→Int 変換**（`to_int` / `floor` /
-> `ceil` / `round`）と **file_size** の u64→i64 変換を checked helper へ集約し、`NaN` /
-> `±Infinity` / i64 範囲外を lossy な `as` cast に頼らず `conversion` / `int_overflow`
-> エラーにした。`src/builtin_core.rs` の `checked_float_to_i64`（`RoundMode`）と
-> `checked_file_size_to_i64` を tree/VM 共有 handler として実装し、観測挙動が変わるため
-> `language-spec.md` へ反映し仕様revisionを0.17へ上げた。paired test は
-> `tests/canonical_error_inventory.rs`（tree/VM 一致）・`tests/checked_conversion_contract.rs`
-> （丸めモード・境界）・`builtin_core` の `aud_036_tests`（private file_size helper の
-> `i64::MAX+1` / `u64::MAX`）で固定した。
->
-> 当時は `exit` の構造化 `ExecutionOutcome::Exited { code, usage }` 化を、`BudgetUsage` と
-> REV-023（`exit()` の process 終了廃止・Phase 3 budget 基盤）に依存するため本節の他項目と切り離していた。
-> これは後に C7（REV-023）で実装された（`src/builtin.rs` の `exit` は process を終了せず `Exited` へ写す）。
-> [言語仕様](language-spec.md)の `exit` の行は loop:drift #302 の D-19（Q1=A）で 0..=255 と範囲外の `argument` を補った。
 
 ### 10.1 採用判断
 
@@ -865,20 +863,6 @@ sourceの観測挙動は変えない。libraryで `Value::List(Vec<_>)` / `Dict(
 - AUD-041で残った複雑index/upvalueの二次確保を解消する。
 - paired goldenとallocation scaling gateが通る。
 
-### 11.10 実装状況
-
-✅ 実装済み。`src/value.rs` の `Value::List` を `Rc<Vec<Value>>`、`Value::Dict` を
-`Rc<BTreeMap<String, Value>>` へ変更した。全 mutation 経路（`builtin_core::assign_index`・
-`builtin_push` / `builtin_pop` / `builtin_pop_update`、VM の `ListPush` / `DictInsert`
-opcode）は検査後に `Rc::make_mut` で detach する。`PartialEq` に `Rc::ptr_eq` の高速パスを
-足したが等価性の結果は変えていない。for は `(**list).clone()` で開始時点の要素を snapshot
-する。観測挙動は不変で、既存の paired golden・error inventory・defensive test はすべて通る。
-受入基準の alias 分離と snapshot は golden fixture `collection_cow_alias`（代入・引数・
-返り値・nested・closure 共有 cell・equality）と既存の `for_iteration_snapshot` で固定し、
-`d[to_str(i)]`（関数呼び出しを含む index 読み）と upvalue 経由 `xs[i]` の確保量が線形に
-収まることを `tests/scaling.rs` の `cow_read_allocation_stays_linear_in_both_engines` で
-固定した。総 heap budget の allocation 課金統合は Phase 3（[実行予算・協調実行仕様](execution-control.md)）で別途扱う。
-
 ## 12. FunctionIdによる関数同一性（AUD-048）
 
 ### 12.1 採用判断
@@ -1010,8 +994,6 @@ source意味論は変えない。新builtin追加手順は「handler実装+Built
 
 ### 14.1 VM dispatch分割
 
-**ステータス:** 実装契約確定・未実装。
-
 **採用判断:** `run_frames` を命令fetch、line検査、IP進行、unwindのownerとして残し、巨大な `dispatch` をカテゴリ別private handlerへ分ける。第一段階では制御型を変えず、外側のexhaustive matchから次へ委譲する。
 
 - arithmetic/comparison
@@ -1038,8 +1020,6 @@ source意味論は変えない。新builtin追加手順は「handler実装+Built
 
 ### 14.2 tree `exec_stmt` 分割
 
-**ステータス:** 実装契約確定・未実装。
-
 **採用判断:** `exec_stmt` をexhaustive routerとして残し、binding、index/property assignment、if、while、for、fn/class、try/catchへprivate helperを分離する。最初は同じファイル内で分割し、visibilityが安定してからmodule分割する。
 
 **却下案:** AST visitor frameworkへの全面置換、Compilerとの共通HIR導入を同じPRで行う案は、scope/control-flow退行の原因を増やすため却下する。
@@ -1055,8 +1035,6 @@ source意味論は変えない。新builtin追加手順は「handler実装+Built
 **受入基準:** router以外に巨大なStmt matchを複製せず、全scope cleanup testとgoldenが無変更で通る。
 
 ### 14.3 sandbox OnceLockのExecutionContext capability化
-
-**ステータス:** 実装契約確定。Phase 2 capabilityの先行縦切り。実装状態は冒頭の逸脱一覧を見る（loop:drift #302 の D-20、Q2=A）。
 
 **採用判断:** process-global `OnceLock` を廃止し、immutableな `FilesystemCapability` を実行requestへ注入する。libraryの`CapabilitySet::empty()`はfilesystem deny-by-defaultであり、CLIもsafe/legacy profile builderが必要な`DirectoryHandle` / `FileHandle` authorityを明示構築する。`ExecutionContext`は前executionのcapabilityを保持しない。
 
@@ -1096,8 +1074,6 @@ CLI互換profileは`TSUMUGI_SANDBOX`等をCLI起動時に一度だけ読み、co
 
 ### 14.4 cargo-fuzz
 
-**ステータス:** 実装契約確定・未実装。
-
 **採用判断:** 通常testと分離した `fuzz/` workspaceを作り、次のtargetを段階導入する。
 
 1. `frontend`: bounded UTF-8 bytes → Lexer → Parser
@@ -1121,8 +1097,6 @@ CLI互換profileは`TSUMUGI_SANDBOX`等をCLI起動時に一度だけ読み、co
 **受入基準:** short smokeがCIで決定時間内に通り、長時間jobを手動/schedule実行できる。発見したcrashは再現可能な通常testへ昇格する。外部I/Oやprocess exitへ到達しない。
 
 ## 15. クラス（継承なし）の完全設計
-
-設計ステータス: **設計済み・低優先度**
 
 ### 15.1 採用判断
 
@@ -1334,8 +1308,6 @@ trace frame名は `{Class}.{method}`。constructor arity失敗ではinit frame�
 - Instance mutationがAUD-024でrollbackでき、総heap budgetでcycle保持を制御できる。
 
 ## 16. HTTP host adapter
-
-設計ステータス: **設計済み・着手禁止**
 
 ### 16.1 着手gate
 
@@ -1640,13 +1612,7 @@ compare_int_float(i: i64, f: f64) -> NumericOrdering:
 - 等価が対称・推移的、比較が反対称であることを property test が示す。
 - tree / VM の値・error・sort 順が全境界で一致する。
 
-#### 17.1.9 実装状況
-
-✅ 実装済み（仕様 revision 0.19）。`src/value.rs` に `NumericOrder` / `NumericOrdering` を新設し、`Int×Float` を `trunc` / `fract` 分離 + `i128` widen で丸めなし比較する（`±Infinity` は有限 Int と大小確定、`NaN` は `UnorderedNaN`、`i128` 範囲外の巨大 Float は magnitude で決着）。`PartialEq` の `Int×Float` / `Float×Int`、tree（`src/eval.rs`）と VM（`src/vm.rs`）の関係演算子、`min` / `max`（`src/builtin_core.rs`）がこの単一実装を経由する。`contains` は `PartialEq` 経由で自動的に追随する。`min` / `max` は選択した operand を元の型のまま返し、同値時は第 1 引数、NaN 入力は canonical NaN を返す。`sort` は本 REV（revision 0.19）の時点では文字列表現比較を維持した（本節の sort 数値順化は対象外）。sort / `list_dir` の全順序化（数値順を含む）は §17.8（REV-017）で実装済み（revision 0.21）となり、`NumericOrder` を数値帯で再利用する。`value.rs` の unit test 11 件と golden fixture `numeric_strict_comparison`（tree/VM 一致）で境界値・推移性・対称性・min/max 戻り型を固定する。
-
 ### 17.2 `Chunk::patch_jump` の fallible 化と builder 封印（REV-004）
-
-> 設計ステータス: ✅ 実装済み。`patch_jump` を `Result<(), ChunkBuildError>`（`BadOffset`/`NotAJump`）へ変更し、エラー時は `code` を書き換えず部分破損を残さない。compiler は内部エラーへ写像して `?` 伝播する。raw builder（`chunk` module）は REV-018 と共通で `unstable-bytecode` feature 下へ封印した。
 
 #### 17.2.1 採用判断
 
@@ -1692,8 +1658,6 @@ builder エラーが VM 実行時まで漏れた場合（防御的経路）は�
 - builder 縮小後、通常 compile 経路の観測挙動が変わらない。
 
 ### 17.3 `MakeClosure` capture 記述子の明示化（REV-005）
-
-> 設計ステータス: ✅ 実装済み。`MakeClosure` の operand を「upvalue 数」から `Chunk.prototypes` の「プロトタイプ index」へ変更し、`FunctionPrototype`（`chunk` / `captures`）と明示 `CaptureDesc`（`Local`/`Upvalue`）を導入。compiler は隣接 `GetLocal`/`GetUpvalue` 列の暗黙契約を廃止し、VM は記述子から cell を解決する（`usize::MAX`/Null cell フォールバックを削除。不正記述子は `internal`、範囲は verifier の V5 で拒否）。REV-006 と同一 build で実施した。
 
 #### 17.3.1 採用判断
 
@@ -1822,19 +1786,18 @@ list_dir(path):
 
 #### 17.5.1 位置づけ
 
-user call の最終評価順の正本は第5節（AUD-017）§5.1 および第3.7節 error precedence 表であり、本節はそれらを**新しく変更しない**。REV-012 が指摘するのは実装ではなく、次の drift である。
+user call の最終評価順の正本は第5節（AUD-017）§5.1 および第3.7節 error precedence 表であり、本節はそれらを**新しく変更しない**。REV-012 が指摘したのは実装ではなく、次の drift である。
 
-1. 現行 `language-spec.md`・現行実装は「step/depth 検査 → callee 評価」（callee 評価前に検査）である。
-2. `src/limits.rs` の doc comment と本書 §5.1/§5.6・第3.7節は「callee を先に評価・分類し、user callable だけ step/depth 検査」（callee 先行）を次期契約とする。
-3. `roadmap.md` は AUD-017 / AUD-050 を「完了」と表示するが、これは深度計数値（127→128）の統一を指し、error precedence の callee 先行化は未実装である。
+1. 本書 §5.1/§5.6・第3.7節は「callee を先に評価・分類し、user callable だけ step/depth 検査」（callee 先行）を次期契約とし、それより前の挙動は「step/depth 検査 → callee 評価」（callee 評価前に検査）である。
+2. 深度計数値（127→128）の統一と、error precedence の callee 先行化という 2 つの変更が、ロードマップの 1 つの完了表示に畳まれていた。
 
-つまり「境界値の統一は実装済み」「callee 先行への precedence 変更は未実装」の 2 つが 1 つの完了表示に畳まれていることが問題である。
+現在の評価順の差は冒頭の逸脱一覧を見る。
 
 #### 17.5.2 決定
 
 - 最終意味論は第5節どおり **callee 先行**を維持する（builtin/host function を user 深度で拒否せず、動的 callee の種類を確定してから適切な budget を選べるため）。これは callee の副作用が limit error より前に発生し得る破壊的変更であり、`LanguageRevision` を上げて実施する。
 - `src/limits.rs` の doc comment は「current（callee 評価前検査）」と「target（callee 先行）」を混在させず、どちらの revision の契約かを明記する。実装が現行のうちは current を、切替 commit で target へ更新する。
-- roadmap の AUD-017 / AUD-050 status を、単一の「完了」から次の 2 sub-status へ分割する。
+- roadmap の REV-012 の行で、AUD-017 / AUD-050 の status を単一の「完了」から次の 2 sub-status へ分割する（置き場所は下の D-21 Q3=A）。
   - `depth-counting`（128 user frame 統一）: verified
   - `callee-precedence`（callee 先行への precedence 変更）: planned
 - tree / compiler / VM / callback の評価順切替は同一 commit で行い、backend 差を残さない。
@@ -1847,7 +1810,7 @@ status 表現は §19（文書全体の最終受入基準）および REV-011（
 
 - `src/limits.rs`: doc comment を current/target 明記へ修正する。
 - `src/eval.rs` / `src/compiler.rs` / `src/vm.rs`: callee 先行化を実施する commit で、callee 評価 → callable 分類 → user callable だけ step/depth → arity → args 左→右 → frame/body の順へ揃える。
-- `docs/roadmap.md`: AUD-017 / AUD-050 の status を `depth-counting=verified` / `callee-precedence=planned` へ分割する。
+- `docs/roadmap.md`: REV-012 の行で、AUD-017 / AUD-050 の status を `depth-counting=verified` / `callee-precedence=planned` へ分割する。
 
 #### 17.5.4 error
 
@@ -1868,13 +1831,13 @@ callee の副作用が limit error より前に発生する（従来は検査で
 
 - tree / VM が callee 先行の同一順序で評価する。
 - `limits.rs` doc comment が current/target を混在させない。
-- roadmap の AUD-017 / AUD-050 status が 2 sub-status へ分かれ、`callee-precedence` が verified になるまで「完了」と表示しない。
+- roadmap の REV-012 の行で AUD-017 / AUD-050 の status が 2 sub-status へ分かれ、`callee-precedence` が verified になるまで「完了」と表示しない。
 
 ### 17.6 `remove_dir` の再帰削除と capability の整合（REV-021）
 
 #### 17.6.1 採用判断
 
-現行 `remove_dir` は `std::fs::remove_dir_all`（中身ごと再帰削除）だが、次期 Capability Model は `remove_dir` を `RemoveKind::EmptyDirectory` へ割り当てている。この不整合を、`EmptyDirectory` 権限で再帰削除を許してしまう（過大権限）／非空で突然失敗する（契約違反）のどちらにもしないため、**操作を分割する**。
+REV-021 の前の `remove_dir` は `std::fs::remove_dir_all`（中身ごと再帰削除）だったが、次期 Capability Model は `remove_dir` を `RemoveKind::EmptyDirectory` へ割り当てている。この不整合を、`EmptyDirectory` 権限で再帰削除を許してしまう（過大権限）／非空で突然失敗する（契約違反）のどちらにもしないため、**操作を分割する**。
 
 - 次期 revision で `remove_dir(path)` を**空ディレクトリのみ**削除へ変更する（`std::fs::remove_dir` 相当）。非空なら error。必要 capability は `EmptyDirectory`。
 - 再帰削除は新規 builtin `remove_tree(path)` として分離し、専用 capability `RecursiveDelete` を要求する。`remove_dir` へ `EmptyDirectory` から暗黙昇格させない。
@@ -1916,7 +1879,7 @@ remove_tree(path):
 
 - 非空ディレクトリへの `remove_dir`: safe profile では `host`（category `directory_not_empty`）。legacy では現行どおり false。
 - capability 拒否: 第3.4節「filesystem capability 拒否」の `sandbox`。
-- `remove_tree` の budget / cancel: `budget` / `cancelled`（catch 不能）。
+- `remove_tree` の予算超過・deadline・cancel: 予算超過は §3.3 の予算超過の種別、deadline と cancel は script から見えない terminal（どれも catch 不能。§3.3、loop:drift #395 の D-83 Q1=A、判断役が選択（issue #395））。
 
 第3.4節の host error inventory へ `directory_not_empty` category を追記する。
 
@@ -1943,9 +1906,7 @@ remove_tree(path):
 
 ### 17.7 bytecode 検証と `VerifiedChunk`（REV-006）
 
-> 設計ステータス: ✅ 実装済み。§17.2（REV-004）・§17.3（REV-005）・REV-018 と同一マイルストーンで実装した。`src/verifier.rs` に `VerifiedChunk`（生成は `verify` か信頼済み `from_trusted` のみ）と `verify`（V1〜V9 をプロトタイプ木へ再帰適用し、最初の違反を `ChunkVerifyError` として返す。`From<ChunkVerifyError> for TsumugiError` と `verify_or_internal_error` で `internal` へ写像）を新設。VM の `run_frames` は全命令 dispatch 直前で無条件に `count_step` する層1課金へ変更し、`Loop`/`PrepareCall`/`call_fn_value` の個別課金を廃止（深度上限は `PrepareCall` と `Call` の両方で検査）。`Vm::new` / `run_repl_chunk` は `VerifiedChunk` だけを受け取り、compiler 出力は `from_trusted` で昇格する。停止性は per-instruction 課金で verifier 非依存。本節はそれらが「範囲検証は verifier が担う」と委譲している検証層の正本である。
->
-> **2026-10-20 改訂（2 メーター化）**: 層1 を「全命令で fuel（step）を課金する」から「fuel とは独立した VM instruction watchdog」へ改める。per-instruction の fuel 課金は、[実行予算・協調実行仕様](execution-control.md) §2・§4.1 の「fuel は backend 非依存の論理量で、VM opcode 数そのものではない」と矛盾し、同じ script が tree では成功して VM では step 上限に達する（ループで約 15 倍、再帰で約 11 倍の差）という観測差を生んでいた。改訂後は、**fuel は論理量として tree と同じ課金点で数え、停止性は watchdog が形状非依存に保証する**。層2（verifier・`VerifiedChunk`・API 封印）は変更しない。改訂部分（§17.7.1 層1・§17.7.3・§17.7.5〜§17.7.8）は [実行予算・協調実行仕様](execution-control.md) §14「F-1 実装スライス」で実装済み（2026-10-20）。
+> **2026-10-20 改訂（2 メーター化）**: 層1 を「全命令で fuel（step）を課金する」から「fuel とは独立した VM instruction watchdog」へ改める。per-instruction の fuel 課金は、[実行予算・協調実行仕様](execution-control.md) §2・§4.1 の「fuel は backend 非依存の論理量で、VM opcode 数そのものではない」と矛盾し、同じ script が tree では成功して VM では step 上限に達する（ループで約 15 倍、再帰で約 11 倍の差）という観測差を生んでいた。改訂後は、**fuel は論理量として tree と同じ課金点で数え、停止性は watchdog が形状非依存に保証する**。層2（verifier・`VerifiedChunk`・API 封印）は変更しない。改訂部分は §17.7.1 層1・§17.7.3・§17.7.5〜§17.7.8 である（実装スライスは [実行予算・協調実行仕様](execution-control.md) §14「F-1 実装スライス」）。
 
 #### 17.7.1 採用判断
 
@@ -2126,7 +2087,7 @@ watchdog の上限は `total_fuel × 2 + 16` とする。正規 compiler 出力�
 
 ### 17.8 HumanDisplay / CanonicalRepr / TotalOrder の分離と全順序 sort（REV-017）
 
-> 設計ステータス: ✅ 実装済み（仕様 revision 0.21）。本節は sort / `list_dir` の並び順を「文字列表現比較」から**全値型を覆う単一の全順序 `TotalOrder`** へ移す仕様（revision 0.21）を定める。REV-003（§17.1）が確立した `NumericOrder` を数値帯で再利用し、観測挙動が変わる破壊的変更として扱う。REV-001（HumanDisplay / CanonicalRepr / TotalOrder の 3 層分離）と連動する。
+> 本節は sort / `list_dir` の並び順を「文字列表現比較」から**全値型を覆う単一の全順序 `TotalOrder`** へ移す仕様（revision 0.21）を定める。REV-003（§17.1）が確立した `NumericOrder` を数値帯で再利用し、観測挙動が変わる破壊的変更として扱う。REV-001（HumanDisplay / CanonicalRepr / TotalOrder の 3 層分離）と連動する。
 
 #### 17.8.1 採用判断
 
@@ -2204,7 +2165,7 @@ sort / 比較の per-element 課金は **execution-control.md の charge table�
 
 #### 17.8.7 移行
 
-破壊的変更。仕様 revision を **0.20 → 0.21** へ上げる（`src/embedding.rs` の `LanguageRevision` に `V0_21` を追加し `CURRENT` を更新する実装は未実装側で行う）。
+破壊的変更。仕様 revision を **0.20 → 0.21** へ上げる（`src/embedding.rs` の `LanguageRevision` に `V0_21` を追加し `CURRENT` を更新する）。
 
 影響する script:
 
@@ -2213,7 +2174,7 @@ sort / 比較の per-element 課金は **execution-control.md の charge table�
 - **list_dir の結果順に依存している script**: 名前は Str なので実効順序はコードポイント順のままで、観測差は想定しない（キー経路のみ全順序へ一本化）。
 - **sort の budget / fuel 消費に依存している script**: 全順序化で要素の文字列描画（`render_display` の per-item byte 課金）が sort 経路から外れ、代わりに全順序比較の再帰的要素走査へ charge table の per-element 課金（`1 / element`、値は不変）が載る。このため同じ入力でも sort の fuel / budget 消費が revision 境界で変わる。消費差の「向き」は入力の形で決まる（実装注記）: スカラ列の sort では 0.20 は複合ノードを持たず描画 fuel を積まないため 0.21 の per-element 走査課金のぶん 0.21 の方が多くなり得る一方、複合要素（ネスト List / Dict）を含む sort では 0.20 の描画が要素木を全走査するため 0.20 の方が多くなり得る。したがって本節は「0.21 で一律に減る」ことではなく「revision 境界で消費が決定的に変わり、各 revision 内では決定的」ことを観測差として固定する（§17.8.9 の消費差ピン）。いずれの revision でも消費量は charge table の per-element 課金で有限に上限される。budget / fuel 消費は観測可能・監査対象（manifesto 原則5・原則7）であり、この消費差も順序差と同じく revision 境界で説明される観測差として扱う。revision 0.21 を要求する script にのみ適用される。
 
-移行方針: revision 0.21 を要求する script は新しい全順序で、revision 0.20 以下を要求する script は従来の文字列表現順で動く（revision は link 時に検証される §3）。language-spec は実装が入るまで現行挙動（文字列表現比較）を記述し続け、本節への drift note で予告する（部分実装を『次 revision 対応』と表示しない運用規則に従う）。
+移行方針: revision 0.21 を要求する script は新しい全順序で、revision 0.20 以下を要求する script は従来の文字列表現順で動く（revision は link 時に検証される §3）。language-spec へは実装と受入の後に統合する（部分実装を『次 revision 対応』と表示しない運用規則、§1）。
 
 #### 17.8.8 テスト行列
 
@@ -2227,7 +2188,7 @@ DESIGN ONLY（本節はテストを記述しない。意図するテストを記
 - Fn / Error: 帯内で安定（元順序保持）であること。tree の `Fn` と VM の `VmFn` が同一帯・同順位であること。
 - 安定性: 同順位要素が元の相対順序を保つこと。
 - budget: 大きなリスト・深いネストで per-element 課金により有限停止すること。
-- **tree / VM parity**: §17.1.9 の `numeric_strict_comparison` golden fixture と同様に、全順序 sort / list_dir の golden fixture（例: `total_order_sort`）を追加し、tree と VM で順序・budget 消費・error が一致することを固定する。加えて `value.rs` に `TotalOrder` の unit test（全順序 3 性質・帯順・再帰・NaN 末尾）を置く。
+- **tree / VM parity**: §17.1（REV-003）の `numeric_strict_comparison` golden fixture と同様に、全順序 sort / list_dir の golden fixture（例: `total_order_sort`）を追加し、tree と VM で順序・budget 消費・error が一致することを固定する。加えて `value.rs` に `TotalOrder` の unit test（全順序 3 性質・帯順・再帰・NaN 末尾）を置く。
 
 #### 17.8.9 受入基準
 
@@ -2238,13 +2199,9 @@ DESIGN ONLY（本節はテストを記述しない。意図するテストを記
 - 全順序の 3 性質（完全性・反対称性・推移性）を property / unit test が示す。
 - 安定ソートで同順位要素の元順序が保たれる。
 - charge table（execution-control.md）の課金値を変更していない。budget 超過で有限停止する。sort の per-element 課金は不変で、全順序比較の再帰的要素走査にも適用する（共有 DAG 要素の比較も per-element 走査課金で有限停止する）。描画 byte 課金が sort 経路から外れ比較走査課金が載ることによる revision 境界の budget / fuel 消費差は、tree / VM 間 fuel が byte-exact 一致しない（`tests/differential.rs` 不変量）ため、同一 backend（embedding tree engine）の 0.20 vs 0.21 比較で固定する（`tests/total_order_budget.rs`）。parity golden fixture（`total_order_sort`）は順序・error の tree / VM 観測一致を担保する。
-- revision が 0.20 → 0.21 へ上がり、language-spec は実装完了まで現行挙動を記述し続ける（drift note で予告）。
+- revision が 0.20 → 0.21 へ上がり、language-spec へは実装と受入の後に統合する（§1）。
 
-#### 17.8.10 実装状況
-
-✅ 実装済み（仕様 revision 0.21）。`src/value.rs` に全 10 variant を覆う単一の全順序 `TotalOrder`（純比較版 `compare` と per-element 課金版 `compare_budgeted`）を新設し、`builtin_sort_budgeted`・`list_dir` が revision で経路を分岐する（`>= V0_21` で全順序、`<= V0_20` は従来の描画キー順を温存）。`src/embedding.rs` に `LanguageRevision::V0_21`（`CURRENT=V0_21`、`as_str()=>"0.21"`）を追加し、tree（`src/eval.rs`）/ VM（`src/vm.rs`）に対称な `language_revision` フィールドと set/get を足して run-path で注入する。帯順は §17.8.3 どおり Null < Bool < 数値 < Str < List < Dict < Fn < Error、数値帯は `NumericOrder` 再利用で NaN を末尾固定、List / Dict は再帰辞書式＋prefix 規則、Fn / Error は帯内 Equal。`value.rs` の unit test 12 件（全順序 3 性質・帯順・再帰・prefix・NaN 末尾・安定性・大規模/深ネスト停止）、golden fixture `total_order_sort`（tree / VM parity）、`tests/total_order_budget.rs`（同一 backend 0.20 vs 0.21 の消費差・単調性・完了）で固定する。charge table（execution-control.md）の課金値は不変。REV-001 の 3 層分離（HumanDisplay / CanonicalRepr / TotalOrder）と連動し、`TotalOrder` が規範成果物となる。
-
-#### 17.8.11 設計レビューへの対応（revision 1）
+#### 17.8.10 設計レビューへの対応（revision 1）
 
 本節は設計レビュー（CHANGES_REQUESTED, MEDIUM 1 / NIT 1）を受けた改訂版。各 finding への対応は次のとおり。
 
@@ -2261,8 +2218,8 @@ DESIGN ONLY（本節はテストを記述しない。意図するテストを記
 4. **Builtin/error基盤**: AUD-049単一registry、AUD-019共通error constructorと完全一致test。§17.1（REV-003）の `NumericOrder` 集約、および §17.4（REV-009）・§17.6（REV-021）で追加するhost error category（`directory_read` / `invalid_encoding` / `directory_not_empty`）のinventory登録もここで行う。
 5. **値表現**: AUD-047 List/Dict COW、続けてAUD-048 FunctionId。scaling/identity testを先に追加する。
 6. **binding/transaction**: AUD-016 VM fresh cell、AUD-024全language-state REPL journal。FunctionId counterをrollback対象外に固定する。
-7. ✅ **bytecode検証面（実装済み）**: §17.7（REV-006）の `VerifiedChunk`/verifier と per-instruction step 課金を軸に、§17.2（REV-004）の `patch_jump` fallible化とbuilder封印、§17.3（REV-005）の `MakeClosure` capture記述子化、REV-018のraw module封印を同一マイルストーンで実装した。VM入口を `VerifiedChunk` へ限定し、停止性はper-instruction課金（verifier非依存）で担保する。観測挙動はstep到達点以外不変。
-8. **境界挙動**: ~~AUD-034 `path_join`~~（✅ 完了、revision 0.16）、AUD-036 checked変換/Exited、~~AUD-018 CLI args/stdin~~（✅ 完了、revision 0.18）、~~AUD-033 EOF診断~~（✅ 完了）、~~§17.1（REV-003）の混合数値比較~~（✅ 完了、revision 0.19）。§20の `format_time` `%z`/`%Z` 追加も独立性が高い純粋フォーマット拡張としてこの面で実装できる（capability非依存）。
+7. **bytecode検証面**: §17.7（REV-006）の `VerifiedChunk`/verifier と per-instruction step 課金を軸に、§17.2（REV-004）の `patch_jump` fallible化とbuilder封印、§17.3（REV-005）の `MakeClosure` capture記述子化、REV-018のraw module封印を同一マイルストーンで実装する。VM入口を `VerifiedChunk` へ限定し、停止性はper-instruction課金（verifier非依存）で担保する。観測挙動はstep到達点以外不変。
+8. **境界挙動**: AUD-034 `path_join`、AUD-036 checked変換/Exited、AUD-018 CLI args/stdin、AUD-033 EOF診断、§17.1（REV-003）の混合数値比較。§20の `format_time` `%z`/`%Z` 追加も独立性が高い純粋フォーマット拡張としてこの面で実装できる（capability非依存）。
 9. **capability縦切り**: sandbox OnceLockをExecutionContext FilesystemCapabilityへ移し、tree/VM/importを同じpolicyへ接続する。§17.4（REV-009）の `list_dir` 部分失敗/非UTF-8、§17.6（REV-021）の `remove_dir`（空のみ）/`remove_tree`（`RecursiveDelete`）分割をこのcapability面で実装する。
 10. **検証基盤**: cargo-fuzzのfrontend/compiler/vm_chunk、続いてcapability完成後にevaluator/differential target。
 11. **次期仕様反映**: 全受入基準通過後にだけ `language-spec.md`、`LANG_GUIDE.md`、設計文書、revisionを更新する。
@@ -2339,7 +2296,7 @@ Tsumugi の時刻は内部表現も出力基準も UTC 固定である。`now()`
 
 ### 20.7 後方互換
 
-現行の `format_unix_timestamp` は既知6記号のみを順次 `str::replace` で置換し、それ以外の文字列（`%z` / `%Z` を含む任意の未知記号）は入力にそのまま残す。したがって現状 `format_time(0, "%Y %z")` は `"1970 %z"` を返す。
+本決定の前の `format_unix_timestamp` は既知6記号のみを順次 `str::replace` で置換し、それ以外の文字列（`%z` / `%Z` を含む任意の未知記号）は入力にそのまま残していた。そのため本決定の前は `format_time(0, "%Y %z")` が `"1970 %z"` を返し、本決定の後は `"1970 +0000"` を返す。
 
 本決定で `%z` / `%Z` に意味を与えると、**フォーマット文字列中に文字列 `%z` / `%Z` を含め、未置換のまま出力に残ることを期待していた既存スクリプト**の出力のみが変化する（例: `"%Y%z"` が `"1970%z"` から `"1970+0000"` へ）。このリスクは小さいと評価する。
 
@@ -2378,7 +2335,7 @@ Tsumugi の時刻は内部表現も出力基準も UTC 固定である。`now()`
 
 ## 21. 値のネスト深度上限（issue #290）
 
-設計ステータス: **実装済み・言語仕様へ統合済み**（言語仕様 0.21 の「実行安全性」「値のネスト深度制限」。実装は [実行予算・協調実行仕様](execution-control.md) §14 の fix-value-nesting-depth-limit、受入試験は `tests/value_nesting_depth_limit.rs`）。§21.3 の「課金」は [issue #304](https://github.com/kamonabe/Tsumugi/issues/304) の判断で改訂した（深度の読み直しへの fuel 課金。fix-value-depth-settle-quadratic で実装済み）
+言語仕様の「実行安全性」「値のネスト深度制限」に統合する節である（実装スライスは [実行予算・協調実行仕様](execution-control.md) §14 の fix-value-nesting-depth-limit・fix-value-depth-settle-quadratic）。§21.3 の「課金」は [issue #304](https://github.com/kamonabe/Tsumugi/issues/304) の判断で改訂した（深度の読み直しへの fuel 課金）。
 
 ### 21.1 背景・課題
 
