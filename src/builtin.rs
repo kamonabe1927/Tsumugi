@@ -198,6 +198,18 @@ impl Evaluator {
                 &mut self.budget,
                 line,
             )?)
+        } else if name == "replace" {
+            Some(crate::builtin_core::builtin_replace_budgeted(
+                &evaluated,
+                &mut self.budget,
+                line,
+            )?)
+        } else if name == "path_join" {
+            Some(crate::builtin_core::builtin_path_join_budgeted(
+                &evaluated,
+                &mut self.budget,
+                line,
+            )?)
         } else if name == "contains" {
             Some(crate::builtin_core::builtin_contains_budgeted(
                 &evaluated,
