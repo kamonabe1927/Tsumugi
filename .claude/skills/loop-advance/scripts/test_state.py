@@ -216,5 +216,61 @@ class MergedToday(unittest.TestCase):
         self.assertEqual(s.merged_today(merged, NOW), 1)
 
 
+class WaitFrom(unittest.TestCase):
+    """3 時間待ちの時計を戻さない、競合なしの main の取り込み（loop-guard §6 の 6）。"""
+
+    F = staticmethod(lambda *names: [{"filename": n} for n in names])
+
+    def test_clean_merge(self):
+        self.assertTrue(s.clean_main_merge(["p", "m"], self.F("README.md"), self.F("src/a.rs"), True))
+
+    def test_file_differs_from_both_parents(self):
+        # 競合の解消・両側の変更の組み合わせ
+        self.assertFalse(s.clean_main_merge(["p", "m"], self.F("docs/slices.toml"),
+                                            self.F("docs/slices.toml", "src/a.rs"), True))
+
+    def test_rename_counts_old_name(self):
+        vs_main = [{"filename": "b.rs", "previous_filename": "a.rs"}]
+        self.assertFalse(s.clean_main_merge(["p", "m"], self.F("a.rs"), vs_main, True))
+
+    def test_not_main_or_not_merge_or_unknown(self):
+        self.assertFalse(s.clean_main_merge(["p", "m"], self.F("x"), self.F("y"), False))
+        self.assertFalse(s.clean_main_merge(["p"], self.F("x"), self.F("y"), True))
+        self.assertFalse(s.clean_main_merge(["p", "m"], None, self.F("y"), True))
+        many = self.F(*[str(i) for i in range(s.COMPARE_FILES_MAX)])
+        self.assertFalse(s.clean_main_merge(["p", "m"], many, self.F("y"), True))
+
+    def commits(self):
+        def cm(sha, *parents):
+            return {"sha": sha, "parents": [{"sha": x} for x in parents]}
+        return [cm("a", "base"), cm("b", "a"), cm("m1", "b", "main1"), cm("m2", "m1", "main2")]
+
+    def test_skips_trailing_clean_merges(self):
+        clean = lambda c: len(c["parents"]) == 2  # noqa: E731
+        self.assertEqual(s.wait_from(self.commits(), "m2", clean), "b")
+
+    def test_stops_at_unclean_merge(self):
+        clean = lambda c: c["sha"] == "m2"  # noqa: E731
+        self.assertEqual(s.wait_from(self.commits(), "m2", clean), "m1")
+
+    def test_non_merge_head_is_itself(self):
+        self.assertEqual(s.wait_from(self.commits(), "b", lambda c: True), "b")
+
+    def test_judge_uses_wait_from(self):
+        com = [c(LOOP, REVIEW_OK, "2026-11-01T11:10:00Z"), c(LOOP, GATE_OK, "2026-11-01T11:20:00Z")]
+        p = pr(head="2026-11-01T11:00:00Z", comments=com)
+        out = s.judge([p], [], [], NOW)["open_loop_prs"][0]
+        self.assertFalse(out["merge_candidate"])
+        p["wait_from_sha"] = "0000000aaa"
+        p["wait_from_pushed_at"] = "2026-11-01T08:00:00Z"
+        out = s.judge([p], [], [], NOW)["open_loop_prs"][0]
+        self.assertTrue(out["merge_candidate"])
+        self.assertEqual(out["wait_from_sha"], "0000000aaa")
+        # レビュー・審査は最新 commit を名指ししたものだけを数えるのは変わらない
+        p["comments"] = [c(LOOP, REVIEW_OK.replace("abc1234", "0000000"), "2026-11-01T11:10:00Z"),
+                         c(LOOP, GATE_OK, "2026-11-01T11:20:00Z")]
+        self.assertFalse(s.judge([p], [], [], NOW)["open_loop_prs"][0]["merge_candidate"])
+
+
 if __name__ == "__main__":
     unittest.main()

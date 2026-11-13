@@ -187,6 +187,52 @@ def stuck_counts(closed: list[dict]) -> dict[str, int]:
     return out
 
 
+COMPARE_FILES_MAX = 300  # compare API が返すファイルの上限。これに届けば数えきれないとみなす
+
+
+def changed_names(files: list[dict]) -> set[str]:
+    """compare API の files から、変わったパス（名前を変えたものは前の名前も）を集める。"""
+    out = set()
+    for f in files:
+        out.add(f.get("filename"))
+        if f.get("previous_filename"):
+            out.add(f["previous_filename"])
+    return out
+
+
+def clean_main_merge(parents: list[str], vs_pr: list[dict] | None, vs_main: list[dict] | None,
+                     main_parent_in_base: bool) -> bool:
+    """3 時間待ちの時計を戻さない、競合なしの main の取り込みか（loop-guard §6 の 6）。
+
+    親が 2 つで、2 つ目の親が main に含まれ、merge commit のどのファイルも、1 つ目の親（それまでの PR の head）か
+    2 つ目の親（main）のどちらかとまったく同じ中身であるときだけ真。両方の親と違うファイルが 1 つでもあれば
+    （競合の解消、両側の変更の組み合わせ）偽。差分が取れない・数えきれないときも偽（迷えば時計を戻す）。
+    vs_pr は 1 つ目の親から merge commit への、vs_main は 2 つ目の親から merge commit への compare の files。
+    """
+    if len(parents) != 2 or not main_parent_in_base or vs_pr is None or vs_main is None:
+        return False
+    if len(vs_pr) >= COMPARE_FILES_MAX or len(vs_main) >= COMPARE_FILES_MAX:
+        return False
+    return not (changed_names(vs_pr) & changed_names(vs_main))
+
+
+def wait_from(commits: list[dict], head_sha: str | None, is_clean) -> str | None:
+    """3 時間待ちを数え始める commit（loop-guard §6 の 6）。
+
+    最新 commit から 1 つ目の親をたどり、競合なしの main の取り込み（is_clean が真）を飛ばした最初の commit。
+    たどれない（PR の commit 一覧に無い）ときは最新 commit にする。
+    """
+    by_sha = {c["sha"]: c for c in commits}
+    cur = head_sha
+    while cur in by_sha:
+        c = by_sha[cur]
+        parents = [p["sha"] for p in c.get("parents", [])]
+        if len(parents) != 2 or parents[0] not in by_sha or not is_clean(c):
+            return cur
+        cur = parents[0]
+    return head_sha
+
+
 def merged_today(merged: list[dict], now: datetime) -> int:
     """JST の今日にマージされたループの PR の数（loop:revert は数えない）。"""
     today = now.astimezone(JST).date()
@@ -209,7 +255,8 @@ def judge(prs: list[dict], issues: list[dict], merged: list[dict], now: datetime
             continue
         ws = writes(pr)
         head_sha = (pr.get("head") or {}).get("sha")
-        pushed_at = parse_time(pr.get("head_pushed_at"))
+        # 時計は、競合なしの main の取り込みを飛ばした commit の push から数える（取れなければ最新 commit）
+        pushed_at = parse_time(pr.get("wait_from_pushed_at") or pr.get("head_pushed_at"))
         running_at = parse_time(pr.get("running_labeled_at"))
         review = verdict(ws, head_sha, REVIEW_HEAD, REVIEW_OK)
         gate = verdict(ws, head_sha, GATE_HEAD, GATE_OK, GATE_NG)
@@ -237,6 +284,8 @@ def judge(prs: list[dict], issues: list[dict], merged: list[dict], now: datetime
             "labels": sorted(labels),
             "head_sha": head_sha,
             "head_pushed_at": pr.get("head_pushed_at"),
+            "wait_from_sha": pr.get("wait_from_sha") or head_sha,
+            "wait_from_pushed_at": pr.get("wait_from_pushed_at") or pr.get("head_pushed_at"),
             "revert_exempt": is_revert,
             "pending_decision": pending,
             "running_stale": "loop:running" in labels and (running_at is None or now - running_at >= RUNNING_STALE),
@@ -292,6 +341,27 @@ def gh(path: str, paginate: bool = True):
     return pages[0] if len(pages) == 1 else pages
 
 
+def pushed_time(repo: str, sha: str | None) -> str | None:
+    if not sha:
+        return None
+    suites = gh(f"repos/{repo}/commits/{sha}/check-suites?per_page=100", paginate=False).get("check_suites", [])
+    times = sorted(cs["created_at"] for cs in suites if cs.get("created_at"))
+    return times[0] if times else None
+
+
+def is_clean_main_merge(repo: str, commit: dict, base: str) -> bool:
+    parents = [p["sha"] for p in commit.get("parents", [])]
+    if len(parents) != 2:
+        return False
+    try:
+        in_base = gh(f"repos/{repo}/compare/{parents[1]}...{base}", paginate=False).get("status") in ("ahead", "identical")
+        vs_pr = gh(f"repos/{repo}/compare/{parents[0]}...{commit['sha']}", paginate=False).get("files")
+        vs_main = gh(f"repos/{repo}/compare/{parents[1]}...{commit['sha']}", paginate=False).get("files")
+    except subprocess.CalledProcessError:
+        return False
+    return clean_main_merge(parents, vs_pr, vs_main, in_base)
+
+
 def collect(repo: str, now: datetime):
     prs = gh(f"repos/{repo}/pulls?state=open&per_page=100")
     for pr in prs:
@@ -305,9 +375,14 @@ def collect(repo: str, now: datetime):
         pr["commit_count"] = len(commits)
         # push の時刻は、commit の日付ではなく check suite の作成時刻で見る（loop-guard §6 の 6）
         sha = (pr.get("head") or {}).get("sha")
-        suites = gh(f"repos/{repo}/commits/{sha}/check-suites?per_page=100", paginate=False).get("check_suites", [])
-        times = sorted(cs["created_at"] for cs in suites if cs.get("created_at"))
-        pr["head_pushed_at"] = times[0] if times else None
+        pr["head_pushed_at"] = pushed_time(repo, sha)
+        base = (pr.get("base") or {}).get("ref", "main")
+        anchor = wait_from(commits, sha, lambda c: is_clean_main_merge(repo, c, base))
+        if anchor != sha:
+            at = pushed_time(repo, anchor)
+            if at:  # 起点の commit に check suite が無ければ（まとめて push されたなど）、最新 commit から数える
+                pr["wait_from_sha"] = anchor
+                pr["wait_from_pushed_at"] = at
         if "loop:running" in {lb["name"] for lb in pr.get("labels", [])}:
             events = gh(f"repos/{repo}/issues/{n}/events?per_page=100")
             at = [e["created_at"] for e in events
