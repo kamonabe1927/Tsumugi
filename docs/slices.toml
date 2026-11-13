@@ -822,3 +822,21 @@ acceptance = ["FWR-AT-01..04"]
 design_pr  = 381
 order      = 34
 impl_pr    = 385
+
+# issue #358（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。tree の `for` が List の反復列を
+# 全要素の複製で作り、Dict・Str の反復列も含めて heap に課金しない（再帰で heap 上限を素通りして abort する）のを、List は
+# Rc 共有、Dict・Str は tree と VM で同じ課金（List body・String body・§5.3 の累積）に直す（execution-control §5.2・§5.3、
+# semantic-decisions §11.2）。parent は heap accounting を入れた REV-015。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
+# （done を含む全スライスで重複を弾く）。この PR では付け直しをせず、仮にすべてのスライスより後（97）に置いた。扱いは PR の
+# 判断の候補 Q1 に書き、Q1=A（判断役が選択（PR #388））に決まった。マージ後に PM が付け直しだけの状態整理 PR で 35 より前へ移す。見積もり: src/ 60〜140 行、触る仕組みは `for` の反復列の作り方
+# 1 つ、受入基準 4。
+[[slice]]
+id         = "fix-for-iter-snapshot-charge"
+title      = "for の反復列を、List は開始時の backing の Rc 共有で持ち、Dict・Str は tree と VM で同じく List body・String body・string の累積に課金して作る（execution-control §5.2・§5.3、issue #358）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-for-iter-snapshot-charge 実装スライス（`for` の反復列を共有・課金する）" }
+acceptance = ["FIS-AT-01..04"]
+design_pr  = 388
+order      = 97
