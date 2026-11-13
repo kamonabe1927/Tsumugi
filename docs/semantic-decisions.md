@@ -1279,9 +1279,11 @@ ClassDef statementはfresh slot/cellへ `UninitializedClass` を置き、method 
 | `BuildClass`へ非関数method値 | `internal` | `内部エラー: BuildClass に関数以外のメソッド値が渡されました` / opcode行 |
 | property名constant不正 | `internal` | `内部エラー: プロパティ名定数が不正です` / opcode行 |
 | constructor frame戻り状態不正 | `internal` | `内部エラー: constructor frame の戻り状態が不正です` / call行 |
-| Instance生成前のlogical heap budget不足 | `budget` | `heap の上限を超えました (上限: {limit})` / class call行 |
+| Instance生成前のlogical heap budget不足 | `heap_limit` | `ヒープの総バイト数が上限を超えました (上限: {limit} バイト)` / class call行 |
 
 trace frame名は `{Class}.{method}`。constructor arity失敗ではinit frameを追加しない。
+
+「Instance生成前のlogical heap budget不足」の行は、loop:drift #395 の D-89 を受けて、kind `budget`・`heap の上限を超えました (上限: {limit})` から、§3.4 の「live heapの上限」の行と同じ kind `heap_limit` と文言に直した（Q1=A、判断役が選択（issue #395））。理由: §3.3（D-83 Q1=A）は予算超過を 6 種に分けており、kind `budget` はもう無い。本節は Instance の保持を総heap budgetで制御すると定めており（§15.13 のテスト行列の lifecycle、§15.14 の受入基準）、超えるのは [実行予算・協調実行仕様](execution-control.md) の `max_live_heap_bytes`（§7.2 の `HeapBytes`）1 つなので、同じ上限の超過を §3.4 の既存の 1 行（実装済みの `heap_limit`）で表すほうが §3.3 と揃い、1 つの予算に文言が 1 つで tree・VM や値の種類で message が分かれる余地が無い（[マニフェスト](manifesto.md) 原則 5・8）。Instance の論理サイズの値（execution-control §5.1 の表に Instance の行はまだ無い）は、この判断では決めていない。採らなかった案B（kind は `heap_limit` にし、Instance 専用の文言を §3.4 に 1 行足す）は、同じ heap 予算の超過に 2 つの文言ができ、Instance の生成で止まったことは line（class call 行）で既に分かるので、文言を分けて得られる保証が無いため採らない。
 
 ### 15.12 移行
 
@@ -1465,7 +1467,7 @@ responseの `set-cookie` は初版ではscriptへ返さない。response header�
 - effective total deadlineはexecution deadline、capability上限、request policyの最小値。
 - connect/read timeoutはtotal deadlineを超えない。
 - cancellation tokenをDNS、connect、TLS、write、readの各待機へ伝播し、可能な限りtransportをabortする。
-- host/tenant/origin単位のtoken bucketと同時実行semaphoreをhostが提供する。rate waitがdeadlineを超える場合は待たずにbudget/timeout error。
+- host/tenant/origin単位のtoken bucketと同時実行semaphoreをhostが提供する。concurrency・rateは量の上限ではなく待ちの制御であり、予算超過の種別を持たない。rate waitまたはsemaphoreの待ちがdeadlineを超える場合は待たずに止め、deadline超過のterminal（§3.3。canonical errorのkindを持たず、scriptでcatch不能）とする（§16.12、loop:drift #395 の D-89 Q2=A、判断役が選択（issue #395））。
 - 自動retryは初版なし。将来追加する場合はmethod idempotency、retry回数、追加budget、auditを別決定する。
 
 ### 16.11 audit / REPL transaction
@@ -1494,13 +1496,14 @@ HTTP request完了後に同じexecutionが未捕捉errorでrollbackしてもHTTP
 | `body` がStr/Nullでない | `builtin_type` | `http_request.body は Str または Null である必要があります: {actual_type}` |
 | method token / URL syntax不正 | `argument` | `http_request.{key} が不正です: {reason}` |
 | DNS/IP/redirect/TLS/protocol/UTF-8/transport | `host` | `host function の実行に失敗しました: http_request ({category})` |
-| byte/call/concurrency budget | `budget` | `{budget_name} の上限を超えました (上限: {limit})` |
 
 `{reason}` は `invalid_method`、`invalid_url` のいずれか、`{category}` は `dns`、`address_policy`、`redirect_policy`、`redirect_loop`、`tls`、`protocol`、`utf8`、`transport` のいずれかに限定する。OS/libraryの生messageを埋め込まない。request Dictの検査順は `method`存在→`url`存在→unknown keyのcodepoint順→method型→url型→headers型/各値のStr型→body型→method token→URL syntax→header名のcodepoint順にname syntax/forbidden name/value syntax→method/scheme/host/port/path policy とし、最初の失敗だけを返す。`{header}` はlowercase正規化後のheader名で、control characterを含む未正規化値をmessageへ出さない。
 
-lineは `http_request(...)` call式。host内部traceは出さない。上の byte/call/concurrency budget の超過はscriptでcatch不能、`capability/host/argument/builtin_type` はcatch可能とする。deadline超過とcancellationは canonical error の kind を持たず、scriptから見えないterminal（§3.3）なので、この表に行を持たない（どれも catch できない）。
+lineは `http_request(...)` call式。host内部traceは出さない。`capability/host/argument/builtin_type` はcatch可能とする。HTTP requestの回数とbyteの上限超過は、§3.4 の host call の `io_limit` の 4 行（呼び出し回数・request の総バイト数・response の総バイト数・総バイト数）で表し（[実行予算・協調実行仕様](execution-control.md) §6.1 の任意host callの課金）、この表に行を持たない（scriptでcatch不能）。concurrency・rateは予算超過の種別を持たず、待ちがdeadlineに収まらなければdeadline超過のterminalで止まる（§16.10）。deadline超過とcancellationは canonical error の kind を持たず、scriptから見えないterminal（§3.3）なので、この表に行を持たない（どれも catch できない）。
 
 deadline・cancellation の扱いは、PR #398 の判断の候補 drift-20261113 を受けて、kind `timeout`・`cancelled` の 2 行から上の形に直した（Q1=A、判断役が選択（PR #398））。理由: §3.3 は loop:drift #395 の D-83 Q1=A で deadline・cancel を script から見えない terminal と決めており、本表は §3.4 の inventory へ連結する HTTP adapter の extension の正本なので、§3.3 に無い kind の行を残すと同じ文書の中で矛盾する。この 2 行は旧 §3.3 の kind をそのまま引いたもので、[実行予算・協調実行仕様](execution-control.md) §2 の不変条件 3・§7 とも合い、catch 可否も変わらないので、D-83 の決定から新しい判断を足さずに書ける（[マニフェスト](manifesto.md) 原則 6・9）。byte/call/concurrency budget の行をどの予算超過の種別と文言に写すかは D-83 から決まらないため、この変更では変えていない。採らなかった案B（この表を変えず、deadline・cancel の行も次の判断に回す）は、D-83 で既に決まっている行まで待たせ、§3.3 との矛盾を本文に残すため採らない。案C（budget の行も含めて全部揃える）は、種別と文言を判断を通さずに決めることになり、concurrency の上限には写し先の constructor も無いため採らない。
+
+byte/call/concurrency budget の行は、loop:drift #395 の D-89 を受けて、kind `budget`・`{budget_name} の上限を超えました (上限: {limit})` の 1 行を消し、回数と byte の上限は §3.4 の host call の `io_limit` の 4 行で表し、concurrency・rate は予算超過の種別を持たない待ちとした（§16.10 の「budget/timeout error」も deadline 超過の terminal に直した。Q2=A、判断役が選択（issue #395））。理由: [実行予算・協調実行仕様](execution-control.md) §6.1 は任意 host call を `host_calls`・`host_request_bytes`・`host_response_bytes`・`host_call_bytes` に課金し、descriptor の上限と execution の残量の小さい方を `limit` とする `BudgetExceeded` に写すと定めており、HTTP は host function として登録する adapter なので、この 4 つの resource と §3.4 の 4 行がそのまま当たり、HTTP のための kind・文言・`{budget_name}` の値の列挙を新しく決めずに済む（[マニフェスト](manifesto.md) 原則 8）。execution-control §7.2 の予算 resource の一覧に concurrency は無く、同時実行の過負荷は §12 で予算超過ではなく admission（待ち・`Backpressure`）として扱っており、§16.10 も concurrency・rate を host が提供する semaphore・token bucket と書いているので、待ちの制御とするほうが両方と同じ向きである。待ちは deadline で必ず止まり（execution-control §2 の不変条件 1・3）、host の semaphore・token bucket と `EngineLimits` が同時実行の制御を持ち続けるので、原則 3 の「同時実行数も制御対象」と原則 6 は保たれる。§16.10 の「deadline を超える待ちは待たずに止める」挙動は変えず、止まり方の名前を §3.3 の deadline の terminal に揃えただけである。採らなかった案B（kind は `io_limit` にし、`{budget_name}` を残した HTTP 用の 1 行を §3.4 に足す）は、同じ resource の超過に constructor が二重になり（原則 5）、concurrency の超過を `io_limit` にすると execution-control §7.2 に無い resource の `BudgetExceeded` を作ることになり、`{budget_name}` の値の列挙も新しく要るため採らない。案C（HTTP 専用の予算超過の種別を足す）は、§3.3 の 6 種・[言語仕様](language-spec.md)・execution-control の列挙と `is_uncatchable` を、着手 gate が閉じている未実装の機能のために広げることになり（原則 8）、§3.2 が求める原因の識別は kind を増やさなくても `BudgetExceeded` の resource と文言で満たせるため採らない。
 
 ### 16.13 移行
 
