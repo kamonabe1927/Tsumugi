@@ -834,9 +834,10 @@ impl_pr    = 385
 [[slice]]
 id         = "fix-for-iter-snapshot-charge"
 title      = "for の反復列を、List は開始時の backing の Rc 共有で持ち、Dict・Str は tree と VM で同じく List body・String body・string の累積に課金して作る（execution-control §5.2・§5.3、issue #358）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-for-iter-snapshot-charge 実装スライス（`for` の反復列を共有・課金する）" }
 acceptance = ["FIS-AT-01..04"]
 design_pr  = 388
+impl_pr    = 402
 order      = 97
