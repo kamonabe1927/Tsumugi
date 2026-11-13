@@ -109,19 +109,20 @@ Tsumugiは、言語処理系の開発を入り口から理解するための個�
 
 ### for ループのイテレーション: スナップショット方式
 
-for ループはイテレーション対象のコレクションを **開始時にクローン（コピー）** して、コピーに対して走査する。
+for ループは、ループ開始時のコレクションの状態を反復列として保持して走査する。List は開始時の backing を `Rc` で共有し（複製しない）、Dict・Str は key・文字の列を課金済みの List として作る。
 
 ```rust
-let items: Vec<Value> = match &collection {
-    Value::List(list) => (**list).clone(),  // ← 開始時点の要素を snapshot
+match &collection {
+    Value::List(list) => Rc::clone(list),  // ← 開始時の backing を共有（複製・追加課金なし）
+    Value::Dict(_) | Value::Str(_) => /* key・文字を課金済みの List にする（tree / VM 共通） */,
     ...
-};
+}
 ```
 
-`Value::List` は `Rc<Vec<Value>>` の copy-on-write（AUD-047）なので、`Value` レベルの clone はハンドル共有で O(1) だが、for は要素列を snapshot したいので `(**list).clone()` で Vec を複製する。ループ本体で元の binding を変更しても `Rc::make_mut` が detach するため、snapshot 済みの要素列は変わらない。
+`Value::List` は `Rc<Vec<Value>>` の copy-on-write（AUD-047）なので、`Rc` の共有は O(1) で要素を複製しない。ループ本体で元の binding を変更しても `Rc::make_mut` が detach するため、共有している開始時の backing は変わらない。Dict・Str の反復列は `Value::new_iter_str_list`（`src/value.rs`）で作り、各要素の String body と List body を live heap に、文字列の生成を累積（`string_allocations`・`string_bytes`）に課金する（[実行制御](execution-control.md) §5.2・§5.3）。反復列はループの終わりで frame とともに release される。
 
 検討した選択肢:
-1. **スナップショット方式（clone）** — 採用。ループ開始時の状態を保持して走査する
+1. **スナップショット方式** — 採用。ループ開始時の状態を保持して走査する（List は `Rc` 共有）
 2. **参照方式（借用）** — ループ中にリストを変更できなくなる（Rust の借用ルール制約）。push/pop が使えないのは不便
 3. **破壊的方式（オリジナルを直接走査）** — ループ中に要素を削除するとイテレーション回数が変わり、直感に反する動作になる
 
@@ -142,7 +143,7 @@ end
 なぜこの方式か:
 - **安全性**: ループ中にリストを変更してもイテレータが壊れない。「ループが何回回るか」は開始時点で確定する
 - **直感性**: 「3要素あるリストを for で回したら3回回る」が常に成り立つ。途中で要素が消えて2回で終わる、という驚きがない
-- **トレードオフ**: コレクション全体のメモリコピーが発生するため、巨大なリスト（数万要素〜）では余分なメモリを消費する。現時点では許容範囲と判断
+- **トレードオフ**: List は開始時には複製しない。ループ本体で元の binding を変更したときだけ、COW の detach で backing を 1 回複製する（上の `pop` の例）。Dict・Str は反復列（key・文字の List）を開始時にまとめて作るため、要素数ぶんのメモリを消費する（予算に課金され、上限で止まる）。反復ごとに 1 要素ずつ作る遅延方式は、課金の数え方と VM の命令が変わるので採っていない
 
 「ループ中に不要な要素を除外したい」ユースケースは、新しいリストを組み立てるパターンで対応する:
 

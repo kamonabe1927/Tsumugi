@@ -662,6 +662,61 @@ fn smoke_default_single_failure_agrees() {
     });
 }
 
+/// `for` の反復列の課金（fix-for-iter-snapshot-charge、FIS-AT-03 の軸 (A)）: 長さの違う key の Dict と、
+/// 複数 byte の文字を含む Str を `for` する script は、両 engine で成功し、string の累積・per-item peak
+/// が exact 一致する。
+#[test]
+fn for_iteration_list_of_dict_and_str_charges_agree() {
+    assert_single(&SingleFixture {
+        label: "for: Dict（長さの違う key）の反復列",
+        source: "let d = {\"a\": 1, \"bcd\": 2, \"é\": 3, \"日本語\": 4}\n\
+                 let n = 0\nfor k in d\n    n = n + len(k)\nend\nprint(n)\n",
+        limits: Limits::Default,
+        expect: ExpectOutcome::Success,
+    });
+    assert_single(&SingleFixture {
+        label: "for: Str（複数 byte の文字）の反復列",
+        source: "let s = \"aé日😀bc\"\n\
+                 let n = 0\nfor c in s\n    n = n + len(c)\nend\nprint(n)\n",
+        limits: Limits::Default,
+        expect: ExpectOutcome::Success,
+    });
+}
+
+/// 上限側（FIS-AT-04 の軸 (A)）: 反復列の文字列が `max_string_allocations`（既定 1,000,000）を超える
+/// と、両 engine で `StringAllocations` の terminal（全 field 一致）で止まる。文字数が
+/// `max_collection_elements` を超える Str は、要素を作る前に collection の上限で止まる。
+#[test]
+fn for_iteration_list_limits_agree() {
+    let doubled = "let s = \"ab\"\nfor i in range(0, {n})\n    s = s + s\nend\n";
+    // 2^19 文字を 2 回 `for` する（各回 1 要素目で break）。反復列の文字列が累積で 100 万個を超える。
+    assert_single(&SingleFixture {
+        label: "for: Str の反復列が StringAllocations で止まる",
+        source: Box::leak(
+            format!(
+                "{}for c in s\n    break\nend\nfor c in s\n    break\nend\n",
+                doubled.replace("{n}", "18")
+            )
+            .into_boxed_str(),
+        ),
+        limits: Limits::Default,
+        expect: ExpectOutcome::Failure,
+    });
+    // 2^20 文字 > max_collection_elements（既定 1,000,000）。
+    assert_single(&SingleFixture {
+        label: "for: Str の文字数が collection の上限を超える",
+        source: Box::leak(
+            format!(
+                "{}for c in s\n    break\nend\n",
+                doubled.replace("{n}", "19")
+            )
+            .into_boxed_str(),
+        ),
+        limits: Limits::Default,
+        expect: ExpectOutcome::Failure,
+    });
+}
+
 // =============================================================================
 // matrix: budget 境界（exact-limit 成功 / +1 で BudgetExceeded）
 // =============================================================================

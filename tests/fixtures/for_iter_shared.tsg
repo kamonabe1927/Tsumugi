@@ -1,0 +1,83 @@
+# for の反復列（FIS-AT-02）: List は開始時の backing を共有して持ち、Dict・Str は課金済みの
+# List にして持つ。どちらでも反復列は開始時のまま、順序は変わらない。
+
+# List: 反復中に push / index 代入 / 再代入しても開始時の要素
+let a = [1, 2, 3]
+for x in a
+    push(a, x * 10)
+    print(x)
+end
+print(a)
+
+let b = [1, 2, 3]
+for x in b
+    b[2] = 99
+    print(x)
+end
+print(b)
+
+# Dict: key のコードポイント順。反復中の変更は反復列に影響しない
+let d = {"b": 1, "a": 2, "é": 3, "Z": 4}
+for k in d
+    d["new" + k] = 0
+    print(k)
+end
+print(len(d))
+
+# Str: 文字の順（複数 byte の文字を含む）。反復中に再代入しても開始時のまま
+let s = "aé日😀b"
+for c in s
+    s = "zzz"
+    print(c)
+end
+print(s)
+
+# break / continue
+for c in "abcdef"
+    if c == "b"
+        continue
+    end
+    if c == "e"
+        break
+    end
+    print(c)
+end
+
+# return で抜ける
+fn first_big(d)
+    for k in d
+        if len(k) > 1
+            return k
+        end
+    end
+    return "none"
+end
+print(first_big({"a": 1, "bb": 2, "c": 3}))
+print(first_big({"a": 1}))
+
+# try の中で抜ける
+for k in {"x": 1, "y": 2, "z": 3}
+    try
+        if k == "y"
+            print(1 / 0)
+        end
+        print(k)
+    catch e
+        print(e["type"])
+    end
+end
+
+# ネスト（同じ Dict・Str を内外で反復）
+for i in "ab"
+    for j in "cd"
+        print(i + j)
+    end
+end
+
+# 空の Str・Dict は反復しない
+for c in ""
+    print("never")
+end
+for k in {}
+    print("never")
+end
