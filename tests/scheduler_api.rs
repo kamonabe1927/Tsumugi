@@ -974,3 +974,201 @@ fn cooperative_pending_with_call_argument_evaluates_argument_once() {
     }
     assert_eq!(*adapter.last_may_yield.lock().unwrap(), Some(false));
 }
+
+// =============================================================================
+// fix-host-call-resume-requeue（issue #359）: 完了を受け取った非先頭 handle を Ready にする
+// =============================================================================
+
+/// HRQ-AT-01: issue #359 の再現（h1・h2 を交互に小さい slice で poll）が往復上限の中で完走する。
+/// HRQ-AT-02: 完了を受け取った非先頭の h1 は `Ready` で残り、`HostCallPending` に戻らない。
+/// HRQ-AT-03: h1 は完了を受け取った poll で末尾へ置かれ、以後 1 slice ずつ交互に進む。
+#[test]
+fn host_resume_non_head_becomes_ready_and_round_robin_completes() {
+    let engine = Engine::with_limits(limits(2, 0));
+    let adapter = FakeCooperativeAdapter::pending(1, "fetch");
+    let (registry, caps) = coop_setup(1, "fetch", adapter.clone());
+    // h1 は host call の完了後も数 slice かかり、h2 は長く回る。h1 を HostCallPending、h2 を
+    // SliceFuelExhausted にしてから complete する。
+    let mut ctx_a = coop_context(registry, caps);
+    let mut ctx_b = ExecutionContext::new();
+    let script_a = engine
+        .compile(
+            "let x = fetch()\nlet ok = [0][x - 41]\nlet i = 0\n\
+             while i < 300\n  i = i + 1\nend\n",
+        )
+        .unwrap();
+    let script_b = engine
+        .compile("let j = 0\nwhile j < 1000\n  j = j + 1\nend\n")
+        .unwrap();
+    let mut h1 = engine
+        .create_execution(&script_a, &mut ctx_a, ExecutionRequest::new())
+        .expect("h1 active");
+    let mut h2 = engine
+        .create_execution(&script_b, &mut ctx_b, ExecutionRequest::new())
+        .expect("h2 active");
+    let r = h1.poll(PollSlice { max_fuel: 64 }).unwrap();
+    assert!(matches!(
+        r,
+        PollResult::Yielded {
+            reason: YieldReason::HostCallPending { .. },
+            ..
+        }
+    ));
+    let r = h2.poll(PollSlice { max_fuel: 64 }).unwrap();
+    assert!(matches!(
+        r,
+        PollResult::Yielded {
+            reason: YieldReason::SliceFuelExhausted,
+            ..
+        }
+    ));
+    let completer = take_stashed_completer().expect("completer");
+    completer.complete(Ok(Value::Int(41)));
+    assert_eq!(adapter.next_id.load(Ordering::SeqCst), 2, "start は 1 回");
+    // h2 が run-turn の先頭にいる間の h1 poll: 完了を受け取るが先頭でないので Preempted。
+    let fuel_h1_before = h1.usage().committed.fuel;
+    let r = h1.poll(PollSlice { max_fuel: 64 }).unwrap();
+    assert!(
+        matches!(
+            r,
+            PollResult::Yielded {
+                reason: YieldReason::SchedulerPreempted,
+                ..
+            }
+        ),
+        "{r:?}"
+    );
+    assert_eq!(h1.state(), tsumugi::ExecutionState::Ready);
+    assert_eq!(
+        h1.usage().committed.fuel,
+        fuel_h1_before,
+        "非先頭の poll は semantic work をしない"
+    );
+
+    // 以後は h1・h2 を交互に poll する。各 poll は先頭なら 1 slice 進み（SliceFuelExhausted か
+    // terminal）、先頭でなければ SchedulerPreempted で fuel を使わない。h1 は HostCallPending に
+    // 戻らず、どちらかだけが連続して進むことはない（他方が terminal のあとを除く）。
+    let (mut done1, mut done2) = (false, false);
+    let mut last_advanced = 0u8; // 直前に進んだ handle（0 は未設定）
+    for round in 0..2000 {
+        for who in [1u8, 2u8] {
+            let (done, usage, result) = if who == 1 {
+                if done1 {
+                    continue;
+                }
+                let before = h1.usage().committed.fuel;
+                (
+                    &mut done1,
+                    before,
+                    h1.poll(PollSlice { max_fuel: 64 }).unwrap(),
+                )
+            } else {
+                if done2 {
+                    continue;
+                }
+                let before = h2.usage().committed.fuel;
+                (
+                    &mut done2,
+                    before,
+                    h2.poll(PollSlice { max_fuel: 64 }).unwrap(),
+                )
+            };
+            let after = if who == 1 {
+                h1.usage().committed.fuel
+            } else {
+                h2.usage().committed.fuel
+            };
+            match result {
+                PollResult::Terminal { outcome, .. } => {
+                    assert_eq!(outcome, ExecutionOutcome::Completed);
+                    *done = true;
+                    last_advanced = who;
+                }
+                PollResult::Yielded {
+                    reason: YieldReason::SliceFuelExhausted,
+                    ..
+                } => {
+                    assert!(after > usage, "先頭の poll は 1 slice 進む");
+                    let other_done = if who == 1 { done2 } else { done1 };
+                    assert!(
+                        other_done || last_advanced != who,
+                        "同じ handle が連続して進まない"
+                    );
+                    last_advanced = who;
+                }
+                PollResult::Yielded {
+                    reason: YieldReason::SchedulerPreempted,
+                    ..
+                } => assert_eq!(after, usage, "非先頭の poll は fuel を使わない"),
+                other => panic!("round {round} h{who}: {other:?}"),
+            }
+        }
+        if done1 && done2 {
+            break;
+        }
+    }
+    assert!(
+        done1 && done2,
+        "h1・h2 とも往復上限の中で terminal に達する"
+    );
+    assert_eq!(
+        adapter.next_id.load(Ordering::SeqCst),
+        2,
+        "start は 1 回だけ"
+    );
+}
+
+/// HRQ-AT-04: 完了を受け取った poll で先頭だった場合（execution 1 本）はその poll で続きを進め、
+/// complete 前の cancel は今と同じ `Cancelled` terminal になる。既存の host call のテスト
+/// （`host_pending_waker_roundtrip` ほか）は変更しない。
+#[test]
+fn host_resume_head_continues_in_same_poll_and_cancel_before_complete_is_unchanged() {
+    let engine = Engine::with_limits(limits(2, 0));
+    let adapter = FakeCooperativeAdapter::pending(1, "fetch");
+    let (registry, caps) = coop_setup(1, "fetch", adapter.clone());
+    let script = engine
+        .compile("let x = fetch()\nlet ok = [0][x - 41]\n")
+        .unwrap();
+    let mut ctx = coop_context(registry, caps);
+    let mut handle = engine
+        .create_execution(&script, &mut ctx, ExecutionRequest::new())
+        .expect("active");
+    let r = handle.poll(PollSlice::default()).unwrap();
+    assert!(matches!(
+        r,
+        PollResult::Yielded {
+            reason: YieldReason::HostCallPending { .. },
+            ..
+        }
+    ));
+    take_stashed_completer()
+        .expect("completer")
+        .complete(Ok(Value::Int(41)));
+    // 先頭なので、完了を受け取った同じ poll で続きを進めて terminal に達する。
+    match handle.poll(PollSlice::default()).unwrap() {
+        PollResult::Terminal { outcome, .. } => assert_eq!(outcome, ExecutionOutcome::Completed),
+        other => panic!("同じ poll で Completed を期待したが {other:?}"),
+    }
+
+    // complete 前の cancel は Cancelled terminal（ticket の cancel と rollback）。
+    let adapter = FakeCooperativeAdapter::pending(2, "slow");
+    let (registry, caps) = coop_setup(2, "slow", adapter.clone());
+    let script = engine.compile("let x = slow()\n").unwrap();
+    let mut ctx = coop_context(registry, caps);
+    let mut handle = engine
+        .create_execution(&script, &mut ctx, ExecutionRequest::new())
+        .expect("active");
+    let r = handle.poll(PollSlice::default()).unwrap();
+    assert!(matches!(
+        r,
+        PollResult::Yielded {
+            reason: YieldReason::HostCallPending { .. },
+            ..
+        }
+    ));
+    handle.cancellation_token().cancel();
+    match handle.poll(PollSlice::default()).unwrap() {
+        PollResult::Terminal { outcome, .. } => assert_eq!(outcome, ExecutionOutcome::Cancelled),
+        other => panic!("Cancelled を期待したが {other:?}"),
+    }
+}

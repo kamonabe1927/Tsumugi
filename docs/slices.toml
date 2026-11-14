@@ -874,11 +874,12 @@ order      = 98
 [[slice]]
 id         = "fix-host-call-resume-requeue"
 title      = "HostCallPending の handle が ticket の完了を受け取ったら Ready へ遷移させ、run-turn queue の先頭でなくても以後の poll で先頭判定と slice 実行へ進む（execution-control §9.2・§12.1、issue #359）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-host-call-resume-requeue 実装スライス（host call の完了を受け取った handle を Ready にして run-turn へ戻す）" }
 acceptance = ["HRQ-AT-01..04"]
 design_pr  = 408
+impl_pr    = 409
 order      = 99
 
 # issue #360（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。埋め込みの同期 Engine::run（run_transactional と
