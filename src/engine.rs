@@ -738,7 +738,11 @@ impl ExecutionHandle<'_, '_, '_> {
                         return Ok(self.finish_terminal(ExecutionOutcome::RuntimeError { error }));
                     }
                     self.pending_ticket = None;
-                    // 下の run-turn 判定（step 5）へ落とす。resume 後は run-turn へ再登録する。
+                    // 完了を受け取った handle は `Ready`（link 済みで run-turn queue にいる、
+                    // §9.2）へ遷移させ、step 5 で queue 末尾へ登録する。非 head なら `Ready` の
+                    // まま `SchedulerPreempted` を返し、以後の poll は step 3・4 に入らず step 5
+                    // の head 判定へ進む。
+                    self.state = ExecutionState::Ready;
                 }
             }
         }
@@ -750,7 +754,8 @@ impl ExecutionHandle<'_, '_, '_> {
         }
         if !self.shared.is_head(self.slot_id) {
             // 非 head: semantic work せず SchedulerPreempted を reason としてだけ返す。
-            // self.state は遷移させない（Finding 4）。run-turn 内の位置も変えない（FR-3）。
+            // self.state は遷移させない（Finding 4。host call の完了を受け取った handle は step 4 で
+            // `Ready` になっており、`Ready` のまま残る）。run-turn 内の位置も変えない（FR-3）。
             let usage = self.context.budget_usage();
             return Ok(PollResult::Yielded {
                 reason: YieldReason::SchedulerPreempted,
