@@ -469,9 +469,11 @@ pub enum YieldReason {
     ExplicitYield,
     /// run-turn FIFO で先頭でないため semantic work をせず譲った（Slice 5、設計 §4.3）。
     ///
-    /// これは [`PollResult`] の **reason としてのみ** 返り、`self.state` は遷移させない
-    /// （Finding 4）。非 head poll は元の `Ready` / `Yielded(..)` を保ったまま、戻り値だけ
-    /// `SchedulerPreempted` になる。run-turn 内の自分の位置も変えない（FR-3）。
+    /// これは [`PollResult`] の **reason としてのみ** 返り、この返却自体は `self.state` を遷移させ
+    /// ない（Finding 4）。非 head poll は元の `Ready` / `Yielded(..)` を保ったまま、戻り値だけ
+    /// `SchedulerPreempted` になる。ただし `Yielded(HostCallPending)` の handle が host call の完了を
+    /// 受け取った poll では、step 4 で先に `Ready` へ遷移しており、非 head なら `Ready` のまま
+    /// `SchedulerPreempted` を返す。run-turn 内の自分の位置も変えない（FR-3）。
     SchedulerPreempted,
     /// audit sink が batch を `Pending` にしたため execution が停止している（§10.2、Phase 6 B-1）。
     ///
