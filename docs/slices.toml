@@ -878,4 +878,5 @@ status     = "ready"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-host-call-resume-requeue 実装スライス（host call の完了を受け取った handle を Ready にして run-turn へ戻す）" }
 acceptance = ["HRQ-AT-01..04"]
+design_pr  = 408
 order      = 99
