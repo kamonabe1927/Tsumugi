@@ -469,9 +469,11 @@ pub enum YieldReason {
     ExplicitYield,
     /// run-turn FIFO で先頭でないため semantic work をせず譲った（Slice 5、設計 §4.3）。
     ///
-    /// これは [`PollResult`] の **reason としてのみ** 返り、`self.state` は遷移させない
-    /// （Finding 4）。非 head poll は元の `Ready` / `Yielded(..)` を保ったまま、戻り値だけ
-    /// `SchedulerPreempted` になる。run-turn 内の自分の位置も変えない（FR-3）。
+    /// これは [`PollResult`] の **reason としてのみ** 返り、この返却自体は `self.state` を遷移させ
+    /// ない（Finding 4）。非 head poll は元の `Ready` / `Yielded(..)` を保ったまま、戻り値だけ
+    /// `SchedulerPreempted` になる。ただし `Yielded(HostCallPending)` の handle が host call の完了を
+    /// 受け取った poll では、step 4 で先に `Ready` へ遷移しており、非 head なら `Ready` のまま
+    /// `SchedulerPreempted` を返す。run-turn 内の自分の位置も変えない（FR-3）。
     SchedulerPreempted,
     /// audit sink が batch を `Pending` にしたため execution が停止している（§10.2、Phase 6 B-1）。
     ///
@@ -738,7 +740,11 @@ impl ExecutionHandle<'_, '_, '_> {
                         return Ok(self.finish_terminal(ExecutionOutcome::RuntimeError { error }));
                     }
                     self.pending_ticket = None;
-                    // 下の run-turn 判定（step 5）へ落とす。resume 後は run-turn へ再登録する。
+                    // 完了を受け取った handle は `Ready`（link 済みで run-turn queue にいる、
+                    // §9.2）へ遷移させ、step 5 で queue 末尾へ登録する。非 head なら `Ready` の
+                    // まま `SchedulerPreempted` を返し、以後の poll は step 3・4 に入らず step 5
+                    // の head 判定へ進む。
+                    self.state = ExecutionState::Ready;
                 }
             }
         }
@@ -750,7 +756,8 @@ impl ExecutionHandle<'_, '_, '_> {
         }
         if !self.shared.is_head(self.slot_id) {
             // 非 head: semantic work せず SchedulerPreempted を reason としてだけ返す。
-            // self.state は遷移させない（Finding 4）。run-turn 内の位置も変えない（FR-3）。
+            // self.state は遷移させない（Finding 4。host call の完了を受け取った handle は step 4 で
+            // `Ready` になっており、`Ready` のまま残る）。run-turn 内の位置も変えない（FR-3）。
             let usage = self.context.budget_usage();
             return Ok(PollResult::Yielded {
                 reason: YieldReason::SchedulerPreempted,
