@@ -896,4 +896,5 @@ status     = "ready"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-sync-run-host-call-resume 実装スライス（同期 `Engine::run` が cooperative host call の ticket を待って結果を注入する）" }
 acceptance = ["SHR-AT-01..05"]
+design_pr  = 410
 order      = 100

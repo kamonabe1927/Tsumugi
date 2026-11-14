@@ -2765,7 +2765,7 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
 
 ### fix-sync-run-host-call-resume 実装スライス（同期 `Engine::run` が cooperative host call の ticket を待って結果を注入する）
 
-[issue #360](https://github.com/kamonabe1927/Tsumugi/issues/360) から作ったスライス（不具合の修正、`slices.toml` の `fix-sync-run-host-call-resume`）。issue の仕分けで「受け入れ」とした。直し方は §9.2 の「同期`Engine::run`は…同じhandleをterminalまでpoll」する規則（host call 待ちの `Yielded(HostCallPending)` は ticket の完了で解消し、同じ continuation から続ける。新しい外部呼び出しを始めない）と、§6.2 の「作成thread上の次回`poll`が`try_take`する」・§8 の「adapter待機…でも確認」で決まり、目標の章は変えない。仕分けのとおり、同期 run の cooperative の Pending をエラーにする読み方は §9.2 と合わないため採らない。待ち方（下の実装範囲の 3 つめ）は判断の候補 Q1（設計 PR #PR_NUMBER）で決める。
+[issue #360](https://github.com/kamonabe1927/Tsumugi/issues/360) から作ったスライス（不具合の修正、`slices.toml` の `fix-sync-run-host-call-resume`）。issue の仕分けで「受け入れ」とした。直し方は §9.2 の「同期`Engine::run`は…同じhandleをterminalまでpoll」する規則（host call 待ちの `Yielded(HostCallPending)` は ticket の完了で解消し、同じ continuation から続ける。新しい外部呼び出しを始めない）と、§6.2 の「作成thread上の次回`poll`が`try_take`する」・§8 の「adapter待機…でも確認」で決まり、目標の章は変えない。仕分けのとおり、同期 run の cooperative の Pending をエラーにする読み方は §9.2 と合わないため採らない。待ち方（下の実装範囲の 3 つめ）は判断の候補 Q1（設計 PR #410）で決める。
 
 - **現状の不具合:** 冒頭の逸脱一覧の埋め込みの同期 `Engine::run` の行のとおり。`run_transactional` と `run_audited_inner` の poll ステップ loop は `SliceOutcome::YieldedHostCall { .. }` を `YieldedSliceFuel` などと同じ `continue` で扱う。評価器の `pending_host_call` には ticket と `call_id` が残ったまま、`resumed_host_call` は `None` なので、次の `run_slice` で同じ文の呼び出しがもう一度 `start()` を呼び、`pending_host_call` を新しい ticket で上書きする。scheduler の handle 経路（`src/engine.rs` の `ExecutionHandle::poll`）は step 6 で `take_pending_ticket` し、step 4 で cancel→deadline の checkpoint と `try_take_value` → `resume_host_call` をしているので、この不具合は無い。
 - **実装範囲:**
