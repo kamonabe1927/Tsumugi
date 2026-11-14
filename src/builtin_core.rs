@@ -620,14 +620,23 @@ pub fn builtin_join_budgeted(
         ));
     };
     let sep = require_str(&args[1], "join", 2, line)?;
-    let mut parts: Vec<String> = Vec::with_capacity(list.len());
-    for v in list.iter() {
-        let rendered = budget
-            .render_display(v, crate::budget::ExecutionPhase::Run)
-            .map_err(|stop| crate::budget::control_stop_to_error(stop, 0, line))?;
-        parts.push(rendered);
+    // 要素と区切りを 1 つの buffer へ順に書き出し、書き足すたびに累積長を確かめる。
+    // 上限を超えた時点で止めるので、確保は上限に要素 1 つ（または区切り 1 つ）を足した程度に収まる。
+    let phase = crate::budget::ExecutionPhase::Run;
+    let to_error = |stop| crate::budget::control_stop_to_error(stop, 0, line);
+    let mut out = String::new();
+    for (i, v) in list.iter().enumerate() {
+        if i > 0 {
+            out.push_str(sep);
+            budget
+                .check_single_string_len(Some(out.len() as u64), phase)
+                .map_err(to_error)?;
+        }
+        budget
+            .render_display_append(&mut out, v, phase)
+            .map_err(to_error)?;
     }
-    Ok(Value::str_constant(parts.join(sep)))
+    Ok(Value::str_constant(out))
 }
 
 /// `to_str` の budget-aware 版（REV-001）。`to_string` の代わりに
@@ -681,6 +690,34 @@ pub fn builtin_replace(args: &[Value], line: usize) -> Result<Value, TsumugiErro
     let s = require_str(&args[0], "replace", 1, line)?;
     let old = require_str(&args[1], "replace", 2, line)?;
     let new = require_str(&args[2], "replace", 3, line)?;
+    Ok(Value::str_constant(s.replace(old.as_str(), new.as_str())))
+}
+
+/// `replace` の結果の byte 長 `s_len + m × (new_len − old_len)`（`m` は一致の数）。
+/// u64 に収まらなければ `None`（§7.1 の overflow）。途中は u128 で求めるので wrap しない。
+pub fn replace_result_len(s_len: u64, m: u64, old_len: u64, new_len: u64) -> Option<u64> {
+    let total = u128::from(s_len) + u128::from(m) * u128::from(new_len);
+    let removed = u128::from(m) * u128::from(old_len);
+    u64::try_from(total.checked_sub(removed)?).ok()
+}
+
+/// `replace` の budget-aware 版。結果を作る前に長さを求めて `max_single_string_bytes` と比べ、
+/// 超えるなら結果を作らずに `SingleStringBytes` 超過で止まる（`requested` = 結果の長さ）。
+pub fn builtin_replace_budgeted(
+    args: &[Value],
+    budget: &mut crate::budget::BudgetLedger,
+    line: usize,
+) -> Result<Value, TsumugiError> {
+    check_arity("replace", args, 3, line)?;
+    let s = require_str(&args[0], "replace", 1, line)?;
+    let old = require_str(&args[1], "replace", 2, line)?;
+    let new = require_str(&args[2], "replace", 3, line)?;
+    // `str::replace` と同じ、左から重ならずに取る一致の数（空パターンは文字数 + 1）。
+    let m = s.matches(old.as_str()).count() as u64;
+    let len = replace_result_len(s.len() as u64, m, old.len() as u64, new.len() as u64);
+    budget
+        .check_single_string_len(len, crate::budget::ExecutionPhase::Run)
+        .map_err(|stop| crate::budget::control_stop_to_error(stop, 0, line))?;
     Ok(Value::str_constant(s.replace(old.as_str(), new.as_str())))
 }
 
@@ -2141,8 +2178,19 @@ fn fs_metadata_kind(
 // =============================================================================
 
 pub fn builtin_path_join(args: &[Value], line: usize) -> Result<Value, TsumugiError> {
-    // 全引数を左から右へ Str として検査し、非 Str を1つでも見つけたら結合を開始しない。
-    // 非 Str を無言で欠落させない（AUD-034, semantic-decisions.md §9）。
+    check_path_join_args(args, line)?;
+    let mut path = std::path::PathBuf::new();
+    for arg in args {
+        if let Value::Str(s) = arg {
+            path.push(s.as_str());
+        }
+    }
+    Ok(Value::str_constant(path.to_string_lossy().to_string()))
+}
+
+/// 全引数を左から右へ Str として検査し、非 Str を1つでも見つけたら結合を開始しない。
+/// 非 Str を無言で欠落させない（AUD-034, semantic-decisions.md §9）。
+fn check_path_join_args(args: &[Value], line: usize) -> Result<(), TsumugiError> {
     for (index, arg) in args.iter().enumerate() {
         if !matches!(arg, Value::Str(_)) {
             return Err(TsumugiError::builtin_arg_type(
@@ -2154,10 +2202,28 @@ pub fn builtin_path_join(args: &[Value], line: usize) -> Result<Value, TsumugiEr
             ));
         }
     }
+    Ok(())
+}
+
+/// `path_join` の budget-aware 版。型の検査のあと、引数を左から 1 つずつ `PathBuf::push` し、
+/// push のたびに path の長さを `max_single_string_bytes` と比べる。超えた時点で残りを push せずに
+/// `SingleStringBytes` 超過で止まる（`requested` = 超えた時点の path の長さ）。
+pub fn builtin_path_join_budgeted(
+    args: &[Value],
+    budget: &mut crate::budget::BudgetLedger,
+    line: usize,
+) -> Result<Value, TsumugiError> {
+    check_path_join_args(args, line)?;
     let mut path = std::path::PathBuf::new();
     for arg in args {
         if let Value::Str(s) = arg {
             path.push(s.as_str());
+            budget
+                .check_single_string_len(
+                    Some(path.as_os_str().len() as u64),
+                    crate::budget::ExecutionPhase::Run,
+                )
+                .map_err(|stop| crate::budget::control_stop_to_error(stop, 0, line))?;
         }
     }
     Ok(Value::str_constant(path.to_string_lossy().to_string()))
@@ -2195,8 +2261,9 @@ pub fn dispatch(
         "reverse" => builtin_reverse(args, line)?,
         "range" => builtin_range(args, max_collection, line)?,
         "split" => builtin_split(args, max_collection, line)?,
-        // sort / join / to_str / contains は budget-aware 版（builtin_sort_budgeted /
-        // builtin_join_budgeted / builtin_to_str_budgeted / builtin_contains_budgeted）へ移し、tree/VM の dispatch
+        // sort / join / to_str / contains / replace / path_join は budget-aware 版（builtin_sort_budgeted /
+        // builtin_join_budgeted / builtin_to_str_budgeted / builtin_contains_budgeted /
+        // builtin_replace_budgeted / builtin_path_join_budgeted）へ移し、tree/VM の dispatch
         // 境界が intercept する。ここへは到達しない（budget を持てない dispatch では
         // 共有 DAG の指数時間／出力を有限化できない）。
         "trim" => builtin_trim(args, line)?,
@@ -2204,7 +2271,6 @@ pub fn dispatch(
         "lower" => builtin_lower(args, line)?,
         "starts_with" => builtin_starts_with(args, line)?,
         "ends_with" => builtin_ends_with(args, line)?,
-        "replace" => builtin_replace(args, line)?,
         "to_int" => builtin_to_int(args, line)?,
         "to_float" => builtin_to_float(args, line)?,
         "abs" => builtin_abs(args, line)?,
@@ -2216,8 +2282,7 @@ pub fn dispatch(
         "format_time" => builtin_format_time(args, line)?,
         // C10: fs builtin（read_file/.../is_dir の 14 名）は dispatch へ来ない。tree/VM の
         // 境界が `is_filesystem_builtin` で intercept し capability 経路（dispatch_fs）へ回す。
-        // `path_join` は純関数なので dispatch に残す。
-        "path_join" => builtin_path_join(args, line)?,
+        // `path_join` は budget-aware 版へ移し、上の注記のとおり dispatch 境界が intercept する。
         _ => return Ok(None),
     };
     Ok(Some(result))

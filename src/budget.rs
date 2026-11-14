@@ -1967,6 +1967,45 @@ impl BudgetLedger {
         Ok(out)
     }
 
+    /// 既存の buffer `out` へ値を `render_display` と同じ描画・fuel 課金で書き足し、書き足した
+    /// あとの `out` の byte 長が `max_single_string_bytes` を超えていれば打ち切る（`join` 用）。
+    /// 描画の途中でも、複合ノードの入口で累積長を確かめる。
+    pub(crate) fn render_display_append(
+        &mut self,
+        out: &mut String,
+        value: &crate::value::Value,
+        phase: ExecutionPhase,
+    ) -> Result<(), ControlStop> {
+        self.render_into(out, value, false, phase)?;
+        self.check_single_string_len(Some(out.len() as u64), phase)
+    }
+
+    /// 確保の前の長さの検査（§5.3）。`len` が `max_single_string_bytes` を超えれば
+    /// `SingleStringBytes` 超過にする（`used = reserved = 0`、`requested = len`）。
+    /// `None` は長さの計算が overflow したことを表し、§7.1 のとおり `requested = u64::MAX`
+    /// の同じ超過にする。
+    pub(crate) fn check_single_string_len(
+        &mut self,
+        len: Option<u64>,
+        phase: ExecutionPhase,
+    ) -> Result<(), ControlStop> {
+        let limit = self.config.max_single_string_bytes;
+        let requested = len.unwrap_or(u64::MAX);
+        if len.is_none() || requested > limit {
+            self.check_cancel()?;
+            return Err(ControlStop::BudgetExceeded(BudgetExceeded {
+                resource: BudgetResource::SingleStringBytes,
+                limit,
+                used: 0,
+                reserved: 0,
+                requested,
+                unit: BudgetUnit::Bytes,
+                phase,
+            }));
+        }
+        Ok(())
+    }
+
     /// [`Self::render_display`] の再帰ヘルパ。`out` へ書き足しながら fuel と per-item byte
     /// 上限を確認する。深さは既存 Display と同じ native 再帰で、AST 深度制限で bounded。
     fn render_into(
@@ -3113,6 +3152,28 @@ mod tests {
         assert_eq!(l.usage().committed.string_allocations, 1);
         assert_eq!(l.usage().committed.string_bytes, 4);
         assert_eq!(l.usage().peaks.single_string_bytes, 4);
+    }
+
+    /// JRP-AT-05: 長さの計算が overflow したら `requested = u64::MAX` の同じ超過になる（§7.1）。
+    #[test]
+    fn jrp_at_05_single_string_len_overflow_is_max_requested() {
+        let mut config = BudgetConfig::for_legacy(1_000_000, 0);
+        config.max_single_string_bytes = 8;
+        let mut l = ledger(config);
+        assert!(
+            l.check_single_string_len(Some(8), ExecutionPhase::Run)
+                .is_ok()
+        );
+        for (len, want) in [(Some(9), 9), (None, u64::MAX)] {
+            match l.check_single_string_len(len, ExecutionPhase::Run) {
+                Err(ControlStop::BudgetExceeded(e)) => {
+                    assert_eq!(e.resource, BudgetResource::SingleStringBytes);
+                    assert_eq!((e.limit, e.used, e.reserved), (8, 0, 0));
+                    assert_eq!(e.requested, want);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
     }
 
     #[test]

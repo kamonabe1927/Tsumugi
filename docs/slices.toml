@@ -854,9 +854,10 @@ order      = 97
 [[slice]]
 id         = "fix-join-replace-path-join-limit"
 title      = "join / replace / path_join が結果の長さを確保の前に max_single_string_bytes と比べ、上限を超える入力で abort せず BudgetExceeded(SingleStringBytes) で止まる（execution-control §5.3・§7、issue #357・#399）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-join-replace-path-join-limit 実装スライス（`join` / `replace` / `path_join` の結果の長さを確保前に検査）" }
 acceptance = ["JRP-AT-01..05"]
 design_pr  = 403
+impl_pr    = 404
 order      = 98

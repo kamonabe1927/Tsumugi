@@ -6,8 +6,10 @@
 //!
 //! 正常系の期待値は OS 依存の separator/prefix 挙動を含むため、固定文字列ではなく
 //! テスト側でも `PathBuf` を構築して比較する（§9.6）。tree/VM はどちらも AUD-049 の
-//! 同じ registry/handler（`builtin_path_join`）へ委譲するため、join 意味論はこの
-//! 共有 handler のテストで両 engine を覆う。error の tree/VM 一致は
+//! 同じ registry/handler へ委譲する。engine の経路は予算付きの `builtin_path_join_budgeted`
+//! （型の検査 `check_path_join_args` と push の規則は `builtin_path_join` と共通）で、予算内の
+//! join 意味論はこの `builtin_path_join` のテストで覆う。予算超過は
+//! `join_replace_path_join_limit` で両 engine を確かめる。error の tree/VM 一致は
 //! `canonical_error_inventory` で別途固定する。
 
 use tsumugi::builtin_core::builtin_path_join;
