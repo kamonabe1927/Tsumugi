@@ -67,6 +67,7 @@ const TABLE: &[Row] = &[
             "src/embedding.rs::e6_catch_host_unwind_captures_panic_as_fault_id",
             "src/embedding.rs::c7_exit_boundary_codes_are_exited",
             "src/embedding.rs::c7_exit_granted_maps_to_exited",
+            "src/embedding.rs::c7_exit_out_of_range_is_runtime_error",
         ],
     ),
     (
@@ -82,7 +83,9 @@ const TABLE: &[Row] = &[
     ),
     (
         "TM-AT-20",
-        Coverage::Covered,
+        Coverage::Partial(
+            "context 部分（前回の args が次へ現れず、global へ明示保存した値だけが残る）は確かめている。capability 部分（前回の実行の capability・env・input が次の実行へ現れないこと）を確かめるテストは無い",
+        ),
         &[
             "tests/engine_api.rs::context_reuse_preserves_bindings_without_leaking_between_contexts",
             "tests/engine_api.rs::args_is_empty_without_injection",
@@ -93,7 +96,9 @@ const TABLE: &[Row] = &[
     ),
     (
         "TM-AT-23",
-        Coverage::Covered,
+        Coverage::Partial(
+            "error 部分（public error の Debug / Display に fake secret が無い）は確かめている。denial 部分のうち、Denied の存在 path / 不存在 path の表現に host path が無いことを確かめるテストは無い（存在 path と不存在 path が同じ message になることだけ）",
+        ),
         &[
             "src/embedding.rs::debug_output_does_not_leak_injected_secret",
             "src/embedding.rs::compile_diagnostic_debug_is_secret_free",
@@ -105,7 +110,9 @@ const TABLE: &[Row] = &[
     ),
     (
         "TM-AT-24",
-        Coverage::Covered,
+        Coverage::Partial(
+            "file・stdin の経路（link 時に resolver で解決し、実行中の resolver 呼び出しが 0 回）だけ。REPL と scheduler の handle 経路の import は link と resolver を経ないので成り立たない（threat-model の逸脱一覧）",
+        ),
         &[
             "src/embedding.rs::cap_at_16_import_with_resolver_resolves_at_link",
             "src/embedding.rs::emb_at_05_run_does_not_call_resolver",
@@ -115,7 +122,9 @@ const TABLE: &[Row] = &[
     // ---- Phase 2 ----
     (
         "TM-AT-01",
-        Coverage::Covered,
+        Coverage::Partial(
+            "env / clock / stdin / stdout / exit / host function / import の拒否は確かめている。empty capability での filesystem の拒否と、対象の OS / callback の呼び出しが 0 回であることを数えるテストは、host function（callback 0 回）と import（resolver 0 回）にしか無い",
+        ),
         &[
             "src/capability.rs::empty_denies_all_authorities",
             "src/embedding.rs::c3_env_ungranted_is_runtime_error",
@@ -130,7 +139,9 @@ const TABLE: &[Row] = &[
     ),
     (
         "TM-AT-02",
-        Coverage::Covered,
+        Coverage::Partial(
+            "absolute・`..` などの lexical な path の拒否は確かめている。mount prefix 衝突の拒否を確かめるテストは無い（`duplicate_mount_rejected` は同名 mount の重複の拒否）",
+        ),
         &[
             "src/capability.rs::fs_target_parse_rejects_lexical_errors",
             "src/capability.rs::fs_target_parse_rejects_colon_component_ads",
@@ -154,7 +165,9 @@ const TABLE: &[Row] = &[
     ),
     (
         "TM-AT-04",
-        Coverage::Covered,
+        Coverage::Partial(
+            "許可外の存在 path と不存在 path が同じ denial code / public message になることは確かめている。そのとき resolver / OS の呼び出しが 0 回であることを数えるテストは無い",
+        ),
         &["src/vm.rs::existence_oracle_denied_and_missing_are_indistinguishable"],
     ),
     (
@@ -196,7 +209,9 @@ const TABLE: &[Row] = &[
     ),
     (
         "TM-AT-16",
-        Coverage::Covered,
+        Coverage::Partial(
+            "script 操作中の capability denial・host failure が catch でき、valid `exit`・budget・deadline・cancel が catch できないことは確かめている。link / control-plane の `Denied` / `HostError` と panic が catch body へ入らずに terminal になることを確かめるテストは無い",
+        ),
         &[
             "src/embedding.rs::c3_env_ungranted_is_catchable",
             "src/embedding.rs::c4_print_ungranted_is_catchable",

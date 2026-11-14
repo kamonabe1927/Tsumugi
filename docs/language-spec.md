@@ -2,7 +2,7 @@
 
 バージョン: 0.21
 
-最終更新: 2026-11-13
+最終更新: 2026-11-14
 
 この番号は言語仕様のrevisionであり、Cargo package / REPLの実装バージョン `0.1.0` とは独立して管理する。
 
@@ -23,12 +23,13 @@
 
 ### 逸脱一覧（目標仕様に対する現在の逸脱）
 
-本書の本文は目標の仕様であり、現在の実装との差（逸脱）はこの表にだけ書く（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。表にある挙動へ依存するコードは移植可能とみなさない。解消した行は削除する。ツリーウォーク版と `--vm` 版の差、および本書の規範との差は、整合点検（loop:drift #382）で確かめた範囲で表に無かった。その後に issue #358 で見つかった `for` の反復列の差を表に足し（解消済み）、issue #399 の `path_join` の途中の長さの差を足した。
+本書の本文は目標の仕様であり、現在の実装との差（逸脱）はこの表にだけ書く（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。表にある挙動へ依存するコードは移植可能とみなさない。解消した行は削除する。ツリーウォーク版と `--vm` 版の差、および本書の規範との差は、整合点検（loop:drift #382）で確かめた範囲で表に無かった。その後に issue #358 で見つかった `for` の反復列の差を表に足し（解消済み）、issue #399 の `path_join` の途中の長さの差を足した。loop:drift #395 の D-90 で、issue #393 のステップ上限の行番号の差を足した。
 
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
 | REPL（tree・VM）の import は link 時の resolver gate を通らず、import root を要さずに現在の作業ディレクトリからの相対パスで解決され、profile にかかわらず `TSUMUGI_SANDBOX` を読む。import chain の深度も link で検証されず、129 段目は評価器内蔵 `ModuleLoader` の `import` ランタイムエラー `import 失敗: ネストが深すぎます (上限: 128)` になり、REPL は次の入力へ進む（詳細は[次期意味論・実装決定](semantic-decisions.md)の逸脱一覧の import chain の深度上限の行）。目標は、REPL もファイル・標準入力と同じく各入力を link 時に import root の下で解決し（未許可なら拒否）、深度も link 時に検証し、`TSUMUGI_SANDBOX` を読まないことである。両 engine 共通で、[Capability Model仕様](capability-model.md) の目標（§10・§14.3・§14.4）との差でもあり、詳細は同仕様の逸脱一覧の REPL の import の行にある | 「モジュール / import」の「制約」、「実行安全性」の「import chain深度制限」、[Capability Model仕様](capability-model.md) §10・§14.3・§14.4 | E7（tree）、E9 の VM file/stdin 統合で据え置いた VM REPL |
 | `path_join` は可変長引数のすべてを結合し終えてから長さを検査する。途中の長さが `max_single_string_bytes` を超えても止まらず、後ろの absolute component で置き換わる呼び出し（例: 8 MiB の `s` で `path_join(s, s, "/x")`）は `"/x"` で成功し、置き換わらずに上限を大きく超える呼び出し（4 MiB の文字列 2000 個）は予算超過にならずにプロセスが abort する（tree・VM とも。issue #399）。fix スライス fix-join-replace-path-join-limit で直す（詳細は[実行予算・協調実行仕様](execution-control.md)の逸脱一覧の `join` / `replace` / `path_join` の行） | 「組み込み関数」の `path_join` | REV-015 Slice 2（string accounting） |
+| ステップ上限（`limit`）の停止の行番号が、外側の `try` の中で、内側の `try` が catch したエラーのあとも回り続ける入れ子のループで、ツリーウォーク版と `--vm` 版で食い違う。kind と message は同じ。例: issue #393 のプログラム（外側の `try` の中の `while f(f)` の中で、内側の `try` の `while xs` が未定義名のエラーを catch する）を fuel 20,000 で実行すると、ツリーウォーク版は `9行目`、`--vm` 版は `6行目` になる（fuel によって食い違い方が変わる）。外側の `try` を外すか、`while f(f)` を `while true` にすると一致する。目標は、エラーの kind・message・行番号が両版で完全に一致することである（「エラーの kind とメッセージ（正本）」）。`tests/random_input_robustness.rs` は `KNOWN_STEP_LIMIT_LINE_DIVERGENCES`（`program#143`）でこの差の行番号の比較を外し、再現を `#[ignore]` のテスト `known_divergence_step_limit_line_after_caught_error` に置いている | 「エラーの kind とメッセージ（正本）」、「実行安全性」の「ステップ予算」 | 不明（PR #390 のランダム入力のテストで見つかった。issue #393） |
 
 この表は loop:drift #382 の D-82 を受けて、それまでの箇条書きの「現在の既知非適合」（詳細の参照先をロードマップとしていた）から移した。表に載せたのは、整合点検の輪番で tree・VM とも今も成り立つことを確かめた REPL の import の 1 行だけである。逸脱一覧の形に移す案（Q1=A）は判断役が選択した（issue #382）。理由: spec の実装状態の正本を各 spec の逸脱一覧 1 つとする [ドキュメント運用ガイド](documentation-guide.md)「状態の正本は粒度ごとに 1 箇所だけ」に合わせ、同ガイドの移行の規則（輪番で事実を確かめたものから寄せる）どおりに移す。参照先だったロードマップには該当する節も ID も無く、状態の正本が読み手に分からなかった（[マニフェスト](manifesto.md) 原則 9）。採らなかった案B（次に本書に触れる done の実装 PR まで今の形のままにする）は、その PR がいつ来るか決まっておらず、その間ロードマップと本書に状態が分かれたままになるため採らない。
 

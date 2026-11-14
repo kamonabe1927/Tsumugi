@@ -1,6 +1,6 @@
 # Tsumugi — 次期意味論・実装決定
 
-最終更新: 2026-11-13
+最終更新: 2026-11-14
 
 設計ステータス: **次期仕様確定（本文）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -1462,13 +1462,15 @@ responseの `set-cookie` は初版ではscriptへ返さない。response header�
 
 ### 16.10 body / budget / timeout / cancellation / rate
 
-- request header bytes、request body bytes、response status/header count/header bytes/body bytesを個別に制限する。
+- request header bytes、request body bytes、response status/header count/header bytes/body bytesを個別に制限する。response header countの超過は、header bytesと同じくresponseのbyteの上限の一部として扱い、§3.4 の host call response の総バイト数の `io_limit` の行で表す（新しいkind・文言を足さない）。このときmessageの `{limit}` には、header countの上限の値ではなく、その時点のresponseのbyteの上限（[実行予算・協調実行仕様](execution-control.md) §6.1 の、descriptorの上限とexecutionの残量の小さい方）を入れる。header countの上限の値はmessageに出さず、header countの超過とbyte数の超過はmessageでは区別しない。
 - responseはstreamし、chunk受信ごとにbudgetを消費する。上限超過時は接続を中断し、残りを読み続けない。
 - effective total deadlineはexecution deadline、capability上限、request policyの最小値。
 - connect/read timeoutはtotal deadlineを超えない。
 - cancellation tokenをDNS、connect、TLS、write、readの各待機へ伝播し、可能な限りtransportをabortする。
 - host/tenant/origin単位のtoken bucketと同時実行semaphoreをhostが提供する。concurrency・rateは量の上限ではなく待ちの制御であり、予算超過の種別を持たない。rate waitまたはsemaphoreの待ちがdeadlineを超える場合は待たずに止め、deadline超過のterminal（§3.3。canonical errorのkindを持たず、scriptでcatch不能）とする（§16.12、loop:drift #395 の D-89 Q2=A、判断役が選択（issue #395））。
 - 自動retryは初版なし。将来追加する場合はmethod idempotency、retry回数、追加budget、auditを別決定する。
+
+response header countの超過の表し方は、loop:drift #395 の D-97 を受けて決めた。header countの超過を §3.4 の host call response の `io_limit` の行で表す案（Q1=A）は判断役が選択（issue #395）した。理由: [実行予算・協調実行仕様](execution-control.md) §6.1 は任意host callの課金を `host_calls`・`host_request_bytes`・`host_response_bytes`・`host_call_bytes` の4つとし、§7.2 の予算resourceの一覧にもheader countは無い。§16.12 の D-89 Q2=A は「HTTPのためのkind・文言を新しく決めず、§3.4 のhost callの4行で表す」と決めており、この案はその向きのまま本節の1文で済む。HTTP固有の概念を中核のcanonical inventory（§3.4）へ入れないので、[マニフェスト](manifesto.md) 原則 8 にも合う。判断役は、header countの超過が「response の総バイト数」の文言で出るので、`{limit}` に何を入れるかを本節に明示するよう求めた（停止理由の読み違いを避ける。原則 7）。そこで、`{limit}` はbyteの上限（単位がメッセージの「バイト」と合う唯一の値）とし、header countの超過がbyteの文言で区別なく出ることも本節に書いた。採らなかった案B（§3.4 に `io_limit` のHTTP header countの行を1つ足す）は、§7.2 に無いresourceの `BudgetExceeded` とHTTP専用の行を §3.4 に足すことになり、D-89 Q2 で案Bを採らなかった理由と同じ問題を持つ。案C（header countの個別の上限を外し、header bytesの上限だけにする）は、hostが観測すべき量の上限を1つ減らす読み方があり、原則 3 に反しうるので選ばない。§16 は未実装で、実行では確かめていない。
 
 ### 16.11 audit / REPL transaction
 
@@ -2221,7 +2223,7 @@ DESIGN ONLY（本節はテストを記述しない。意図するテストを記
 4. **Builtin/error基盤**: AUD-049単一registry、AUD-019共通error constructorと完全一致test。§17.1（REV-003）の `NumericOrder` 集約、および §17.4（REV-009）・§17.6（REV-021）で追加するhost error category（`directory_read` / `invalid_encoding` / `directory_not_empty`）のinventory登録もここで行う。
 5. **値表現**: AUD-047 List/Dict COW、続けてAUD-048 FunctionId。scaling/identity testを先に追加する。
 6. **binding/transaction**: AUD-016 VM fresh cell、AUD-024全language-state REPL journal。FunctionId counterをrollback対象外に固定する。
-7. **bytecode検証面**: §17.7（REV-006）の `VerifiedChunk`/verifier と per-instruction step 課金を軸に、§17.2（REV-004）の `patch_jump` fallible化とbuilder封印、§17.3（REV-005）の `MakeClosure` capture記述子化、REV-018のraw module封印を同一マイルストーンで実装する。VM入口を `VerifiedChunk` へ限定し、停止性はper-instruction課金（verifier非依存）で担保する。観測挙動はstep到達点以外不変。
+7. **bytecode検証面**: §17.7（REV-006）の instruction watchdog と `VerifiedChunk`/verifier を軸に、§17.2（REV-004）の `patch_jump` fallible化とbuilder封印、§17.3（REV-005）の `MakeClosure` capture記述子化、REV-018のraw module封印を同一マイルストーンで実装する。VM入口を `VerifiedChunk` へ限定し、停止性はfuelと独立したinstruction watchdog（verifier非依存）で担保する。観測挙動はVMのstep到達点（§17.7.3 で tree と同じ課金点へ揃う）以外不変。
 8. **境界挙動**: AUD-034 `path_join`、AUD-036 checked変換/Exited、AUD-018 CLI args/stdin、AUD-033 EOF診断、§17.1（REV-003）の混合数値比較。§20の `format_time` `%z`/`%Z` 追加も独立性が高い純粋フォーマット拡張としてこの面で実装できる（capability非依存）。
 9. **capability縦切り**: sandbox OnceLockをExecutionContext FilesystemCapabilityへ移し、tree/VM/importを同じpolicyへ接続する。§17.4（REV-009）の `list_dir` 部分失敗/非UTF-8、§17.6（REV-021）の `remove_dir`（空のみ）/`remove_tree`（`RecursiveDelete`）分割をこのcapability面で実装する。
 10. **検証基盤**: cargo-fuzzのfrontend/compiler/vm_chunk、続いてcapability完成後にevaluator/differential target。
@@ -2232,7 +2234,7 @@ DESIGN ONLY（本節はテストを記述しない。意図するテストを記
 ## 19. 文書全体の最終受入基準
 
 - AUD-016/017/018/019/024/033/034/036/047/048/049/050の採用判断、却下案、規範挙動、状態、変更箇所、error、移行、test、受入基準が実装PRから追跡できる。
-- §17のREV-003/004/005/006/009/012/017/021についても、同じ8観点（採用判断・却下案・データモデル・変更箇所・error・移行・test・受入基準）が実装PRから追跡できる。REV-017（§17.8）は sort / `list_dir` の全順序化を定める。REV-012は既存の第5節（AUD-017）を正本とし、本書で新しい意味論を追加しない。REV-006（§17.7）は停止性をper-instruction課金で担保し、verifierを唯一の停止性根拠にしない。
+- §17のREV-003/004/005/006/009/012/017/021についても、同じ8観点（採用判断・却下案・データモデル・変更箇所・error・移行・test・受入基準）が実装PRから追跡できる。REV-017（§17.8）は sort / `list_dir` の全順序化を定める。REV-012は既存の第5節（AUD-017）を正本とし、本書で新しい意味論を追加しない。REV-006（§17.7）は停止性をinstruction watchdogで担保し、verifierを唯一の停止性根拠にしない。
 - §20（`format_time` の `%z`/`%Z` 追加）の採用判断・採用理由・却下案・OS非依存条件・バックエンド非差分・後方互換・変更箇所・残論点・受入基準が実装PRから追跡できる。
 - tree/VMで意図しないbackend別期待値が残らない。
 - 現行 `language-spec.md` は実装完了まで変更せず、現行挙動の正本として維持する。
