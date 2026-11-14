@@ -893,9 +893,10 @@ order      = 99
 [[slice]]
 id         = "fix-sync-run-host-call-resume"
 title      = "埋め込みの同期 Engine::run が cooperative host call の Pending で ticket を引き取り、cancel・deadline を確かめながら完了を待って結果を注入し、start() を重複して呼ばない（execution-control §6.2・§9.2、issue #360）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-sync-run-host-call-resume 実装スライス（同期 `Engine::run` が cooperative host call の ticket を待って結果を注入する）" }
 acceptance = ["SHR-AT-01..05"]
 design_pr  = 410
+impl_pr    = 411
 order      = 100
