@@ -861,3 +861,22 @@ acceptance = ["JRP-AT-01..05"]
 design_pr  = 403
 impl_pr    = 404
 order      = 98
+
+# issue #359（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。HostCallPending の handle が ticket の完了を
+# 受け取ったとき run-turn queue の先頭でないと state が HostCallPending のまま残り、以後の poll が先頭判定と slice 実行に届かず
+# Engine 全体が止まるのを、完了を受け取った時点で Ready へ遷移させて直す（execution-control §9.2・§12.1）。parent は scheduler・
+# host pending を入れた REV-015（Slice 5）。同じ scheduler/handle に触れる issue #361・#362・#363 は、pause・admission slot・drop の
+# 別の仕組みなので loop-runbook §14.1 に合わせて別のスライスにする。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
+# （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A、PR #403）と同じく、この PR では付け直しをせず、
+# 仮にすべてのスライスより後（99）に置いた。マージ後に PM が付け直しだけの状態整理 PR で 35 より前へ移す。
+# 見積もり: src/ 5〜20 行、触る仕組みは host call の完了を受け取った handle の state 遷移 1 つ、受入基準 4。
+[[slice]]
+id         = "fix-host-call-resume-requeue"
+title      = "HostCallPending の handle が ticket の完了を受け取ったら Ready へ遷移させ、run-turn queue の先頭でなくても以後の poll で先頭判定と slice 実行へ進む（execution-control §9.2・§12.1、issue #359）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-host-call-resume-requeue 実装スライス（host call の完了を受け取った handle を Ready にして run-turn へ戻す）" }
+acceptance = ["HRQ-AT-01..04"]
+design_pr  = 408
+order      = 99
