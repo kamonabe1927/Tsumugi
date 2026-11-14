@@ -881,3 +881,21 @@ acceptance = ["HRQ-AT-01..04"]
 design_pr  = 408
 impl_pr    = 409
 order      = 99
+
+# issue #360（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。埋め込みの同期 Engine::run（run_transactional と
+# 監査付き driver）が run_slice の YieldedHostCall を continue するだけで ticket を引き取らず resume もしないため、同じ文が評価し直されて
+# cooperative host function の start() が fuel の上限の回数まで重複して呼ばれるのを、ticket を待って結果を注入する形で直す
+# （execution-control §6.2・§9.2）。待ち方は判断役が選択（PR #410、Q1=A）: 上限つきの park_timeout で待ち、waker で unpark する。parent は scheduler・host pending を入れた REV-015（Slice 5）。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
+# （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A、PR #403・PR #408）と同じく、この PR では付け直しをせず、
+# 仮にすべてのスライスより後（100）に置いた。マージ後に PM が付け直しだけの状態整理 PR で 35 より前へ移す。
+# 見積もり: src/ 60〜150 行、触る仕組みは埋め込みの同期 driver の host call 待ち 1 つ、受入基準 5。
+[[slice]]
+id         = "fix-sync-run-host-call-resume"
+title      = "埋め込みの同期 Engine::run が cooperative host call の Pending で ticket を引き取り、cancel・deadline を確かめながら完了を待って結果を注入し、start() を重複して呼ばない（execution-control §6.2・§9.2、issue #360）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-sync-run-host-call-resume 実装スライス（同期 `Engine::run` が cooperative host call の ticket を待って結果を注入する）" }
+acceptance = ["SHR-AT-01..05"]
+design_pr  = 410
+order      = 100
