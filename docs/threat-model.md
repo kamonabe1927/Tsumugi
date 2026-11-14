@@ -1,6 +1,6 @@
 # Tsumugi — 脅威モデル
 
-最終更新: 2026-11-04
+最終更新: 2026-11-14
 設計ステータス: **実装仕様確定・実装進行中**
 
 本文書の §1〜§13 は **到達目標の確定仕様**であり、現在の実装状態ではない。現在の実装が目標からどう逸脱しているかは、下の
@@ -28,8 +28,17 @@ file/stdin に絞る案（判断役の Q1=A）は、それを反映した PR #31
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
 | REPL（tree・`--vm`）と scheduler の handle 経路（`src/engine.rs` の `Engine::compile` / `create_execution` / `start`）の import は `Engine::link` と resolver を経ず、実行中に評価器内蔵 `ModuleLoader`（`src/module.rs`）がファイルを読む。`module_resolver` の grant を要さず（`TSUMUGI_SANDBOX` の検査だけを受ける）、この 2 経路では TM-024 の「全 import は link 時に resolver capability だけを使う。runtime import 禁止」と TM-AT-24 が成り立たない。例: CLI で `--allow-import-root` を渡さずに REPL へ `import "lib/m.tsg"` を入れると、tree・`--vm` とも module が実行される（同じ内容のファイルを実行すると terminal `Denied`、exit 1）。REPL の経路は [Capability Model仕様](capability-model.md) の逸脱一覧の REPL の行（§10・§14.1）、scheduler の handle 経路は同書の逸脱一覧の handle 経路の行（§10）にある | §10 TM-024、§11 TM-AT-24 | E7（REPL の `ModuleLoader` 保全）、exec-control Slice 3 PR-a（scheduler の handle 経路） |
+| fuel の charge point が §4.1 の課金表（statement / expression / operation 単位）に揃っておらず、課金は文・反復・呼び出しと一部 builtin の per-element だけである。TM-005 の「fuel hookを全評価・callback経路へ置く」と TM-AT-05 の「全loop/function/callback/collection builtin/host callでfuel N-1/Nは完了、N+1は`BudgetExceeded`」は、この範囲では成り立たない。詳細は [実行予算・協調実行仕様](execution-control.md) の未実装範囲の §4.1 課金表の行にある | §10 TM-005、§11 TM-AT-05 | —（未実装範囲。execution-control では F-2 で扱う） |
+| closure の capture の連鎖（`f = fn() g() end` で前の関数値を capture し続ける）の破棄が host stack を枯渇させる。関数値の深度は 0 と数えるので、値のネスト深度上限では防げず、20 万段の連鎖の破棄で tree・`--vm` とも abort する（exit 134）。TM-007 の「深い値で stack を枯渇させる」攻撃に対して、構造化 error にならない。詳細は [実行予算・協調実行仕様](execution-control.md) の未実装範囲の closure の capture の連鎖の行にある | §10 TM-007、§11 TM-AT-07 | —（未実装範囲。fix スライス fix-closure-capture-chain-stack で直す） |
+| link 時の import source の byte 上限を適用していない。module source は上限を見ずに全部読み（`src/embedding.rs` の `read_module_source`）、TM-019 の「source/import byte予算」と TM-AT-19 の import source byte の N-1/N/N+1 は成り立たない（module 数の上限は適用している）。詳細は [Capability Model仕様](capability-model.md) の逸脱一覧の有限の byte 上限 N の行にある | §10 TM-019、§11 TM-AT-19 | C11 |
 
-照合済みの節に残っている逸脱は上の行だけである（照合していない節に逸脱が無いことを意味しない）。
+照合済みの節に残っている逸脱は上の表の行だけである（照合していない節に逸脱が無いことを意味しない）。
+
+TM-005・TM-007・TM-019 の 3 行は loop:drift #395 の D-93・D-94・D-95 で足した。2026-11-14 の整合点検の輪番で、TM-005（fuel の charge point）・TM-007（closure の capture の連鎖）・TM-019（import source の byte 上限）を、他の spec の逸脱一覧の行と実装（`src/embedding.rs` の `read_module_source` など）に照らして照合した分である。照合済みの節は、上の 2026-11-02 の輪番の範囲にこの 3 つを加えたものである。3 行とも、内容を再掲せず他の spec の行を参照する形で持つ（TM-024 の行と同じ持ち方）。
+
+- **D-93（TM-005）:** 本文の Residual risk にあった「fuel の charge point が §4.1 課金表に揃うまでの差は…逸脱一覧にある」という時点つきの注記を消し、この表に行を足す案（Q1=A）は判断役が選択（issue #395）した。理由: 時点つきの状態は目標の章に置けず（ドキュメント運用ガイド「逸脱一覧の持ち方」）、TM-AT-05 は本書自身の目標なので、その未達は本書の逸脱一覧が正本である。注記だけ消す案（B）は、未達が本書のどこにも残らず、上の「照合済みの節に残っている逸脱は上の表の行だけ」という一文が事実と合わなくなるので採らなかった。
+- **D-94（TM-007）:** closure の capture の連鎖の破棄による stack 枯渇を、本文の Residual risk（受け入れるリスク）から外し、直す予定の逸脱としてこの表に載せる案（Q1=A）は判断役が選択（issue #395）した。理由: execution-control は同じ事項を未実装範囲に載せ、fix スライス（fix-closure-capture-chain-stack）があるので、受け入れるリスクではない。script 起因の host の abort を目標の章の残余リスクに固定すると、[マニフェスト](manifesto.md) 原則 1・原則 6 に対して目標を弱める読み方が残る。目標の章にスライス名を置かない点もドキュメント運用ガイドに揃う。スライス名だけ消して残余リスクに残す案（B）は、spec どうしの位置づけの食い違いが残るので採らなかった。OS stack overflow 一般と「別 process が最終防御」の残余リスクは本文に残す。
+- **D-95（TM-019）:** import source の byte 上限の未実装を、capability-model の行を参照する形でこの表に載せ、照合範囲に TM-019 を入れる案（Q1=A）は判断役が選択（issue #395）した。理由: TM-AT-19 は本書自身の目標で、予算（原則 3）の未達が脅威モデルから見え、未解決事項の記録が保たれる（原則 9）。他の spec の逸脱一覧にある事項は載せないと決める案（B）は、kamonabe が選んだ TM-024 の行（issue #318、2026-11-03）も外すことになるので採らなかった。
 
 ## 1. 目的と適用範囲
 
@@ -165,11 +174,11 @@ Phase 0〜2の受入完了時、次を保証する。
 |---|---|---|---|---|---|
 | TM-001 | scriptがprocess env、cwd、argv、stdio、clockへambient accessする | `CapabilitySet::empty()`を既定とし、全外部builtinをdispatcher経由へ移す | legacy CLI profileは明示的に広い権限を持つ | 2 | TM-AT-01, CAP-AT-01 |
 | TM-002 | `..`、absolute path、separator差、case alias、Windows ADS（`:`）でfilesystem rootを脱出する | normalized relative pathのみ受理し、root-bound handle adapter内で認可とopenを一体化。component内`:`はlexical拒否（`ColonInComponent`） | OS/filesystem固有alias。secure adapter未対応platform（非Unix・非Windows）は拒否。Windowsのjunction / mount pointはfail-closed拒否で安全策とする | 2 | TM-AT-02, CAP-AT-10 |
-| TM-003 | check/use間のsymlink差替え、dangling final symlink、Windows junction/reparseで許可外へcreate/writeする | path文字列のcanonicalize→I/Oを廃止。directory/file handleに束縛し、symlink policyをadapterが原子的に強制。Windowsのreparse(junction/mount point)はsecure handleでroot拘束し、stdが確定できないreparse種別は拒否する | malicious filesystem、契約違反adapter。TOCTOU反復raceはAUD-020 / CAP-AT-11 stress（本slice対象外） | 2/OS | TM-AT-03, CAP-AT-11 |
+| TM-003 | check/use間のsymlink差替え、dangling final symlink、Windows junction/reparseで許可外へcreate/writeする | path文字列のcanonicalize→I/Oを廃止。directory/file handleに束縛し、symlink policyをadapterが原子的に強制。Windowsのreparse(junction/mount point)はsecure handleでroot拘束し、stdが確定できないreparse種別は拒否する | malicious filesystem、契約違反adapter。TOCTOU反復raceはAUD-020 / CAP-AT-11 stress（Phase 7） | 2/OS | TM-AT-03, CAP-AT-11 |
 | TM-004 | canonicalize、metadata、import error差で許可外pathの存在をoracle化する | capability/grant/rootの拒否をresolver/OS操作前に同一のsanitized denialとして生成し、script操作ではcanonical error、link/control-planeでは`Denied`へ写像する。許可外pathをcanonicalizeしない | 許可済みroot内の存在情報は操作仕様上観測可能 | 2 | TM-AT-04 |
-| TM-005 | loop、callback、host call連打でCPUを占有する | fuel hookを全評価・callback経路へ置き、host call costを事前課金 | host callback・adapter内部のCPU消費はfuelの外（事前課金するcostだけを数える）。fuelのcharge pointが§4.1課金表に揃うまでの差は[実行予算・協調実行仕様](execution-control.md)の逸脱一覧にある。hard CPU limitはOS責任 | 3/OS | TM-AT-05 |
+| TM-005 | loop、callback、host call連打でCPUを占有する | fuel hookを全評価・callback経路へ置き、host call costを事前課金 | host callback・adapter内部のCPU消費はfuelの外（事前課金するcostだけを数える）。hard CPU limitはOS責任 | 3/OS | TM-AT-05 |
 | TM-006 | 巨大文字列、総collection、input/host resultでOOMまたはallocator abortを起こす | 入出力・host resultのbyte上限、将来の総heap budget、上限超過前の拒否 | Rust allocation failureは同一process回復不能の場合がある | 3/OS | TM-AT-06 |
-| TM-007 | 深いAST/call/import/値またはnative callbackでstackを枯渇させる | 既存AST/call/import深度検査、List/Dictの値のネスト深度検査（上限256、値を作る時点で拒否）、tree実行thread要件、host callbackの再入禁止 | OS stack overflowはabortし得る。closureのcaptureの連鎖（関数値の深度は0と数える）の破棄はstackを枯渇させ得る（`fix-closure-capture-chain-stack`で別に扱う）。host functionの戻り値の値の深度は検査しない。別processが最終防御 | 0/1/OS | TM-AT-07 |
+| TM-007 | 深いAST/call/import/値またはnative callbackでstackを枯渇させる | 既存AST/call/import深度検査、List/Dictの値のネスト深度検査（上限256、値を作る時点で拒否）、tree実行thread要件、host callbackの再入禁止 | OS stack overflowはabortし得る。host functionの戻り値の値の深度は検査しない。別processが最終防御 | 0/1/OS | TM-AT-07 |
 | TM-008 | `input()`、filesystem、resolver、host function、外部serviceが無期限blockする | Phase 3でcallbackへdeadline/cancellationを渡し、adapterに有限timeoutを要求する | 同期v1は実行中syscallをpreemptできない | 3/OS | TM-AT-08 |
 | TM-009 | env、file、stdin、host resultのsecretをstdout、error、traceへ漏らす | 必要値だけsnapshot/grant、output別capability、errorにsecret値を含めない | scriptへ正当に渡したsecretの意図的出力は情報フロー制御対象外 | 2 | TM-AT-09 |
 | TM-010 | audit eventへsource、path、引数、result、secret、PIIが漏れる | Phase 2でredaction metadataと既定`Omit`を固定し、Phase 6でsink前redactionする | hostがsafe messageへsecretを入れる誤設定 | 2/6 | TM-AT-10 |
