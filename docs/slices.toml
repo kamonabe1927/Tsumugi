@@ -919,3 +919,21 @@ design_pr  = 412
 impl_pr    = 414
 depends_on = ["fix-for-iter-snapshot-charge"]
 order      = 101
+
+# issue #361（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。ExecutionHandle::pause が state を Paused にする
+# だけで handle を run-turn queue から外さず、先頭の handle を pause すると他の handle が SchedulerPreempted を返し続けて Engine 全体が
+# 止まるのを、pause で run-turn から外し resume で末尾へ戻す形で直す（execution-control §9.2・§11・§12.1）。resume で戻す時点は設計 PR の
+# 判断の候補 Q1（推奨 A: resume の時点で末尾へ登録）。parent は pause を入れた REV-015（Slice 4。Slice 5 の run-turn FIFO で顕在化）。
+# 同じ scheduler/handle に触れる issue #362・#363 は admission slot・drop の別の仕組みなので loop-runbook §14.1 に合わせて別のスライスにする。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
+# （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A、PR #403・PR #408・PR #410・PR #412）と同じく、この PR では
+# 付け直しをせず、仮にすべてのスライスより後（102）に置いた。マージ後に PM が付け直しだけの状態整理 PR で 35 より前へ移す。
+# 見積もり: src/ 10〜40 行、触る仕組みは pause・resume と run-turn queue の登録 1 つ、受入基準 4。
+[[slice]]
+id         = "fix-pause-run-turn-remove"
+title      = "pause した handle を run-turn queue から外し、resume で末尾へ戻して、先頭の handle の pause で他の handle が止まらないようにする（execution-control §9.2・§11・§12.1、issue #361）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-pause-run-turn-remove 実装スライス（pause した handle を run-turn から外し、resume で末尾へ戻す）" }
+acceptance = ["PRT-AT-01..04"]
+order      = 102
