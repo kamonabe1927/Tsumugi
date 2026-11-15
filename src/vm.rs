@@ -1762,7 +1762,7 @@ impl Vm {
                     }
                     Value::Dict(ref map) => Value::List(
                         Value::new_iter_str_list(
-                            map.keys().cloned(),
+                            map.keys().map(String::as_str),
                             map.len(),
                             &mut self.budget,
                             ExecutionPhase::Run,
@@ -1771,7 +1771,7 @@ impl Vm {
                     ),
                     Value::Str(ref s) => Value::List(
                         Value::new_iter_str_list(
-                            s.chars().map(|c| c.to_string()),
+                            s.char_indices().map(|(i, c)| &s[i..i + c.len_utf8()]),
                             s.chars().count(),
                             &mut self.budget,
                             ExecutionPhase::Run,

@@ -128,6 +128,28 @@ impl<T> Tracked<T> {
         }))
     }
 
+    /// [`Tracked::new`] の、課金してから中身を作る版（execution-control §5.2）。
+    ///
+    /// `logical_bytes` の課金が成功したあとで `make` を呼んで中身を作る。課金が上限超過・
+    /// overflow なら `make` は呼ばれず、中身の複製・確保も起きない。
+    pub fn new_with(
+        make: impl FnOnce() -> T,
+        logical_bytes: u64,
+        budget: &mut crate::budget::BudgetLedger,
+        phase: ExecutionPhase,
+    ) -> Result<Rc<Self>, ControlStop> {
+        budget.charge_heap(logical_bytes, phase)?;
+        let id = budget.allocate_heap_id()?;
+        Ok(Rc::new(Self {
+            data: make(),
+            id,
+            bytes: logical_bytes,
+            ledger: budget.heap_handle(),
+            child_max: 0,
+            child_max_count: 0,
+        }))
+    }
+
     /// compile 時定数用の untracked backing を作る（課金しない）。
     ///
     /// bytecode の定数プールに置く空の List/Dict リテラル用。ledger を持たない
@@ -954,17 +976,18 @@ impl Value {
         Ok(Value::Str(Tracked::new(s, bytes, budget, phase)?))
     }
 
-    /// `for` の Dict・Str の反復列（key / 文字の `String` の列）から、heap 課金済みの
+    /// `for` の Dict・Str の反復列（key / 文字を借用した `&str` の列）から、heap 課金済みの
     /// List の backing を作る（tree / VM 共通、execution-control §5.2・§5.3）。
     ///
     /// 手順: (1) 要素数 `count` を `check_collection_elements` で検査する（要素を作る前）。
-    /// (2) 要素ごとに §5.3 の累積（`charge_string`）を課金してから String body（§5.1）を
-    /// live heap に課金した `Str` にする。(3) 最後に List body を課金した List にする。
+    /// (2) 要素ごとに §5.3 の累積（`charge_string`）と String body（§5.1）の live heap への
+    /// 課金を済ませ、(3) 両方が成功したあとで文字列を複製して `Str` にする（課金で止まる
+    /// 要素は複製しない）。(4) 最後に List body を課金した List にする。
     /// 上限超過の `ControlStop` はそのまま返し、作りかけの要素は drop で release される。
     /// 要素数の上限超過（`collection_limit`）も `ControlStop` で返す（呼び出し側が
     /// `control_stop_to_error` で写す）。
-    pub fn new_iter_str_list(
-        parts: impl Iterator<Item = String>,
+    pub fn new_iter_str_list<'a>(
+        parts: impl Iterator<Item = &'a str>,
         count: usize,
         budget: &mut crate::budget::BudgetLedger,
         phase: ExecutionPhase,
@@ -973,7 +996,13 @@ impl Value {
         let mut items = Vec::with_capacity(count);
         for part in parts {
             budget.charge_string(part.len() as u64, phase)?;
-            items.push(Value::new_str(part, budget, phase)?);
+            let bytes = heap_size::string_body(part.len() as u64);
+            items.push(Value::Str(Tracked::new_with(
+                || part.to_string(),
+                bytes,
+                budget,
+                phase,
+            )?));
         }
         let bytes = heap_size::list_body(items.len() as u64);
         Ok(Tracked::summarized(Tracked::new(
