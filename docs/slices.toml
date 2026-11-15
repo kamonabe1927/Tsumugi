@@ -914,5 +914,6 @@ status     = "ready"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-for-iter-charge-before-copy 実装スライス（`for` の反復列の要素を課金してから複製する）" }
 acceptance = ["FCB-AT-01..03"]
+design_pr  = 412
 depends_on = ["fix-for-iter-snapshot-charge"]
 order      = 101
