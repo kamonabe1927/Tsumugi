@@ -2,8 +2,10 @@
 //! execution-control §5.2・§5.3）。
 //!
 //! - FCB-AT-01: 課金で止まる要素を複製しない（確保量を数える。tree / VM）。
-//! - FCB-AT-03: `max_single_string_bytes` を超える要素の terminal（`new_iter_str_list` を直接呼ぶ）。
-//!   script からは key・文字を作る時点で同じ上限に掛かるので、反復列の側だけの検査は関数を直に呼ぶ。
+//! - FCB-AT-03: `max_single_string_bytes` を超える要素の terminal。tree は embedding の
+//!   `ExecutionContext` を 2 回の実行で使い回して Dict の `for` で確かめ、VM は context を引き継ぐ
+//!   経路が無い（CLI・REPL は 1 つの budget を共有し、key を作る時点で同じ上限に掛かる）ので、
+//!   tree・VM 共通の `new_iter_str_list` を直接呼ぶ。
 //!
 //! FCB-AT-02（成功時の要素・課金が変わらない）と FCB-AT-03 の既存の期待値は
 //! `tests/for_iter_charge.rs`（FIS-AT-01..04）・`tests/differential.rs`・golden fixture
@@ -154,5 +156,72 @@ fn fcb_at_03_single_string_limit_reports_the_element_length() {
             assert_eq!(e.limit, 4);
         }
         other => panic!("BudgetExceeded を期待: {other:?}"),
+    }
+}
+
+/// tree: embedding の `ExecutionContext` を 2 回の実行で使い回す。1 回目（既定の budget）で長い key の
+/// Dict を作り、2 回目（`max_single_string_bytes` を key より小さくした budget）で `for` する。
+/// key を作る時点の上限に掛からずに、反復列の要素（`materialize_for_items` → `new_iter_str_list`）の
+/// 検査だけで `SingleStringBytes` の terminal（`requested` = key の byte 長）になる。
+/// VM は context を 2 回の実行で引き継ぐ経路が無い（CLI・REPL は 1 つの budget を共有する）ので、
+/// 上の関数を直接呼ぶテストで代える。
+#[test]
+fn fcb_at_03_dict_for_stops_with_single_string_bytes_in_tree() {
+    use std::num::NonZeroU128;
+    use std::sync::Arc;
+    use tsumugi::embedding::{Engine, ExecutionContext, ExecutionOutcome, ExecutionRequest};
+    use tsumugi::{
+        CapabilitySet, CompileOptions, ExecutionId, LinkRequest, MonotonicClock, Source, SourceId,
+        SystemMonotonicClock,
+    };
+
+    let engine = Engine::builder().build().expect("engine");
+    let clock: Arc<dyn MonotonicClock> = Arc::new(SystemMonotonicClock::new());
+    let mut context = ExecutionContext::new(&engine);
+    let mut run_script = |text: &str, id: u128, max_single: Option<u64>| {
+        let script = engine
+            .compile(
+                Source::new(SourceId::new("main").expect("id"), text),
+                &CompileOptions {
+                    retain_source: true,
+                },
+            )
+            .expect("compile");
+        let link_budget = BudgetConfig::standard(clock.as_ref()).expect("budget");
+        let linked = engine
+            .link(
+                &script,
+                LinkRequest::new(
+                    ExecutionId::new(NonZeroU128::new(id).expect("non-zero")),
+                    CapabilitySet::empty(),
+                    link_budget,
+                ),
+            )
+            .expect("link");
+        let mut budget = BudgetConfig::standard(clock.as_ref()).expect("budget");
+        if let Some(limit) = max_single {
+            budget.max_single_string_bytes = limit;
+        }
+        let request = ExecutionRequest::new(budget, Arc::clone(&clock)).expect("request");
+        engine.run(&linked, &mut context, request)
+    };
+
+    let first = run_script("let d = {\"abcdefgh\": 1}\n", 1, None);
+    assert!(
+        matches!(first, ExecutionOutcome::Completed { .. }),
+        "{first:?}"
+    );
+    let second = run_script("let n = 0\nfor k in d\n    n = n + 1\nend\n", 2, Some(4));
+    match second {
+        ExecutionOutcome::BudgetExceeded { error, .. } => {
+            assert_eq!(error.code, ErrorKind::StringLimit);
+            assert_eq!(error.line, Some(2), "止まる位置は `for` の行");
+            assert!(
+                error.safe_message.contains('8') && error.safe_message.contains('4'),
+                "requested = key の byte 長 8、limit = 4: {}",
+                error.safe_message
+            );
+        }
+        other => panic!("SingleStringBytes の terminal を期待: {other:?}"),
     }
 }
