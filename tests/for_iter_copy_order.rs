@@ -216,10 +216,9 @@ fn fcb_at_03_dict_for_stops_with_single_string_bytes_in_tree() {
         ExecutionOutcome::BudgetExceeded { error, .. } => {
             assert_eq!(error.code, ErrorKind::StringLimit);
             assert_eq!(error.line, Some(2), "止まる位置は `for` の行");
-            assert!(
-                error.safe_message.contains('8') && error.safe_message.contains('4'),
-                "requested = key の byte 長 8、limit = 4: {}",
-                error.safe_message
+            assert_eq!(
+                error.safe_message, "文字列の長さが上限を超えました: 8 バイト (上限: 4 バイト)",
+                "SingleStringBytes（requested = key の byte 長 8、limit = 4）"
             );
         }
         other => panic!("SingleStringBytes の terminal を期待: {other:?}"),
