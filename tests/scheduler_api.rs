@@ -1305,23 +1305,49 @@ fn prt_at_02_resume_requeues_at_tail_and_round_robin_completes() {
     ));
     assert!(h3.usage().committed.fuel > f3);
 
-    // 以後 3 つとも round-robin で Completed まで進む。
+    // 以後 3 つとも round-robin で Completed まで進む。terminal の fuel を記録する。
     let mut done = [false; 3];
+    let mut fuel = [0u64; 3];
+    let terminal_fuel = |r: &PollResult| match r {
+        PollResult::Terminal {
+            outcome: ExecutionOutcome::Completed,
+            usage,
+        } => Some(usage.committed.fuel),
+        _ => None,
+    };
     for _ in 0..5000 {
         if done.iter().all(|d| *d) {
             break;
         }
-        if !done[0] && prt_is_terminal_completed(&h1.poll(PRT_SLICE).unwrap()) {
+        if !done[0]
+            && let Some(f) = terminal_fuel(&h1.poll(PRT_SLICE).unwrap())
+        {
             done[0] = true;
+            fuel[0] = f;
         }
-        if !done[1] && prt_is_terminal_completed(&h2.poll(PRT_SLICE).unwrap()) {
+        if !done[1]
+            && let Some(f) = terminal_fuel(&h2.poll(PRT_SLICE).unwrap())
+        {
             done[1] = true;
+            fuel[1] = f;
         }
-        if !done[2] && prt_is_terminal_completed(&h3.poll(PRT_SLICE).unwrap()) {
+        if !done[2]
+            && let Some(f) = terminal_fuel(&h3.poll(PRT_SLICE).unwrap())
+        {
             done[2] = true;
+            fuel[2] = f;
         }
     }
     assert!(done.iter().all(|d| *d), "全 handle が Completed に達する");
+    // pause した h1 の結果は、pause しなかった h2・h3 と同じ（continuation を保って続ける）。
+    assert_eq!(
+        fuel[0], fuel[1],
+        "h1 の terminal fuel は pause なしの h2 と同じ"
+    );
+    assert_eq!(
+        fuel[0], fuel[2],
+        "h1 の terminal fuel は pause なしの h3 と同じ"
+    );
 }
 
 /// PRT-AT-03: run-turn にいた handle の pause は他を止めず、いなかった handle の resume は
