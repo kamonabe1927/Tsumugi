@@ -911,10 +911,11 @@ order      = 100
 [[slice]]
 id         = "fix-for-iter-charge-before-copy"
 title      = "for の Dict・Str の反復列で、key・文字を借用で受け取り、§5.3 の累積と String body を課金してから複製する（execution-control §5.2・§5.3、loop:drift #395 D-98）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-for-iter-charge-before-copy 実装スライス（`for` の反復列の要素を課金してから複製する）" }
 acceptance = ["FCB-AT-01..03"]
 design_pr  = 412
+impl_pr    = 414
 depends_on = ["fix-for-iter-snapshot-charge"]
 order      = 101
