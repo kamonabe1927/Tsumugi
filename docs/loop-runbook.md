@@ -85,7 +85,7 @@ issue は §8 の仕分けの対象になる。
 
 1. 2 時間以上残った `loop:running` を外す（§4）
 2. kamonabe の書き込み（`owner_writes_to_handle`）に §5 のとおり応える
-3. 審査で `判定: 疑いあり` が出た PR を止める（loop-guard §4.3: `needs-design` issue を立て、PR を閉じ、スライスを `blocked` にする状態整理の PR を `Closes #<issue>` で出す）
+3. 審査で `判定: 疑いあり` が出た PR を止める（loop-guard §4.3: `needs-design` issue を立て、PR を閉じ、スライスを `blocked` にする状態整理の PR を `Closes #<issue>` で出す）。ずれの修正の PR なら §12.3 の 4 のとおり
 4. 決まっていない判断の候補（`pending_decisions`）を、判断役にかける（§7.3）
 5. `stuck_counts` が 2 以上のスライスを `blocked`（理由 `stuck: <原因>`）にする状態整理の PR を出す（loop-guard §7）
 6. 進まなくなった PR を扱う
@@ -269,6 +269,12 @@ kamonabe に見てほしいこと: <方針を続けるか考える材料。無�
 1. ブランチ `docs/drift-<YYYYMMDD>` で、機械的なずれと判断済みのずれをまとめて直す。判断済みのずれは、選ばれた内容と理由を spec の該当節に書く。実装の変更が要るものは、この PR では実装を変えず、`fix` スライスを spec と `slices.toml` に足す（`order` は §8 の「不具合の報告」の既定）
 2. `loop:design` と `loop:running` を付け、本文に直した `D-N` と `Refs #<issue 番号>` を書く（`Closes` は使わない）
 3. 以降はレビュー・審査。直すのは設計役
+4. 審査で `判定: 疑いあり` が出たら（loop-guard §4.3）、往復させずに次のとおり止める
+   1. PR を閉じ、閉じた理由と疑いの出た `D-N` を PR にコメントする
+   2. 疑いの出た `D-N` ごとに `needs-design` issue（タイトル `[needs-design] D-N: manifesto 疑い`）を立てる。本文に審査のコメント・元の判断・kamonabe に決めてほしいことを書く
+   3. `loop:drift` issue の本文のその `D-N` の行に `保留 #<issue 番号>` と書く。保留中の `D-N` は、整合点検でも進行の回でも、ずれの修正の対象にしない
+   4. 残りの `D-N` は、保留中の `D-N` の箇所に触れない新しい PR（新しいブランチ）で出し直し、レビュー・審査を最初から受ける
+   5. 保留を解くのは、その `needs-design` issue への kamonabe の書き込み（§5）だけである。決まったら設計役が反映の PR を `Closes #<issue>` で出し、`loop:drift` issue の `保留` の印を消す
 
 ## 13. 本証・反証レビュー（レビュー役）
 
