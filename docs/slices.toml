@@ -957,4 +957,5 @@ status     = "ready"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-terminal-release-slot 実装スライス（Terminal に達した時点で admission slot を 1 回だけ解放する）" }
 acceptance = ["TRS-AT-01..04"]
+design_pr  = 419
 order      = 103
