@@ -932,9 +932,10 @@ order      = 101
 [[slice]]
 id         = "fix-pause-run-turn-remove"
 title      = "pause した handle を run-turn queue から外し、resume で末尾へ戻して、先頭の handle の pause で他の handle が止まらないようにする（execution-control §9.2・§11・§12.1、issue #361）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-pause-run-turn-remove 実装スライス（pause した handle を run-turn から外し、resume で末尾へ戻す）" }
 acceptance = ["PRT-AT-01..04"]
 design_pr  = 416
+impl_pr    = 0
 order      = 102

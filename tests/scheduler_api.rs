@@ -1172,3 +1172,325 @@ fn host_resume_head_continues_in_same_poll_and_cancel_before_complete_is_unchang
         other => panic!("Cancelled を期待したが {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// fix-pause-run-turn-remove（issue #361、execution-control §9.2・§11・§12.1）
+// ---------------------------------------------------------------------------------------------
+
+const PRT_HEAVY: &str = "let i = 0\nwhile i < 1000\n  i = i + 1\nend\n";
+const PRT_SLICE: PollSlice = PollSlice { max_fuel: 64 };
+
+fn prt_is(r: &PollResult, want: &YieldReason) -> bool {
+    matches!(r, PollResult::Yielded { reason, .. } if reason == want)
+}
+
+fn prt_is_terminal_completed(r: &PollResult) -> bool {
+    matches!(
+        r,
+        PollResult::Terminal {
+            outcome: ExecutionOutcome::Completed,
+            ..
+        }
+    )
+}
+
+/// PRT-AT-01: run-turn の先頭の handle を pause しても、他の handle が進んで terminal に達する。
+#[test]
+fn prt_at_01_pausing_head_does_not_stall_other_handles() {
+    let engine = Engine::with_limits(limits(2, 0));
+    let script = engine.compile(PRT_HEAVY).unwrap();
+    let mut ctx1 = ExecutionContext::new();
+    let mut ctx2 = ExecutionContext::new();
+    let mut h1 = engine
+        .create_execution(&script, &mut ctx1, ExecutionRequest::new())
+        .unwrap();
+    let mut h2 = engine
+        .create_execution(&script, &mut ctx2, ExecutionRequest::new())
+        .unwrap();
+
+    let r = h1.poll(PRT_SLICE).unwrap();
+    assert!(prt_is(&r, &YieldReason::SliceFuelExhausted));
+    let r = h2.poll(PRT_SLICE).unwrap();
+    assert!(prt_is(&r, &YieldReason::SchedulerPreempted));
+
+    h1.pause().unwrap();
+    let h1_fuel = h1.usage().committed.fuel;
+
+    let before = h2.usage().committed.fuel;
+    let r = h2.poll(PRT_SLICE).unwrap();
+    assert!(
+        !prt_is(&r, &YieldReason::SchedulerPreempted),
+        "pause した先頭 handle が他を止めてはならない: {r:?}"
+    );
+    assert!(h2.usage().committed.fuel > before, "h2 の fuel が増える");
+
+    let mut done = false;
+    for _ in 0..5000 {
+        let r = h2.poll(PRT_SLICE).unwrap();
+        if prt_is_terminal_completed(&r) {
+            done = true;
+            break;
+        }
+    }
+    assert!(done, "h2 は上限の往復回数の中で Completed に達する");
+    assert!(matches!(h1.state(), tsumugi::ExecutionState::Paused(_)));
+    assert_eq!(h1.usage().committed.fuel, h1_fuel, "h1 の usage は不変");
+}
+
+/// PRT-AT-02: resume した handle は pause で外れた位置ではなく末尾へ戻り、round-robin で進む。
+#[test]
+fn prt_at_02_resume_requeues_at_tail_and_round_robin_completes() {
+    let engine = Engine::with_limits(limits(3, 0));
+    let script = engine.compile(PRT_HEAVY).unwrap();
+    let mut ctx1 = ExecutionContext::new();
+    let mut ctx2 = ExecutionContext::new();
+    let mut ctx3 = ExecutionContext::new();
+    let mut h1 = engine
+        .create_execution(&script, &mut ctx1, ExecutionRequest::new())
+        .unwrap();
+    let mut h2 = engine
+        .create_execution(&script, &mut ctx2, ExecutionRequest::new())
+        .unwrap();
+    let mut h3 = engine
+        .create_execution(&script, &mut ctx3, ExecutionRequest::new())
+        .unwrap();
+
+    assert!(prt_is(
+        &h1.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SliceFuelExhausted
+    ));
+    assert!(prt_is(
+        &h2.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SchedulerPreempted
+    ));
+    h1.pause().unwrap();
+    // h2 が先頭で数 slice 進む（queue は [h2]）。
+    for _ in 0..3 {
+        assert!(prt_is(
+            &h2.poll(PRT_SLICE).unwrap(),
+            &YieldReason::SliceFuelExhausted
+        ));
+    }
+
+    // resume で queue は [h2, h1]。h1 は h2 より前へ挿入されない。
+    h1.resume().unwrap();
+    // まだ poll していない h3 は h1 より後ろ: [h2, h1, h3]。
+    assert!(prt_is(
+        &h3.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SchedulerPreempted
+    ));
+    assert!(prt_is(
+        &h1.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SchedulerPreempted
+    ));
+    // h2 が進み rotate: [h1, h3, h2]。
+    let f2 = h2.usage().committed.fuel;
+    assert!(prt_is(
+        &h2.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SliceFuelExhausted
+    ));
+    assert!(h2.usage().committed.fuel > f2);
+    // h1 が先頭: 進んで rotate: [h3, h2, h1]。
+    let f1 = h1.usage().committed.fuel;
+    assert!(prt_is(
+        &h1.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SliceFuelExhausted
+    ));
+    assert!(h1.usage().committed.fuel > f1);
+    // h3 が先頭（h1 より後ろに登録されていたので h1 の次）。
+    let f3 = h3.usage().committed.fuel;
+    assert!(prt_is(
+        &h3.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SliceFuelExhausted
+    ));
+    assert!(h3.usage().committed.fuel > f3);
+
+    // 以後 3 つとも round-robin で Completed まで進む。
+    let mut done = [false; 3];
+    for _ in 0..5000 {
+        if done.iter().all(|d| *d) {
+            break;
+        }
+        if !done[0] && prt_is_terminal_completed(&h1.poll(PRT_SLICE).unwrap()) {
+            done[0] = true;
+        }
+        if !done[1] && prt_is_terminal_completed(&h2.poll(PRT_SLICE).unwrap()) {
+            done[1] = true;
+        }
+        if !done[2] && prt_is_terminal_completed(&h3.poll(PRT_SLICE).unwrap()) {
+            done[2] = true;
+        }
+    }
+    assert!(done.iter().all(|d| *d), "全 handle が Completed に達する");
+}
+
+/// PRT-AT-03: run-turn にいた handle の pause は他を止めず、いなかった handle の resume は
+/// run-turn に入らない。
+#[test]
+fn prt_at_03_registered_and_unregistered_handles_stay_consistent() {
+    // (a) 非先頭で run-turn に登録済みの handle を pause しても、先頭は進み続ける。
+    let engine = Engine::with_limits(limits(2, 0));
+    let script = engine.compile(PRT_HEAVY).unwrap();
+    let mut ctx1 = ExecutionContext::new();
+    let mut ctx2 = ExecutionContext::new();
+    let mut h1 = engine
+        .create_execution(&script, &mut ctx1, ExecutionRequest::new())
+        .unwrap();
+    let mut h2 = engine
+        .create_execution(&script, &mut ctx2, ExecutionRequest::new())
+        .unwrap();
+    assert!(prt_is(
+        &h1.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SliceFuelExhausted
+    ));
+    assert!(prt_is(
+        &h2.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SchedulerPreempted
+    ));
+    h2.pause().unwrap();
+    for _ in 0..3 {
+        assert!(prt_is(
+            &h1.poll(PRT_SLICE).unwrap(),
+            &YieldReason::SliceFuelExhausted
+        ));
+    }
+    drop(h2);
+    drop(h1);
+
+    // (b) まだ poll していない Created を pause / resume しても run-turn に入らない。
+    let mut ctx3 = ExecutionContext::new();
+    let mut ctx4 = ExecutionContext::new();
+    let mut h3 = engine
+        .create_execution(&script, &mut ctx3, ExecutionRequest::new())
+        .unwrap();
+    let mut h4 = engine
+        .create_execution(&script, &mut ctx4, ExecutionRequest::new())
+        .unwrap();
+    h4.pause().unwrap();
+    h4.resume().unwrap();
+    // h4 が run-turn に入っていれば h3 は非先頭で Preempted になる。
+    assert!(prt_is(
+        &h3.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SliceFuelExhausted
+    ));
+    // h4 は次の poll から今と同じに登録され、h3 の後ろで Preempted。
+    assert!(prt_is(
+        &h4.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SchedulerPreempted
+    ));
+}
+
+/// PRT-AT-03: `Yielded(HostCallPending)` の handle の pause / resume は run-turn に触れない。
+#[test]
+fn prt_at_03_host_call_pending_pause_resume_does_not_enter_run_turn() {
+    let engine = Engine::with_limits(limits(2, 0));
+    let adapter = FakeCooperativeAdapter::pending(1, "fetch");
+    let (registry, caps) = coop_setup(1, "fetch", adapter.clone());
+    let mut ctx_a = coop_context(registry, caps);
+    let mut ctx_b = ExecutionContext::new();
+    let script_a = engine.compile("let x = fetch()\n").unwrap();
+    let script_b = engine.compile(PRT_HEAVY).unwrap();
+    let mut h1 = engine
+        .create_execution(&script_a, &mut ctx_a, ExecutionRequest::new())
+        .unwrap();
+    let mut h2 = engine
+        .create_execution(&script_b, &mut ctx_b, ExecutionRequest::new())
+        .unwrap();
+    let r = h1.poll(PRT_SLICE).unwrap();
+    assert!(matches!(
+        r,
+        PollResult::Yielded {
+            reason: YieldReason::HostCallPending { .. },
+            ..
+        }
+    ));
+    assert!(prt_is(
+        &h2.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SliceFuelExhausted
+    ));
+
+    h1.pause().unwrap();
+    h1.resume().unwrap();
+    // h1 が run-turn に入っていれば h2 は rotate されて次の poll で Preempted になる。
+    for _ in 0..2 {
+        assert!(prt_is(
+            &h2.poll(PRT_SLICE).unwrap(),
+            &YieldReason::SliceFuelExhausted
+        ));
+    }
+
+    // ticket 完了後、h1 は step 4 から今と同じに進み Completed に達する。
+    let completer = take_stashed_completer().expect("completer");
+    completer.complete(Ok(Value::Int(1)));
+    let mut done1 = false;
+    let mut done2 = false;
+    for _ in 0..5000 {
+        if done1 && done2 {
+            break;
+        }
+        if !done1 && prt_is_terminal_completed(&h1.poll(PRT_SLICE).unwrap()) {
+            done1 = true;
+        }
+        if !done2 && prt_is_terminal_completed(&h2.poll(PRT_SLICE).unwrap()) {
+            done2 = true;
+        }
+    }
+    assert!(done1 && done2);
+}
+
+/// PRT-AT-04: paused handle の cancel・drop の経路が変わらず、run-turn に古い登録が残らない。
+#[test]
+fn prt_at_04_cancel_and_drop_while_paused_leave_no_stale_run_turn_entry() {
+    let engine = Engine::with_limits(limits(2, 0));
+    let script = engine.compile(PRT_HEAVY).unwrap();
+    let mut ctx1 = ExecutionContext::new();
+    let mut ctx2 = ExecutionContext::new();
+    let mut h1 = engine
+        .create_execution(&script, &mut ctx1, ExecutionRequest::new())
+        .unwrap();
+    let mut h2 = engine
+        .create_execution(&script, &mut ctx2, ExecutionRequest::new())
+        .unwrap();
+    assert!(prt_is(
+        &h1.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SliceFuelExhausted
+    ));
+    assert!(prt_is(
+        &h2.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SchedulerPreempted
+    ));
+    h1.pause().unwrap();
+
+    // pause 中も active slot を消費する（満杯のまま）。
+    let mut ctx3 = ExecutionContext::new();
+    assert!(matches!(
+        engine.create_execution(&script, &mut ctx3, ExecutionRequest::new()),
+        Err(StartError::Backpressure { .. })
+    ));
+
+    // paused の handle を drop すると slot が解放され、h2 が先頭で進む。
+    drop(h1);
+    assert!(prt_is(
+        &h2.poll(PRT_SLICE).unwrap(),
+        &YieldReason::SliceFuelExhausted
+    ));
+    let _h3 = engine
+        .create_execution(&script, &mut ctx3, ExecutionRequest::new())
+        .expect("slot 解放後は admit が通る");
+
+    // pause 中の cancel は resume 後の poll で Cancelled になる。
+    h2.pause().unwrap();
+    h2.cancellation_token().cancel();
+    h2.resume().unwrap();
+    let r = h2.poll(PRT_SLICE).unwrap();
+    assert!(
+        matches!(
+            r,
+            PollResult::Terminal {
+                outcome: ExecutionOutcome::Cancelled,
+                ..
+            }
+        ),
+        "{r:?}"
+    );
+}

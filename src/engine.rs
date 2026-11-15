@@ -173,6 +173,7 @@ impl Engine {
             waker: None,
             pending_ticket: None,
             run_turn_registered: false,
+            run_turn_removed_by_pause: false,
             _engine: PhantomData,
             _not_send: PhantomData,
             slot,
@@ -609,7 +610,12 @@ pub struct ExecutionHandle<'engine, 'script, 'context> {
     /// 時は `cancel()` で遅着結果を破棄する（§4.6/§4.8）。
     pending_ticket: Option<TicketErased>,
     /// run-turn FIFO へ push 済みか（設計 §4.3 step 5）。
+    ///
+    /// `pause` は登録済みの handle を run-turn から外してこれを `false` に戻し、`resume` は
+    /// 外した handle だけを末尾へ戻す（§9.2/§12.1。他の handle の poll を止めない）。
     run_turn_registered: bool,
+    /// `pause` が run-turn から外した handle か。`resume` で末尾へ戻す対象を決める。
+    run_turn_removed_by_pause: bool,
     _engine: PhantomData<&'engine Engine>,
     /// `!Send + !Sync` を保証する（第9.1節）。別スレッドへ move させない。
     _not_send: PhantomData<*const ()>,
@@ -878,8 +884,9 @@ impl ExecutionHandle<'_, '_, '_> {
     /// [`PausedState::resume_to`] に保存して `Paused` へ遷移する（§9.2）。`Running` は
     /// poll 中の mutable borrow 内なので到達せず、`Paused` は二重 pause、`Terminal` は
     /// `HandleError::Terminal` になる。pause 中は評価器の永続 continuation（session /
-    /// frame stack / transaction journal）を yield と同じくそのまま保持し、resume まで
-    /// run-turn へ戻らない（§9.3 / §11）。deadline は pause 中も進む（clock を止めない）。
+    /// frame stack / transaction journal）を yield と同じくそのまま保持する。run-turn に
+    /// 登録済みなら queue から外し（他の handle の poll を止めない）、resume まで戻らない
+    /// （§9.2 / §9.3 / §11）。deadline は pause 中も進む（clock を止めない）。
     pub fn pause(&mut self) -> Result<(), HandleError> {
         if self.state == ExecutionState::Terminal {
             return Err(HandleError::Terminal);
@@ -890,6 +897,11 @@ impl ExecutionHandle<'_, '_, '_> {
                     reason: PauseReason::HostRequested,
                     resume_to,
                 });
+                if self.run_turn_registered {
+                    self.shared.run_turn_remove(self.slot_id);
+                    self.run_turn_registered = false;
+                    self.run_turn_removed_by_pause = true;
+                }
                 Ok(())
             }
             None => Err(HandleError::InvalidState {
@@ -903,7 +915,9 @@ impl ExecutionHandle<'_, '_, '_> {
     ///
     /// `Paused` でだけ成功し、pause 前に保存した [`PausedState::resume_to`] の状態
     /// （`Created` / `Linked` / `Ready` / `Yielded`）へ戻す（§9.2）。その状態から
-    /// 次の `poll` が continuation を resume する。`Terminal` は `HandleError::Terminal`、
+    /// 次の `poll` が continuation を resume する。pause で run-turn から外した handle は
+    /// ここで queue の末尾へ戻す（§9.2 の `Ready`、§12.1 規則 1）。外していない handle は
+    /// run-turn に触れず、次の `poll` の step 3〜5 で扱う。`Terminal` は `HandleError::Terminal`、
     /// それ以外の非 Paused は `InvalidState`。
     pub fn resume(&mut self) -> Result<(), HandleError> {
         match &self.state {
@@ -915,6 +929,11 @@ impl ExecutionHandle<'_, '_, '_> {
                     ResumeState::Ready => ExecutionState::Ready,
                     ResumeState::Yielded(reason) => ExecutionState::Yielded(reason.clone()),
                 };
+                if self.run_turn_removed_by_pause {
+                    self.shared.run_turn_push_back(self.slot_id);
+                    self.run_turn_registered = true;
+                    self.run_turn_removed_by_pause = false;
+                }
                 Ok(())
             }
             _ => Err(HandleError::InvalidState {
