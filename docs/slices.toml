@@ -899,3 +899,20 @@ spec       = { doc = "docs/execution-control.md", section = "fix-sync-run-host-c
 acceptance = ["SHR-AT-01..05"]
 design_pr  = 410
 order      = 100
+
+# loop:drift #395 の D-98（判断済み Q1=A、判断役が選択（issue #395））から作った fix。for の Dict・Str の反復列を作る
+# new_iter_str_list が key・文字を複製してから §5.3 の累積と String body を課金するのを、借用で受け取って課金のあとで複製する形に直す
+# （execution-control §5.2・§5.3）。parent は heap accounting を入れた REV-015。
+# order は loop-runbook §12.3・§8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
+# （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A、PR #403・PR #408・PR #410）と同じく、この PR では
+# 付け直しをせず、仮にすべてのスライスより後（101）に置いた。マージ後に PM が付け直しだけの状態整理 PR で 35 より前へ移す。
+# 見積もり: src/ 20〜60 行、触る仕組みは for の反復列の要素の作り方 1 つ、受入基準 3。
+[[slice]]
+id         = "fix-for-iter-charge-before-copy"
+title      = "for の Dict・Str の反復列で、key・文字を借用で受け取り、§5.3 の累積と String body を課金してから複製する（execution-control §5.2・§5.3、loop:drift #395 D-98）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-for-iter-charge-before-copy 実装スライス（`for` の反復列の要素を課金してから複製する）" }
+acceptance = ["FCB-AT-01..03"]
+depends_on = ["fix-for-iter-snapshot-charge"]
+order      = 101

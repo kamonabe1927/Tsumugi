@@ -1,6 +1,6 @@
 # Tsumugi — 検証・リリース・運用設計
 
-最終更新: 2026-11-03
+最終更新: 2026-11-15
 設計ステータス: **実装仕様確定・部分実装**
 
 本文書の §1〜§18 は **到達目標の確定仕様**であり、現在の実装状態ではない。現在の実装が目標からどう逸脱しているか・どこが未実装かは、
@@ -15,21 +15,32 @@ semantic-decisions（D-20）と同じ形にそろう。状態行と §1 の列�
 載せたのは 2026-11-03 の整合点検の輪番（`.github/workflows/ci.yml`・`Cargo.toml`・`README.md`・`README.ja.md`・`src/main.rs`、
 リポジトリに `fuzz/`・`deploy/`・`Dockerfile`・release workflow が無いこと）と、D-33〜D-35 を直すときに確かめた分だけである。
 branch protection の required checks（VRO-AT-01）は GitHub の設定なので照合しておらず、§2.2 の表の capability/budget/audit の領域の現状、
-§5〜§6 の matrix の中身は他の spec との照合をまだしていない。
+§5〜§6 の matrix の中身は他の spec との照合をまだしていない（§6.1 の「grantなし」列と `FsOperation` の数だけは、loop:drift #395 の
+D-99・D-100 で capability-model に合わせた）。
+
+目標の章（§1〜§15）から、スライス名・時点・現状の注記（§1.1 の「本文書の追加と同時に」、§2.2 の照合状況、§5.2・§9.2 の「将来の」、
+§7.1 の「Slice 4までに」、§10.5 の「現repositoryには」、§11.2 の「Slice 6で」、§15.1・§15.4 の見出しの時点と §15.4 の
+「本文書作成時点では実行対象が存在しない」）を外すこと（Q1=A）は判断役が選択（issue #395 の D-104）した。理由: 目標の章は
+実装状態を書かず、現状は逸脱一覧だけが持つ（ドキュメント運用ガイド「逸脱一覧の持ち方」「状態の正本は粒度ごとに 1 箇所だけ」）。
+実装の順序は §16 が「依存順を次に固定する」として持ち（Slice 4 の `tsumugi --version` の固定出力、Slice 6 の
+`scripts/verify-kubernetes-smoke.sh`）、現状は逸脱一覧の `--version`・fuzz・OCI・Kubernetes の行が持つので、外しても失う情報は無い。
+§7.1・§11.2 の「SliceN までに」を依存順の規範として残す案（B）は、順序が §16 と二重になり、片方だけ直したときに食い違うので
+選ばなかった。§4.1 の `manifest` job の「将来のOCI/Kubernetes manifest」も同じ種類の注記なので、同じ理由で外した。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱と未実装範囲）
 
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
-| CI の coverage は gate になっていない。`ci.yml` の `coverage` job は `cargo llvm-cov --all-features --lcov --output-path lcov.info` で `lcov.info` を作って artifact にするだけで、line coverage 80% 未満でも失敗しない（`--fail-under-lines` が無い）。VRO-AT-02 の coverage 80% の分 | §4.1・§15.2・§17 VRO-AT-02 | — |
+| CI の coverage は gate になっていない。`ci.yml` の `coverage` job は `cargo llvm-cov --all-features --lcov --output-path lcov.info` で `lcov.info` を作って artifact にするだけで、line coverage 80% 未満でも失敗しない（`--fail-under-lines` が無い）。目標の command（§4.1・§15.2）の `--workspace` も無い。VRO-AT-02 の coverage 80% の分 | §4.1・§15.2・§17 VRO-AT-02 | — |
+| `fmt` と `clippy` が別の job になっていない。`ci.yml` は 1 つの `lint` job（「Lint (fmt + clippy)」）で `cargo fmt --check` と `cargo clippy` を続けて走らせる | §4.1 | — |
 | docs link・drift を検査する `docs` job と、manifest を検査する `manifest` job（`cargo metadata`・`cargo package`・`actionlint`）が `ci.yml` に無い。VRO-AT-02 の docs drift・manifest validation の分 | §4.2・§4.3・§17 VRO-AT-02 | — |
-| `ci.yml` の `uses:` が 40 桁の commit SHA に固定されていない。`actions/checkout@v7`・`actions/cache@v6`・`actions/upload-artifact@v7`・`dtolnay/rust-toolchain@stable`・`dtolnay/rust-toolchain@master`・`taiki-e/install-action@cargo-llvm-cov` の mutable な参照だけである | §4.4・§17 VRO-AT-03 | — |
+| `ci.yml` と `frozen-guard.yml` の `uses:` が 40 桁の commit SHA に固定されていない。`ci.yml` は `actions/checkout@v7`・`actions/cache@v6`・`actions/upload-artifact@v7`・`dtolnay/rust-toolchain@stable`・`dtolnay/rust-toolchain@master`・`taiki-e/install-action@cargo-llvm-cov`、`frozen-guard.yml` は `actions/checkout@v7` の mutable な参照だけである | §4.4・§17 VRO-AT-03 | — |
 | `lcov.info` の保存期間を 30 日に指定していない。`ci.yml` の `actions/upload-artifact` に `retention-days` が無く、リポジトリの既定の保存期間に従う | §4.5 | — |
 | `README.md`・`README.ja.md` に Git tag からの `cargo install`・`$HOME/.cargo/bin` を PATH に足す手順・uninstall の案内が無い | §7.1・§16 Slice 1 | Slice 1 |
 | `tsumugi --version` の stdout が目標の `tsumugi <package-version> (language <revision>, commit <12桁SHA>)` でなく、`tsumugi <package-version>` だけである（`src/main.rs` の `CliOutcome::Version` の分岐が `CARGO_PKG_VERSION` だけを出す） | §7.1 | — |
 | `FilesystemModuleResolver` の resolve の契約を確かめる unit test（`src/capability.rs` の C6-b の節）は、空 root・重複 mount の 2 件を除き `#[cfg(unix)]` で、Windows の CI では走らない（§4.1.1 の先送り。Phase 7 で解除する） | §4.1.1 | capability-model C6-b |
 | release workflow・release artifact・GitHub Release が無い（リポジトリに release 用の workflow が無い） | §7・§8・§17 VRO-AT-10/11 | — |
-| fuzz target と stress・資源制約・failure injection の test 階層が無い（リポジトリに `fuzz/` が無い） | §5・§17 VRO-AT-04/05 | — |
+| fuzz target と stress・資源制約・failure injection の test 階層が無い（リポジトリに `fuzz/` が無い）。`ci.yml` に `fuzz-smoke` job も無い | §4.1・§5・§17 VRO-AT-04/05 | — |
 | OCI image が無い（`Dockerfile` が無い） | §9・§17 VRO-AT-12 | — |
 | Kubernetes の参照用 Job・NetworkPolicy が無い（`deploy/` が無い。§1.1 のとおり image の公開前には作らない） | §10・§11・§17 VRO-AT-13/14 | — |
 | 運用 SLO・運用指標が無い | §13・§17 VRO-AT-15 | — |
@@ -53,7 +64,7 @@ branch protection の required checks（VRO-AT-01）は GitHub の設定なの�
 
 ### 1.1 本文書で作成しないもの
 
-本文書の追加と同時に、コード、test、workflow、Dockerfile、OCI image、Kubernetes manifest、Kustomize資材、Helm chartは作成しない。特に、存在しないimageを参照する`deploy/kubernetes/smoke-job.yaml`や`networkpolicy-deny-all.yaml`を先行作成してはならない。
+Kubernetes manifestはOCI imageの公開前に作成せず、Kustomize資材は§10.5の別承認なしに作成しない。Helm chartは作らない。特に、存在しないimageを参照する`deploy/kubernetes/smoke-job.yaml`や`networkpolicy-deny-all.yaml`を先行作成してはならない。
 
 ### 1.2 規範語
 
@@ -80,7 +91,7 @@ branch protection の required checks（VRO-AT-01）は GitHub の設定なの�
 
 下表は、各領域の「本文書の完了状態」（Phase 7完了時の目標）を表す。現在の構成が目標に対してどこまで未到達かは表に書かず、冒頭の逸脱一覧を正本とする。
 
-以前は表に「現行」列を置いていたが、外した。本文に実装状態を書かず、状態は逸脱一覧の 1 箇所だけが持つ（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」「状態の正本は粒度ごとに 1 箇所だけ」）。coverage・fuzz/stress・release（release artifact smoke を含む）・OCI・Kubernetes の現状は逸脱一覧の該当行が持ち、toolchain・Clippy・backend の現状は完了状態と同じなので、外しても失う記述は無い。capability/budget/audit の現状は他の spec とまだ照合していないので、逸脱一覧に足していない。列を残して決定記録の側を「照合が済むまで残す」と直す案（B）は、本文に状態を置き続け、D-33 で退けた形を別の形で戻すので選ばなかった（PR #326 のレビューの指摘 1 の Q1=A。判断役が選択（PR #326））。
+以前は表に「現行」列を置いていたが、外した。本文に実装状態を書かず、状態は逸脱一覧の 1 箇所だけが持つ（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」「状態の正本は粒度ごとに 1 箇所だけ」）。coverage・fuzz/stress・release（release artifact smoke を含む）・OCI・Kubernetes の現状は逸脱一覧の該当行が持ち、toolchain・Clippy・backend の現状は完了状態と同じなので、外しても失う記述は無い。列を残して決定記録の側を「照合が済むまで残す」と直す案（B）は、本文に状態を置き続け、D-33 で退けた形を別の形で戻すので選ばなかった（PR #326 のレビューの指摘 1 の Q1=A。判断役が選択（PR #326））。
 
 | 領域 | 本文書の完了状態 |
 |---|---|
@@ -154,7 +165,7 @@ PRと`main` pushでは次を必須checkとする。release tag workflowは同じ
 | `msrv` | Ubuntu / 1.97.0 | `cargo test --all-features --locked` |
 | `coverage` | Ubuntu / stable | `cargo llvm-cov --all-features --workspace --fail-under-lines 80 --lcov --output-path lcov.info` |
 | `docs` | Ubuntu / stable | `cargo doc --all-features --no-deps`、local link、version・件数・既知差分drift検査 |
-| `manifest` | Ubuntu / stable | Cargo metadata/package、workflow、将来のOCI/Kubernetes manifest検証 |
+| `manifest` | Ubuntu / stable | Cargo metadata/package、workflow、OCI/Kubernetes manifest検証 |
 | `fuzz-smoke` | Ubuntu / nightly | lexer/parser/engine/vmを各60秒、RSS 512 MiB上限で実行 |
 
 `coverage`はline coverage **80%以上**をrelease gateとする。過去のスナップショット値をbaselineとして固定せず、同じcommandの当該commit結果を判定する。生成物、third-party code、fuzz corpusはcoverage対象外にできるが、手書きのproduction moduleを除外してはならない。coverage低下を回避するための到達不能コード追加や`cfg`除外は禁止する。
@@ -242,7 +253,7 @@ wall-clockに敏感なstressは通常のunit testへ混在させない。決定�
 
 ### 5.2 fuzz target
 
-将来の`fuzz/`は次の4 targetを持つ。target名を`lexer`、`parser`、`engine`、`vm`に固定する。
+`fuzz/`は次の4 targetを持つ。target名を`lexer`、`parser`、`engine`、`vm`に固定する。
 
 | Target | 入力 | Oracle |
 |---|---|---|
@@ -335,27 +346,30 @@ fake hostとfaulting adapterで次を注入する。
 
 `CapabilitySet::empty()`を既定にし、各rowは他authorityなしで単独検証する。deny時はadapter、callback、OS callが0でなければ失敗とする。
 
+「grantなし」列の結果は[Capability仕様](capability-model.md)第2節の原則4に従う。script実行中の拒否はcatch可能なcanonical `capability`（filesystemは`sandbox`）errorで、未捕捉時は`RuntimeError`となる。handler開始前のlink/importでの拒否（`Filesystem.Import`・`ModuleResolver`）だけがterminal `Denied`となる。
+
 | Authority | grantなし | grantあり | 隣接authority分離 | 主な受入ID |
 |---|---|---|---|---|
-| `Environment` | `env()`はterminal `Denied` | snapshot内keyだけ取得、missingは`null` | process env変更、Clock、argsへ波及しない | CAP-AT-01/02/05/26/27 |
-| `Clock` | clock trait call 0で`Denied` | injected fixed clockだけ参照 | deadline用monotonic clockと混同しない | CAP-AT-01/02/06/27 |
-| `Stdin` | input adapter call 0で`Denied` | EOF、HostError、入力値を区別 | Stdoutを暗黙grantしない | CAP-AT-01/02/07/09 |
-| `Stdout` | output adapter call 0で`Denied` | 許可された出力だけwrite | Stdin、filesystemを暗黙grantしない | CAP-AT-01/02/08 |
-| `Filesystem.Read` | read前`Denied` | `read_file`/`read_lines`だけ成功 | Import、Metadataを許可しない | CAP-AT-01/02/10〜15 |
-| `Filesystem.Write` + `Create` | upsert前`Denied` | `write_file`/`append_file`。新規作成には両方必要 | Read/Deleteを許可しない | CAP-AT-01/02/10〜15 |
-| `Filesystem.Delete` | remove/rename前`Denied` | granted root・policy内だけ削除 | rename先Create、replace先Deleteを別検査 | CAP-AT-01/02/10〜15 |
-| `Filesystem.Metadata` | metadata前`Denied` | exists/type/sizeだけ成功 | Read/Listを許可しない | CAP-AT-01/02/10〜15 |
-| `Filesystem.List` | list前`Denied` | Metadata+Listの両方で`list_dir` | Read/Importを許可しない | CAP-AT-01/02/10〜15 |
+| `Environment` | `env()`はenvironment adapter call 0でcatch可能な`capability` error（未捕捉時`RuntimeError`） | snapshot内keyだけ取得、missingは`null` | process env変更、Clock、argsへ波及しない | CAP-AT-01/02/05/26/27 |
+| `Clock` | clock trait call 0でcatch可能な`capability` error（未捕捉時`RuntimeError`） | injected fixed clockだけ参照 | deadline用monotonic clockと混同しない | CAP-AT-01/02/06/27 |
+| `Stdin` | input adapter call 0でcatch可能な`capability` error（未捕捉時`RuntimeError`） | EOF、HostError、入力値を区別 | Stdoutを暗黙grantしない | CAP-AT-01/02/07/09 |
+| `Stdout` | output adapter call 0でcatch可能な`capability` error（未捕捉時`RuntimeError`） | 許可された出力だけwrite | Stdin、filesystemを暗黙grantしない | CAP-AT-01/02/08 |
+| `Filesystem.Read` | adapter/OS call 0でcatch可能な`sandbox` error（未捕捉時`RuntimeError`） | `read_file`/`read_lines`だけ成功 | Import、Metadataを許可しない | CAP-AT-01/02/10〜15 |
+| `Filesystem.Write` + `Create` | upsert前にadapter/OS call 0でcatch可能な`sandbox` error（未捕捉時`RuntimeError`） | `write_file`/`append_file`。新規作成には両方必要 | Read/Deleteを許可しない | CAP-AT-01/02/10〜15 |
+| `Filesystem.Delete` | remove/rename前にadapter/OS call 0でcatch可能な`sandbox` error（未捕捉時`RuntimeError`） | granted root・policy内だけ削除 | rename先Create、replace先Deleteを別検査 | CAP-AT-01/02/10〜15 |
+| `Filesystem.Metadata` | metadata前にadapter/OS call 0でcatch可能な`sandbox` error（未捕捉時`RuntimeError`） | exists/type/sizeだけ成功 | Read/Listを許可しない | CAP-AT-01/02/10〜15 |
+| `Filesystem.List` | list前にadapter/OS call 0でcatch可能な`sandbox` error（未捕捉時`RuntimeError`） | Metadata+Listの両方で`list_dir` | Read/Importを許可しない | CAP-AT-01/02/10〜15 |
+| `Filesystem.RecursiveDelete` | `remove_tree`はadapter/OS call 0でcatch可能な`sandbox` error（未捕捉時`RuntimeError`） | granted root内の再帰削除だけ | `Delete`から暗黙に昇格しない | CAP-AT-01/02/10〜15/23 |
 | `Filesystem.Import` | resolver/file call 0で`Denied` | link時だけmodule取得 | runtime Readへ流用しない | CAP-AT-01/02/13/16/17 |
-| `ProcessExit` | processを終了せず`Denied` | 0..255を`Exited` outcome化 | OS process自体を終了しない | CAP-AT-01/02/18/27 |
+| `ProcessExit` | processを終了せず、process/OS call 0でcatch可能な`capability` error（未捕捉時`RuntimeError`） | 0..255を`Exited` outcome化 | OS process自体を終了しない | CAP-AT-01/02/18/27 |
 | `ModuleResolver` | import時resolver call 0で`Denied` | link時だけresolve | runtime filesystemを暗黙grantしない | CAP-AT-01/02/16 |
-| `HostFunction` | callback 0で`Denied` | registeredかつgranted IDだけcall | 未登録/未grant/arityを分離 | CAP-AT-01/02/19〜22 |
+| `HostFunction` | callback 0でcatch可能な`capability` error（未捕捉時`RuntimeError`） | registeredかつgranted IDだけcall | 未登録/未grant/arityを分離 | CAP-AT-01/02/19〜22 |
 
 追加の必須条件:
 
 - `CapabilitySet` cloneはID・権限が一致し、revoke APIを持たない。
 - start後にset、snapshot、adapter、redaction policyを変更できない。
-- filesystemは7つの`FsOperation`全組合せ、3つのsymlink policy、複数mount、存在/不存在oracleを検証する。
+- filesystemは8つの`FsOperation`全組合せ、3つのsymlink policy、複数mount、存在/不存在oracleを検証する。
 - safe/legacy profileの差はgolden化し、safeではambient OS accessを0にする。
 - CAP-AT-01〜30のうち実装Phaseに該当する全項目を通過しなければPhase 7適合としない。
 
@@ -454,7 +468,7 @@ cargo install --locked --git https://github.com/kamonabe1927/tsumugi.git --tag v
 - bare `cargo install tsumugi`はcrates.io publishを別途承認するまでsupported手順に記載しない。
 - uninstallは`cargo uninstall tsumugi`とする。
 - Git tagからのsource installはGitHub repository access controlとtag immutabilityを信頼する**低保証経路**であり、Sigstore署名済みbinaryと同等のsupply-chain保証を持たない。検証可能なproduction installにはGitHub Release binaryまたは署名済みOCI digestを使う。
-- Slice 4までに`tsumugi --version`を実装し、stdoutを`tsumugi <package-version> (language <revision>, commit <12桁SHA>)`の1行へ固定する。install smokeはこの値とfile実行のstdout完全一致を両方検証する。
+- `tsumugi --version`のstdoutを`tsumugi <package-version> (language <revision>, commit <12桁SHA>)`の1行へ固定する。install smokeはこの値とfile実行のstdout完全一致を両方検証する。
 
 ### 7.2 platform artifact名
 
@@ -563,7 +577,7 @@ OCI imageはTsumugi CLIを再現可能に実行する配布形式であり、dae
 
 ### 9.2 Dockerfile要件
 
-将来のDockerfileは次をすべて満たす。
+Dockerfileは次をすべて満たす。
 
 - BuildKit syntaxを使うmulti-stage build。
 - builderはRust 1.97のDebian slim系multi-arch image、runtimeはdistroless `cc-debian12:nonroot`系multi-arch imageとする。
@@ -762,7 +776,7 @@ apply後はrepositoryへ保存しない一時negative-probe Podを同じPod labe
 
 ### 10.5 Kustomizeの扱い
 
-現repositoryには`kustomization.yaml`がない。上記2 fileだけではoverlayやgeneratorが不要なため、初回はplain manifestとする。Kustomize導入、`kustomization.yaml`作成、ConfigMap generator化はmanifest作成時の**別承認**を必須とし、本文書の承認に含めない。
+上記2 fileだけではoverlayやgeneratorが不要なため、初回はplain manifestとし、`kustomization.yaml`を置かない。Kustomize導入、`kustomization.yaml`作成、ConfigMap generator化はmanifest作成時の**別承認**を必須とし、本文書の承認に含めない。
 
 Kustomizeを将来承認した場合も、generated ConfigMap名とJob参照の整合、固定image tag、namespace `app`、security context、NetworkPolicyを`kustomize build`出力に対して再検証する。
 
@@ -801,7 +815,7 @@ kubectl apply --dry-run=server \
 6. NetworkPolicyを先にapplyする。
 7. ConfigMap + Jobをapplyする。
 8. Job完了を待つ。
-9. `scripts/verify-kubernetes-smoke.sh`を実行し、stdout byte列、Pod/Container status、実行digest、security context、NetworkPolicy競合、negative egress probeを機械判定する。scriptはSlice 6でmanifestと同時に実装し、差異時にnon-zeroを返す。
+9. `scripts/verify-kubernetes-smoke.sh`を実行し、stdout byte列、Pod/Container status、実行digest、security context、NetworkPolicy競合、negative egress probeを機械判定する。scriptはmanifestと同時に用意し、差異時にnon-zeroを返す。
 10. 結果をrelease記録へ保存し、TTL後にJobが削除されたことを確認する。
 
 ```bash
@@ -943,7 +957,7 @@ cargo install --locked --force \
 
 ## 15. ローカル検証command
 
-### 15.1 現在実行可能な基本検証
+### 15.1 基本検証
 
 ```bash
 cargo fmt --check
@@ -982,7 +996,7 @@ rm -f "$smoke_file"
 
 WindowsではPowerShellのtemporary fileと`tsumugi.exe`で同じstdoutを検証する。
 
-### 15.4 将来資材作成後
+### 15.4 fuzzとKubernetes manifest
 
 ```bash
 # fuzz smoke
@@ -997,9 +1011,9 @@ kubeconform -strict -summary -kubernetes-version 1.30.0 \
   deploy/kubernetes/smoke-job.yaml
 ```
 
-これらは対応するtoolとfileが実装された後のcommandであり、本文書作成時点では実行対象が存在しない。
-
 ## 16. 実装slice
+
+各スライス小節はそのスライスを実装した時点の記録であり、書き換えない。現在の逸脱・未実装範囲は冒頭の逸脱一覧を見ること。
 
 依存順を次に固定する。各sliceは独立PRとし、前sliceの受入を通してから次へ進む。
 
