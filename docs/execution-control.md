@@ -2806,7 +2806,8 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
   - `new_iter_str_list` の doc の手順の記述を、課金のあとで複製することが分かる記述に直す。
   - done にする実装 PR で、本書の逸脱一覧の該当行（要素の複製の行）を削除する。
 - **範囲外:**
-  - List body の backing（`Vec::with_capacity(要素数)`）を List body の課金より前に確保している点。逸脱一覧の別の行のとおりで、扱いはこの PR の判断の候補（D-98 の Q1）で決める。推奨案（範囲外にして行を残す）のとおりこの小節を書いた。
+  - List body の backing（`Vec::with_capacity(要素数)`）を List body の課金より前に確保している点。逸脱一覧の別の行のとおりで、このスライスでは扱わず、逸脱一覧の行を残す。
+    - **決定記録（判断役が選択（PR #412）、Q1=A）:** 理由: 先に確保する量は、要素数の検査（`check_collection_elements`）のあとの `Vec::with_capacity(要素数)` で、要素数は課金済みの反復元の Dict の key 数・Str の文字数なので、`max_collection_elements` と反復元の大きさの両方で抑えられる。作っている間は script が走らず、途中で上限を超えれば drop されるので、上限を回避して実行を続ける経路ではない（[マニフェスト](manifesto.md)原則 3・6）。§5.2 の `for` の項は課金の有無・量・順序を tree と VM で揃えるとし、fix-for-iter-snapshot-charge 小節の手順 3 は「最後に List body」を builtin の `track_result` と同じ順と定めている。範囲外にすれば、この既存の決定と上限での terminal の resource・`used`・`requested` を変えずに済む（原則 5）。また、このスライスの「課金の変化: なし」と、既存のテストを変えずに通して確かめる受入基準の小ささを保てる（原則 8・9）。ずれは逸脱一覧の行として残り、§5.2 の目標の文は緩めないので、後から別のスライスで直す道を閉じない（原則 9）。残る未課金の確保は 32 byte × 要素数（既定の上限で約 32 MB）の一時的なもので、`max_live_heap_bytes` を小さくした実行では論理上限より大きくなりうる。これは許容の決定ではなく、このスライスで扱わないという範囲の決定である。採らなかった案: B（このスライスで List body を要素より先に課金する）は §5.2 の文にそのまま合うが、課金の順序と上限での terminal の値が変わる観測できる挙動の変更で、builtin の `track_result` の順と `for` だけがずれ、FIS-AT-04 の期待値の見直しも要る（原則 5・8・9）。直すなら builtin 側と揃えて順序を決める別のスライスがふさわしい。C（課金しない事前検査を足す）は、検査と課金が 2 箇所に分かれ、事前検査で止まるときの `used`・`requested` に spec の定めが無く、§7 の「1 個の atomic reservation」とも形が違うので、新しい決定が要る（原則 8）。
   - 反復列を遅延で作る形、`for` の fuel、`map` / `filter` / `each` の課金（fix-for-iter-snapshot-charge 小節の範囲外のまま）。
   - builtin が `track_result` で結果を課金する経路（`Value::new_str` に複製済みの `String` を渡す一般の形）。逸脱一覧の `builtin_core::dispatch` の行の範囲である。
 - **課金の変化:** なし。fuel・heap・peak heap・string の累積とその順序は変わらず、上限で止まる位置と terminal の値も変わらない。物理的な確保だけが課金のあとへ移る。`heap_accounting_revision`・`fuel_accounting_revision`・`language_revision` は変えない。
