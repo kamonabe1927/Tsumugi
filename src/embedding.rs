@@ -2644,9 +2644,18 @@ impl Engine {
                 // queue 上限（B-2）の yield も、上の flush_events で queue を 0 へ戻してから
                 // 次の run_slice（Resumed{AuditBackpressure} を積む）で resume する。
                 SliceOutcome::YieldedSliceFuel
-                | SliceOutcome::YieldedHostCall { .. }
                 | SliceOutcome::YieldedExplicit
                 | SliceOutcome::YieldedAuditQueue => continue,
+                // host call の Pending だけは ticket の完了を待って結果を注入する（continue すると
+                // 次の run_slice が同じ文を評価し直し、start() が重複する。issue #360）。待ちに入る
+                // 前に、この slice 境界までの event（Yielded(HostCallPending) まで）は上の
+                // flush_events で deliver 済み。注入後の run_slice が積む Resumed は次の flush で出る。
+                SliceOutcome::YieldedHostCall { call_id } => {
+                    match wait_for_host_call(context, call_id) {
+                        Ok(()) => continue,
+                        Err(outcome) => break *outcome,
+                    }
+                }
                 SliceOutcome::Terminal(Ok(())) => {
                     break ExecutionOutcome::Completed {
                         usage: context.evaluator.budget_usage(),
@@ -2927,15 +2936,24 @@ impl Engine {
             // terminal まで回し切る。`slice_fuel` は既定 u64::MAX（単一 slice で yield なし・
             // 従来挙動）だが、監査付き経路で小さい値を渡すと実 `Yielded(SliceFuelExhausted)` が
             // 起きて Yielded/Resumed 監査 event が流れる（Phase 6、D3）。
-            // run_slice は SliceOutcome を返す（REV-015 Slice 5、設計 §4.7）。全 yield 変種を
-            // continue で回し切る（観測結果は slice 分割に依らず不変、§3 metamorphic / §7）。
+            // run_slice は SliceOutcome を返す（REV-015 Slice 5、設計 §4.7）。host call 以外の
+            // yield 変種は continue で回し切る（観測結果は slice 分割に依らず不変、§3 metamorphic
+            // / §7）。host call の yield は ticket の完了を待って結果を注入する（issue #360）。
             match context.evaluator.run_slice(slice_fuel) {
                 // YieldedAuditQueue は audit drain queue 計器を張る監査付き driver でしか起きない
                 // （この同期経路は計器を張らない）。到達しても他の yield と同じく回し切る。
                 SliceOutcome::YieldedSliceFuel
-                | SliceOutcome::YieldedHostCall { .. }
                 | SliceOutcome::YieldedExplicit
                 | SliceOutcome::YieldedAuditQueue => continue,
+                // continue すると次の run_slice が同じ文を評価し直し、cooperative host function の
+                // start() を新しい外部呼び出しとしてもう一度呼んでしまう。ticket を引き取って
+                // 完了まで待ち、結果を注入してから続ける（§6.2・§9.2）。
+                SliceOutcome::YieldedHostCall { call_id } => {
+                    match wait_for_host_call(context, call_id) {
+                        Ok(()) => continue,
+                        Err(outcome) => return *outcome,
+                    }
+                }
                 SliceOutcome::Terminal(Ok(())) => {
                     // commit 済みの usage を同梱する（仕様第6・12節）。
                     let usage = context.evaluator.budget_usage();
@@ -2951,6 +2969,83 @@ impl Engine {
                 }
             }
         }
+    }
+}
+
+/// host call の待ちで deadline を request の clock で確かめ直す間隔の上限。
+///
+/// ticket の完了と cancel は waker で呼び出し thread を unpark するので、この間隔は clock の
+/// 進みを観測するためだけにある（実装の定数で、公開 API・言語挙動には出ない）。
+const HOST_CALL_PARK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// 呼び出し thread を unpark する [`crate::host_pending::Wake`]。
+struct UnparkWake(std::thread::Thread);
+
+impl crate::host_pending::Wake for UnparkWake {
+    fn wake(&self) {
+        self.0.unpark();
+    }
+}
+
+/// 同期 driver が `SliceOutcome::YieldedHostCall` を受けたときに、ticket の完了を待って結果を
+/// 注入する（issue #360、execution-control §6.2・§9.2）。`run_transactional` と監査付き driver
+/// の共通の待ち。
+///
+/// 待ちの各ステップは cancel → deadline の checkpoint を `try_take_value` より先に評価する
+/// （§4.6 の linearization。scheduler の poll の step 4 と同じ順）。cancel・deadline なら ticket を
+/// cancel し、session を rollback して terminal outcome を `Err` で返す。完了していれば
+/// `resume_host_call` で結果を注入して `Ok(())` を返す（次の `run_slice` は `start()` を呼ばない）。
+/// 未完了なら ticket と cancel token の waker で unpark されるか [`HOST_CALL_PARK_INTERVAL`] が
+/// 経つまで park する。待ちの間は semantic work をせず、fuel を使わない。
+fn wait_for_host_call(
+    context: &mut ExecutionContext,
+    call_id: u64,
+) -> Result<(), Box<ExecutionOutcome>> {
+    let Some(ticket) = context.evaluator.take_pending_ticket() else {
+        // YieldedHostCall には必ず ticket が付く。無ければ内部不整合（catch 不能 terminal）。
+        context.evaluator.abort_session();
+        let error = TsumugiError::internal_control(
+            0,
+            "host call の yield に ticket がありません（内部不整合）",
+        );
+        return Err(Box::new(terminal_from_run_error(context, error)));
+    };
+    let waker =
+        crate::host_pending::ExecutionWaker::new(Arc::new(UnparkWake(std::thread::current())));
+    ticket.register_waker(&waker);
+    context
+        .evaluator
+        .cancellation_token()
+        .register_waker(&waker);
+    loop {
+        let stop = if context.evaluator.checkpoint_cancel().is_err() {
+            Some(false)
+        } else if context.evaluator.checkpoint_deadline().is_err() {
+            Some(true)
+        } else {
+            None
+        };
+        if let Some(deadline) = stop {
+            ticket.cancel();
+            context.evaluator.abort_session();
+            let usage = context.evaluator.budget_usage();
+            return Err(Box::new(if deadline {
+                ExecutionOutcome::DeadlineExceeded { usage }
+            } else {
+                ExecutionOutcome::Cancelled { usage }
+            }));
+        }
+        if let Some(result) = ticket.try_take_value() {
+            return match context.evaluator.resume_host_call(call_id, result) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    // call_id 不整合などの内部不整合は catch 不能 terminal。
+                    context.evaluator.abort_session();
+                    Err(Box::new(terminal_from_run_error(context, error)))
+                }
+            };
+        }
+        std::thread::park_timeout(HOST_CALL_PARK_INTERVAL);
     }
 }
 
