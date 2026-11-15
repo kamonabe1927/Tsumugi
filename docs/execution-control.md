@@ -2820,7 +2820,7 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
 
 ### fix-pause-run-turn-remove 実装スライス（pause した handle を run-turn から外し、resume で末尾へ戻す）
 
-[issue #361](https://github.com/kamonabe1927/Tsumugi/issues/361) から作ったスライス（不具合の修正、`slices.toml` の `fix-pause-run-turn-remove`）。issue の仕分けで「受け入れ」とした。直し方は §9.2 の `Paused`（「hostが明示resumeするまでrun-turn queueへ戻らない」）と `Paused --resume--> resume_to`、§11（Paused 中に許可する操作）、§12.1 の規則 1・3（Ready になった execution ID を queue 末尾へ置き、同時点で Ready な execution より前へ挿入しない）で決まり、目標の章は変えない。resume で run-turn へ戻す時点は判断の候補 Q1（この設計 PR）にかけた。下の実装範囲は推奨案 A で書いてある。
+[issue #361](https://github.com/kamonabe1927/Tsumugi/issues/361) から作ったスライス（不具合の修正、`slices.toml` の `fix-pause-run-turn-remove`）。issue の仕分けで「受け入れ」とした。直し方は §9.2 の `Paused`（「hostが明示resumeするまでrun-turn queueへ戻らない」）と `Paused --resume--> resume_to`、§11（Paused 中に許可する操作）、§12.1 の規則 1・3（Ready になった execution ID を queue 末尾へ置き、同時点で Ready な execution より前へ挿入しない）で決まり、目標の章は変えない。resume で run-turn へ戻す時点は判断の候補 Q1（PR #416）にかけた。下の実装範囲は推奨案 A で書いてある。
 
 - **現状の不具合:** 冒頭の逸脱一覧の `ExecutionHandle::pause` の行のとおり。`pause`（`src/engine.rs`）は state を `Paused(PausedState { resume_to, .. })` にするだけで、`run_turn_remove` を呼ばず `run_turn_registered` も `true` のまま残す。`poll` は step 2 で `Paused` を `InvalidState` にして返すので、paused の handle は step 5・6 に届かない。それが run-turn queue の先頭にいると、ほかの handle の poll はすべて step 5 で非先頭になって `SchedulerPreempted` を返し、resume されるまで Engine 全体が進まない（issue #361 の再現: `limits(2, 0)` で h1 を `SliceFuelExhausted`、h2 を `SchedulerPreempted` にしてから h1 を pause すると、h2 を 1000 回 poll しても fuel が 0 のまま）。`pause` の doc の「resume まで run-turn へ戻らない」は、queue から外していないので事実と異なる。
 - **実装範囲:**
