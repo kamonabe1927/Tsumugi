@@ -1001,8 +1001,8 @@ order      = 105
 # issue #364（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。filesystem builtin のうち read_file / read_lines /
 # write_file / append_file の 4 つだけが host call として回数・byte を課金され、path_exists など残りの 10 個が max_host_calls を素通りするのを、
 # 14 個すべてを capability 判定の前に host call として課金する形で直す（execution-control §2・§6.1）。監査の triple は今の 4 つのままにする
-# （10 個への拡張は audit-fs-builtin-scope）。byte の数え方は設計 PR の判断の候補 Q1（推奨案 A: 今の 4 つの規則を当てはめ、list_dir の名前だけを
-# response に数える）。parent は I-O accounting を入れた REV-015（Slice 2）。登録 host function の課金漏れ（issue の補足、loop:drift #420 D-108）は
+# （10 個への拡張は audit-fs-builtin-scope）。byte の数え方は判断役が選択（PR #425、Q1=A）: 今の 4 つの規則を当てはめ、list_dir の名前だけを
+# response に数える。parent は I-O accounting を入れた REV-015（Slice 2）。登録 host function の課金漏れ（issue の補足、loop:drift #420 D-108）は
 # 別の仕組みなので loop-runbook §14.1 に合わせて別のスライス fix-host-function-call-charge（todo）にした。
 # order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
 # （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A、PR #403・PR #408・PR #410・PR #412・PR #416・PR #419・PR #423）と
