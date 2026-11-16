@@ -997,3 +997,34 @@ spec       = { doc = "docs/execution-control.md", section = "fix-handle-executio
 acceptance = ["HCT-AT-01..04"]
 design_pr  = 423
 order      = 105
+
+# issue #364（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。filesystem builtin のうち read_file / read_lines /
+# write_file / append_file の 4 つだけが host call として回数・byte を課金され、path_exists など残りの 10 個が max_host_calls を素通りするのを、
+# 14 個すべてを capability 判定の前に host call として課金する形で直す（execution-control §2・§6.1）。監査の triple は今の 4 つのままにする
+# （10 個への拡張は audit-fs-builtin-scope）。byte の数え方は設計 PR の判断の候補 Q1（推奨案 A: 今の 4 つの規則を当てはめ、list_dir の名前だけを
+# response に数える）。parent は I-O accounting を入れた REV-015（Slice 2）。登録 host function の課金漏れ（issue の補足、loop:drift #420 D-108）は
+# 別の仕組みなので loop-runbook §14.1 に合わせて別のスライス fix-host-function-call-charge（todo）にした。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
+# （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A、PR #403・PR #408・PR #410・PR #412・PR #416・PR #419・PR #423）と
+# 同じく、この PR では付け直しをせず、仮にすべてのスライスより後（106）に置いた。マージ後に PM が付け直しだけの状態整理 PR で 35 より前へ移す。
+# 見積もり: src/ 20〜60 行、触る仕組みは filesystem builtin の host-call 課金 1 つ、受入基準 5。
+[[slice]]
+id         = "fix-fs-builtin-host-call-charge"
+title      = "filesystem builtin の 14 個すべてを capability 判定の前に host call として課金し、path_exists などが max_host_calls を素通りしないようにする（execution-control §2・§6.1、issue #364）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-fs-builtin-host-call-charge 実装スライス（filesystem builtin のすべてを host call として回数・byte を課金する）" }
+acceptance = ["FHC-AT-01..05"]
+order      = 106
+
+# issue #364 の本文の補足と loop:drift #420 の D-108 で逸脱一覧に載せた「登録 host function（同期・cooperative）の呼び出しが host-call 回数と
+# request/response の byte を課金しない」の fix。課金の位置が src/eval.rs の apply_host_call・start_cooperative_call で、filesystem builtin の
+# 課金（fix-fs-builtin-host-call-charge）とは別の仕組みなので、issue #364 の設計で別のスライスに分けた。実装の範囲・受入基準は設計 PR で
+# spec の小節に書く（todo）。HostCost の fuel・max_result_bytes（capability-model の逸脱一覧 §11.2、C8）を同じスライスに含めるかも設計で決める。
+# order は fix-fs-builtin-host-call-charge（106）の次の仮の値で、同じく PM の状態整理 PR で ready より前へ移す対象である。
+[[slice]]
+id         = "fix-host-function-call-charge"
+title      = "登録 host function（同期・cooperative）の呼び出しを capability 判定の前に host call として回数・request/response の byte で課金する（execution-control §6.1、loop:drift #420 D-108、issue #364）"
+status     = "todo"
+parent     = "REV-015"
+order      = 107
