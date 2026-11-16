@@ -994,4 +994,5 @@ status     = "ready"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-handle-execution-cancel-token 実装スライス（scheduler の handle ごとに cancellation token を作り、drop・cancel がその execution だけを止める）" }
 acceptance = ["HCT-AT-01..04"]
+design_pr  = 423
 order      = 105
