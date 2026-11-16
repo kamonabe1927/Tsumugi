@@ -939,3 +939,24 @@ acceptance = ["PRT-AT-01..04"]
 design_pr  = 416
 impl_pr    = 418
 order      = 102
+
+# issue #362（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。ExecutionHandle が Terminal に達しても
+# finish_terminal が state と outcome を設定するだけで admission の active/queue slot を解放せず、outcome を読むために handle を
+# 保持すると後続の create_execution が Backpressure になる（queue があれば昇格しない）のを、Terminal に達した時点で slot を
+# 1 回だけ解放し、drop では二重解放しない形で直す（execution-control §9.2・§12）。parent は admission slot を入れた REV-015（Slice 5）。
+# 同じ scheduler/handle に触れる issue #361（fix-pause-run-turn-remove）・#363 は pause・drop の別の仕組みなので
+# loop-runbook §14.1 に合わせて別のスライスにする。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
+# （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A、PR #403・PR #408・PR #410・PR #412・PR #416）と
+# 同じく、この PR では付け直しをせず、仮にすべてのスライスより後（103）に置いた。マージ後に PM が付け直しだけの状態整理 PR で
+# 35 より前へ移す。
+# 見積もり: src/ 15〜50 行、触る仕組みは Terminal での admission slot の解放 1 つ、受入基準 4。
+[[slice]]
+id         = "fix-terminal-release-slot"
+title      = "Terminal に達した時点で handle の admission slot（active/queue）を 1 回だけ解放し、outcome を読むために保持しても後続が Backpressure にならないようにする（execution-control §9.2・§12、issue #362）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-terminal-release-slot 実装スライス（Terminal に達した時点で admission slot を 1 回だけ解放する）" }
+acceptance = ["TRS-AT-01..04"]
+design_pr  = 419
+order      = 103
