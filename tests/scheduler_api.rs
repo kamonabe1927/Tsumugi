@@ -1980,16 +1980,26 @@ fn hct_at_03_token_is_fixed_from_creation_and_wakers_do_not_carry_over() {
 fn hct_at_04_drop_cancels_own_token_rolls_back_and_backpressure_keeps_context() {
     let engine = Engine::with_limits(limits(1, 0));
     let set_x = engine.compile("let x = 1\n").unwrap();
+    let set_x_then_loop = engine
+        .compile("let x = 1\nlet i = 0\nwhile i < 100\n  i = i + 1\nend\n")
+        .unwrap();
     let mut ctx = ExecutionContext::new();
 
     // 非 terminal の drop は自分の token を cancel し、language-state を rollback する。
+    // `let x = 1` を実行したあとの Yielded で drop するので、rollback が無ければ x が残る。
     let token = {
         let mut h = engine
-            .create_execution(&set_x, &mut ctx, ExecutionRequest::new())
+            .create_execution(&set_x_then_loop, &mut ctx, ExecutionRequest::new())
             .unwrap();
         let token = h.cancellation_token();
         assert!(!token.is_cancelled());
-        h.pause().unwrap();
+        match h.poll(PollSlice { max_fuel: 40 }).unwrap() {
+            PollResult::Yielded {
+                reason: YieldReason::SliceFuelExhausted,
+                ..
+            } => {}
+            other => panic!("SliceFuelExhausted の yield を期待: {other:?}"),
+        }
         token
     };
     assert!(token.is_cancelled(), "drop は自分の token を cancel する");
