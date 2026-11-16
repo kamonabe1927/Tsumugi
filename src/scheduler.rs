@@ -154,7 +154,7 @@ impl Default for EngineLimits {
 /// handle が所有する slot 解放トークン（RAII、設計 §4.1）。
 ///
 /// 会計カウンタではなく「drop 時に正本から 1 個引く権利」に徹する（INV-6）。`Active` /
-/// `Queued` のどちらかを 1 個だけ所有し、[`Drop`] で [`SchedulerShared::release_active`] /
+/// `Queued` のどちらかを 1 個だけ所有し、Terminal 到達時の [`AdmissionSlot::release`] か [`Drop`] で [`SchedulerShared::release_active`] /
 /// [`SchedulerShared::release_queued`] を Mutex 経由で呼んで 1 回だけ解放する。二重解放は
 /// `SlotState` の Released 判定で no-op になる。
 pub struct AdmissionSlot {
@@ -181,6 +181,26 @@ impl AdmissionSlot {
         self.slot_state.is_active()
     }
 
+    /// slot を解放する。何度呼んでも解放は 1 回だけ（`SlotState` の Released 判定で no-op）。
+    ///
+    /// handle が Terminal に達した時点（`finish_terminal`）と、[`Drop`] の両方から呼ばれる。
+    /// Active（queue から昇格済みを含む）なら `release_active`（同じ lock 下で FIFO 先頭を昇格）、
+    /// そうでなければ `release_queued` を呼ぶ。
+    pub fn release(&self) {
+        match self.kind {
+            AdmissionSlotKind::Active => self.shared.release_active(self.slot_id, &self.slot_state),
+            AdmissionSlotKind::Queued => {
+                // queue 中に昇格していれば release_active 相当で扱う。SlotState が Active を
+                // 指していれば active slot を解放する（昇格後）。それ以外は queue 解放。
+                if self.slot_state.is_active() {
+                    self.shared.release_active(self.slot_id, &self.slot_state);
+                } else {
+                    self.shared.release_queued(self.slot_id, &self.slot_state);
+                }
+            }
+        }
+    }
+
     /// この slot と共有する [`SlotState`] ミラーの `Arc` clone を返す（設計 §4.1）。
     ///
     /// handle はこれを保持し、poll 時に lock なしで「自分が Active へ昇格したか」を観測する。
@@ -201,18 +221,7 @@ impl std::fmt::Debug for AdmissionSlot {
 
 impl Drop for AdmissionSlot {
     fn drop(&mut self) {
-        match self.kind {
-            AdmissionSlotKind::Active => self.shared.release_active(self.slot_id, &self.slot_state),
-            AdmissionSlotKind::Queued => {
-                // queue 中に昇格していれば release_active 相当で扱う。SlotState が Active を
-                // 指していれば active slot を解放する（昇格後の drop）。それ以外は queue 解放。
-                if self.slot_state.is_active() {
-                    self.shared.release_active(self.slot_id, &self.slot_state);
-                } else {
-                    self.shared.release_queued(self.slot_id, &self.slot_state);
-                }
-            }
-        }
+        self.release();
     }
 }
 

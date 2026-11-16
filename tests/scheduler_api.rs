@@ -1520,3 +1520,268 @@ fn prt_at_04_cancel_and_drop_while_paused_leave_no_stale_run_turn_entry() {
         "{r:?}"
     );
 }
+
+// ---- fix-terminal-release-slot（issue #362、execution-control §9.2・§12） ----
+
+fn run_to_terminal(h: &mut tsumugi::ExecutionHandle<'_, '_, '_>) -> ExecutionOutcome {
+    for _ in 0..5000 {
+        match h.poll(PollSlice::default()).unwrap() {
+            PollResult::Terminal { outcome, .. } => return outcome,
+            PollResult::Yielded { .. } => continue,
+            PollResult::Paused { .. } => panic!("pause は要求していない"),
+        }
+    }
+    panic!("terminal に達しなかった");
+}
+
+fn is_queued(r: &PollResult) -> bool {
+    matches!(
+        r,
+        PollResult::Yielded {
+            reason: YieldReason::AdmissionQueued { .. },
+            ..
+        }
+    )
+}
+
+/// TRS-AT-01: Terminal の handle を保持したままでも後続が active を取れる。
+#[test]
+fn trs_at_01_held_terminal_handle_does_not_block_next_admission() {
+    let engine = Engine::with_limits(limits(1, 0));
+    let scripts = [
+        ("let a = 1\n", "completed"),
+        ("let y = missing_name\n", "runtime"),
+        ("import \"__no_such_module__\"\n", "link"),
+    ];
+    for (src, kind) in scripts {
+        let script = engine.compile(src).unwrap();
+        let ok = engine.compile("let b = 2\n").unwrap();
+        let mut ctx1 = ExecutionContext::new();
+        let mut h1 = engine
+            .create_execution(&script, &mut ctx1, ExecutionRequest::new())
+            .expect("h1 active");
+        let outcome = run_to_terminal(&mut h1);
+        match (kind, &outcome) {
+            ("completed", ExecutionOutcome::Completed) => {}
+            ("runtime", ExecutionOutcome::RuntimeError { .. }) => {}
+            ("link", ExecutionOutcome::LinkError { .. }) => {}
+            _ => panic!("{kind}: 想定外の outcome {outcome:?}"),
+        }
+        // h1 は保持したまま、別の context で後続を作れる。
+        let mut ctx2 = ExecutionContext::new();
+        let mut h2 = engine
+            .create_execution(&ok, &mut ctx2, ExecutionRequest::new())
+            .expect("Terminal の h1 を保持していても active を取れる");
+        assert_eq!(run_to_terminal(&mut h2), ExecutionOutcome::Completed);
+        // h1 の state / outcome は変わらない。
+        assert_eq!(h1.state(), tsumugi::ExecutionState::Terminal);
+        assert_eq!(h1.outcome(), Some(&outcome));
+    }
+}
+
+/// TRS-AT-02: queue の最古は、先頭が Terminal を返した直後に昇格する。
+#[test]
+fn trs_at_02_queue_head_promoted_at_terminal() {
+    let engine = Engine::with_limits(limits(1, 1));
+    let script = engine.compile("let a = 1\n").unwrap();
+    let mut c1 = ExecutionContext::new();
+    let mut c2 = ExecutionContext::new();
+    let mut h1 = engine
+        .create_execution(&script, &mut c1, ExecutionRequest::new())
+        .unwrap();
+    let mut h2 = engine
+        .create_execution(&script, &mut c2, ExecutionRequest::new())
+        .unwrap();
+    // h1 が terminal を返す前は AdmissionQueued。
+    assert!(is_queued(&h2.poll(PollSlice::default()).unwrap()));
+    assert_eq!(run_to_terminal(&mut h1), ExecutionOutcome::Completed);
+    // h1 保持のまま、h2 は昇格して terminal まで進む。
+    let r = h2.poll(PollSlice::default()).unwrap();
+    assert!(!is_queued(&r), "昇格しているはず: {r:?}");
+    let outcome = match r {
+        PollResult::Terminal { outcome, .. } => outcome,
+        _ => run_to_terminal(&mut h2),
+    };
+    assert_eq!(outcome, ExecutionOutcome::Completed);
+    // h2 も terminal で解放済み。active は空なので 3 つめは active を取る。
+    let mut c3 = ExecutionContext::new();
+    let h3 = engine
+        .create_execution(&script, &mut c3, ExecutionRequest::new())
+        .unwrap();
+    assert!(!matches!(
+        h3.state(),
+        tsumugi::ExecutionState::Yielded(YieldReason::AdmissionQueued { .. })
+    ));
+}
+
+/// TRS-AT-02 後半: 昇格した h2 が active を持つ間、3 つめは queue に入る。
+#[test]
+fn trs_at_02_third_goes_to_queue_while_promoted_active() {
+    let engine = Engine::with_limits(limits(1, 1));
+    let script = engine.compile("let a = 1\n").unwrap();
+    let mut c1 = ExecutionContext::new();
+    let mut c2 = ExecutionContext::new();
+    let mut h1 = engine
+        .create_execution(&script, &mut c1, ExecutionRequest::new())
+        .unwrap();
+    let h2 = engine
+        .create_execution(&script, &mut c2, ExecutionRequest::new())
+        .unwrap();
+    assert_eq!(run_to_terminal(&mut h1), ExecutionOutcome::Completed);
+    // h2 は昇格済み（未 poll）。active=h2、queue 空なので 3 つめは queue。
+    let mut c3 = ExecutionContext::new();
+    let h3 = engine
+        .create_execution(&script, &mut c3, ExecutionRequest::new())
+        .unwrap();
+    assert!(matches!(
+        h3.state(),
+        tsumugi::ExecutionState::Yielded(YieldReason::AdmissionQueued { .. })
+    ));
+    drop(h2);
+}
+
+/// TRS-AT-03: Terminal 後の drop で二重解放・二重昇格しない。
+#[test]
+fn trs_at_03_drop_after_terminal_does_not_double_release() {
+    let engine = Engine::with_limits(limits(1, 1));
+    let script = engine.compile("let a = 1\n").unwrap();
+    let mut c1 = ExecutionContext::new();
+    let mut c2 = ExecutionContext::new();
+    let mut h1 = engine
+        .create_execution(&script, &mut c1, ExecutionRequest::new())
+        .unwrap();
+    let h2 = engine
+        .create_execution(&script, &mut c2, ExecutionRequest::new())
+        .unwrap();
+    assert_eq!(run_to_terminal(&mut h1), ExecutionOutcome::Completed);
+    // h2 が昇格したあとに h1 を drop しても h2 の active は保たれる。
+    drop(h1);
+    let mut c3 = ExecutionContext::new();
+    let h3 = engine
+        .create_execution(&script, &mut c3, ExecutionRequest::new())
+        .expect("queue に入る（active は h2 のまま）");
+    assert!(matches!(
+        h3.state(),
+        tsumugi::ExecutionState::Yielded(YieldReason::AdmissionQueued { .. })
+    ));
+    let mut c4 = ExecutionContext::new();
+    match engine.create_execution(&script, &mut c4, ExecutionRequest::new()) {
+        Err(StartError::Backpressure {
+            active,
+            queued,
+            limit,
+        }) => assert_eq!((active, queued, limit), (1, 1, 1)),
+        Ok(_) => panic!("二重解放で active が減りすぎた"),
+        Err(other) => panic!("Backpressure を期待したが {other:?}"),
+    }
+    drop(h2);
+    drop(h3);
+}
+
+/// TRS-AT-03: queue 中の handle を cancel して Cancelled にすると queue slot が空き、
+/// そのあとの drop でも queue の数がずれない。
+#[test]
+fn trs_at_03_cancelled_queued_handle_releases_queue_slot_once() {
+    let engine = Engine::with_limits(limits(1, 1));
+    let script = engine.compile("let a = 1\n").unwrap();
+    let mut c1 = ExecutionContext::new();
+    let mut c2 = ExecutionContext::new();
+    let h1 = engine
+        .create_execution(&script, &mut c1, ExecutionRequest::new())
+        .unwrap();
+    let mut h2 = engine
+        .create_execution(&script, &mut c2, ExecutionRequest::new())
+        .unwrap();
+    h2.cancellation_token().cancel();
+    match h2.poll(PollSlice::default()).unwrap() {
+        PollResult::Terminal { outcome, .. } => assert_eq!(outcome, ExecutionOutcome::Cancelled),
+        other => panic!("Cancelled を期待したが {other:?}"),
+    }
+    // queue slot が空いた（h2 は保持したまま）。
+    let mut c3 = ExecutionContext::new();
+    let h3 = engine
+        .create_execution(&script, &mut c3, ExecutionRequest::new())
+        .expect("queue が空いている");
+    assert!(matches!(
+        h3.state(),
+        tsumugi::ExecutionState::Yielded(YieldReason::AdmissionQueued { .. })
+    ));
+    // h2 の drop で queue の数がずれない（h3 が入ったまま満杯）。
+    drop(h2);
+    let mut c4 = ExecutionContext::new();
+    match engine.create_execution(&script, &mut c4, ExecutionRequest::new()) {
+        Err(StartError::Backpressure { active, queued, .. }) => {
+            assert_eq!((active, queued), (1, 1));
+        }
+        Ok(_) => panic!("drop で queue の数が減りすぎた"),
+        Err(other) => panic!("Backpressure を期待したが {other:?}"),
+    }
+    drop(h1);
+    drop(h3);
+}
+
+/// TRS-AT-03: 昇格済みで未観測の Queued kind の handle を cancel して Cancelled にしても、
+/// active が解放され queue の次が昇格し、drop でも active の数がずれない。
+#[test]
+fn trs_at_03_cancelled_promoted_unobserved_handle_releases_active_once() {
+    let engine = Engine::with_limits(limits(1, 2));
+    let script = engine.compile("let a = 1\n").unwrap();
+    let mut c1 = ExecutionContext::new();
+    let mut c2 = ExecutionContext::new();
+    let mut c3 = ExecutionContext::new();
+    let mut h1 = engine
+        .create_execution(&script, &mut c1, ExecutionRequest::new())
+        .unwrap();
+    let mut h2 = engine
+        .create_execution(&script, &mut c2, ExecutionRequest::new())
+        .unwrap();
+    // h3 は 1 slice では終わらない重い script（昇格後も active を持ち続ける）。
+    let heavy = engine
+        .compile("let i = 0\nwhile i < 1000\n  i = i + 1\nend\n")
+        .unwrap();
+    let mut h3 = engine
+        .create_execution(&heavy, &mut c3, ExecutionRequest::new())
+        .unwrap();
+    assert_eq!(run_to_terminal(&mut h1), ExecutionOutcome::Completed);
+    // h2 は昇格済み（未 poll）。cancel して poll すると Cancelled。
+    h2.cancellation_token().cancel();
+    match h2.poll(PollSlice::default()).unwrap() {
+        PollResult::Terminal { outcome, .. } => assert_eq!(outcome, ExecutionOutcome::Cancelled),
+        other => panic!("Cancelled を期待したが {other:?}"),
+    }
+    // h3 は昇格して resume_to から進む。
+    let r = h3.poll(PollSlice { max_fuel: 16 }).unwrap();
+    assert!(!is_queued(&r), "h3 は昇格しているはず: {r:?}");
+    // h2 の drop で active の数がずれない: h3 が active のまま、4 つめは queue に入る。
+    drop(h2);
+    let mut c4 = ExecutionContext::new();
+    let h4 = engine
+        .create_execution(&script, &mut c4, ExecutionRequest::new())
+        .expect("h3 が active を持つので queue に入る");
+    assert!(matches!(
+        h4.state(),
+        tsumugi::ExecutionState::Yielded(YieldReason::AdmissionQueued { .. })
+    ));
+    drop(h1);
+    drop(h3);
+    drop(h4);
+}
+
+/// TRS-AT-04: ほかの slot・scheduler の経路は変わらない。非 terminal の handle の drop は slot を
+/// 解放し、Paused・host 待ちは active を消費し続ける（既存の `paused_consumes_active_slot`・
+/// `host_waiting_consumes_active_slot`・`active_and_queue_limits_exact_then_backpressure` が
+/// 変更なしで通ることが本体）。ここでは非 terminal の drop の解放だけを直接確かめる。
+#[test]
+fn trs_at_04_non_terminal_drop_still_releases_slot() {
+    let engine = Engine::with_limits(limits(1, 0));
+    let script = engine.compile("let a = 1\n").unwrap();
+    let mut c1 = ExecutionContext::new();
+    let h1 = engine
+        .create_execution(&script, &mut c1, ExecutionRequest::new())
+        .unwrap();
+    drop(h1);
+    let mut c2 = ExecutionContext::new();
+    let _h2 = engine
+        .create_execution(&script, &mut c2, ExecutionRequest::new())
+        .expect("非 terminal の drop で active が解放される");
+}

@@ -954,9 +954,10 @@ order      = 102
 [[slice]]
 id         = "fix-terminal-release-slot"
 title      = "Terminal に達した時点で handle の admission slot（active/queue）を 1 回だけ解放し、outcome を読むために保持しても後続が Backpressure にならないようにする（execution-control §9.2・§12、issue #362）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-terminal-release-slot 実装スライス（Terminal に達した時点で admission slot を 1 回だけ解放する）" }
 acceptance = ["TRS-AT-01..04"]
 design_pr  = 419
+impl_pr    = 422
 order      = 103

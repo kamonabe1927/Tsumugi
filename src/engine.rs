@@ -621,13 +621,10 @@ pub struct ExecutionHandle<'engine, 'script, 'context> {
     _not_send: PhantomData<*const ()>,
     /// handle が所有する admission slot の RAII トークン（設計 §4.1/§4.8）。
     ///
-    /// **末尾 field** に置く: Rust は field を宣言順に drop するため、将来の `impl Drop` 本体で
-    /// cancel linearize / ticket detach / rollback（§4.8 step 1-4）を行った後に、この field の
-    /// drop で slot が解放される（§4.8 step 5）ようにする。本 FEAT では明示 `Drop` 本体は持たず、
-    /// この field の [`AdmissionSlot`] 自身の `Drop` が slot を 1 個だけ解放する（§4.1 INV-2）。
-    /// 読み取りはしないが RAII 解放のため保持し続ける。[`Drop`] 本体（§4.8 step 1-4）の後に、
-    /// この field drop（step 5）で slot が解放される。
-    #[allow(dead_code)]
+    /// Terminal に達した時点で `finish_terminal` が [`AdmissionSlot::release`] で 1 回だけ解放する
+    /// （§9.2 `Terminal`）。非 terminal の handle は **末尾 field** の drop で解放する: Rust は
+    /// field を宣言順に drop するため、[`Drop`] 本体（§4.8 step 1-4）の後にこの field の drop で
+    /// slot が解放される（step 5、§4.1 INV-2）。Terminal 後の drop の解放は Released 判定で no-op。
     slot: AdmissionSlot,
 }
 
@@ -871,10 +868,16 @@ impl ExecutionHandle<'_, '_, '_> {
     }
 
     /// terminal state をセットして [`PollResult::Terminal`] を組み立てる（§8 / §15.3）。
+    ///
+    /// Terminal に達した時点で admission slot（active / queue）を 1 回だけ解放する（§9.2 `Terminal`、
+    /// §12）。active の解放では同じ lock 下で queue 最古の handle が昇格する。outcome / usage を
+    /// 読むために handle を保持しても後続の admission は塞がれない。drop 時の解放は
+    /// `SlotState` の Released 判定で no-op になり二重解放しない。
     fn finish_terminal(&mut self, outcome: ExecutionOutcome) -> PollResult {
         let usage = self.context.budget_usage();
         self.state = ExecutionState::Terminal;
         self.outcome = Some(outcome.clone());
+        self.slot.release();
         PollResult::Terminal { outcome, usage }
     }
 
@@ -1043,7 +1046,7 @@ impl Drop for ExecutionHandle<'_, '_, '_> {
     /// language-state を rollback する（REV-015 Slice 5、設計 §4.8）。panic / blocking I/O を
     /// しない。audit 実発行（orphan-audit queue / `AuditUnavailable`）は Phase 6 で追補する。
     fn drop(&mut self) {
-        // terminal に到達済みなら何もしない（slot は field drop で解放される）。
+        // terminal に到達済みなら何もしない（slot は finish_terminal で解放済み。field drop は no-op）。
         if self.state == ExecutionState::Terminal {
             return;
         }
@@ -1061,5 +1064,6 @@ impl Drop for ExecutionHandle<'_, '_, '_> {
         // 4. logical Terminal(Cancelled) append は context 側の cancel 済み状態で満たす。context は
         //    poison しない（正常な cancel 終了、§4.8 step 4 / §10 規則4）。
         // 5. slot 解放は末尾 field `slot: AdmissionSlot` の drop で 1 個だけ行われる（step 5、§4.1）。
+        //    Terminal の handle は finish_terminal で解放済みで、この drop 経路には来ない。
     }
 }
