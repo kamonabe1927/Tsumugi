@@ -667,8 +667,8 @@ impl<T> HostCallTicket<T> {
     pub fn cancel(&self);
 }
 ```
-`HostCallTicket<T>`が`T`を問わず`Send + Sync`であることは目標として変えない。cooperative host functionが返す`HostCallTicket<Value>`がそうでない現状は逸脱一覧の行が持つ（判断役が選択（issue #420）、D-114 Q1=A）。理由: 本節は時間上限が証明できないI/Oを`poll`のthreadで行わず、adapter executorがresultをticketへ格納してwakeし、作成thread上の次回`poll`が`try_take`すると定める。結果を別threadからticketへ返せることがこの形の前提で、`Send + Sync`はその受け皿である。`T: Send`のときだけに緩めると、blockingな処理をpollのthreadの外へ出してhostへ制御を返す目標（[マニフェスト](manifesto.md)原則4・原則1）が本文から消える（本書冒頭の#288 Q1=A・Q2=A、[Capability Model仕様](capability-model.md)冒頭のissue #263 Q2=Aと同じく、本文を実装に合わせて後退させない）。この決定は、目標をどう実装するか（`Value`をthread間で渡す形、completerの型）を決めない。
 
+`HostCallTicket<T>`が`T`を問わず`Send + Sync`であることを目標として変えない（判断役が選択（issue #420）、D-114 Q1=A）。理由: 本節は時間上限が証明できないI/Oを`poll`のthreadで行わず、adapter executorがresultをticketへ格納してwakeし、作成thread上の次回`poll`が`try_take`すると定める。結果を別threadからticketへ返せることがこの形の前提で、`Send + Sync`はその受け皿である。`T: Send`のときだけに緩めると、blockingな処理をpollのthreadの外へ出してhostへ制御を返す目標（[マニフェスト](manifesto.md)原則4・原則1）が本文から消える（本書冒頭の#288 Q1=A・Q2=A、[Capability Model仕様](capability-model.md)冒頭のissue #263 Q2=Aと同じく、本文を実装に合わせて後退させない）。この決定は、目標をどう実装するか（`Value`をthread間で渡す形、completerの型）を決めない。
 
 各Phase 2同期traitのrequest/response型に対して、Phase 4でだけ対応する`CooperativeAdapter<Request, Response>`実装を登録できる。同期実装は常に`Ready`相当で完了し`Pending`を返すAPIを持たない。cooperative実装は同じcapability判定、budget reservation、deadline、cancellation、audit correlationを使用し、Phase 2 traitを別threadへ暗黙offloadして擬似的に`Pending`へ変換してはならない。
 
