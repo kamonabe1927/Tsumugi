@@ -974,3 +974,24 @@ title      = "list_dir が List に加えて Metadata の grant も事前に要�
 status     = "todo"
 parent     = "AUD-020"
 order      = 104
+
+# issue #363（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。scheduler の handle 経路の cancellation token が
+# execution ごとに作られず ExecutionContext の評価器の 1 つの token を使い回すため、非 terminal の handle を drop しただけで
+# （Drop が token を cancel する）その context の以後の execution がすべて Cancelled になり、前の execution の token を後から cancel
+# しても次の execution が止まるのを、create_execution・start が handle を作るときに新しい token を据える形で直す
+# （execution-control §8・§9.1・§9.2・§10、threat-model TM-020）。parent は cancellation token と drop を入れた REV-015（Slice 4・5）。
+# 同じ scheduler/handle に触れる issue #361（fix-pause-run-turn-remove）・#362（fix-terminal-release-slot）は run-turn・admission slot の
+# 別の仕組みなので loop-runbook §14.1 に合わせて別のスライスにする。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
+# （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A、PR #403・PR #408・PR #410・PR #412・PR #416・PR #419）と
+# 同じく、この PR では付け直しをせず、仮にすべてのスライスより後（105）に置いた。マージ後に PM が付け直しだけの状態整理 PR で
+# 35 より前へ移す。
+# 見積もり: src/ 15〜50 行、触る仕組みは handle の cancellation token の持ち方 1 つ、受入基準 4。
+[[slice]]
+id         = "fix-handle-execution-cancel-token"
+title      = "scheduler の handle ごとに cancellation token を作り、非 terminal の handle の drop・前の execution の token の cancel が同じ context の次の execution を止めないようにする（execution-control §8・§9.1・§10、issue #363）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-handle-execution-cancel-token 実装スライス（scheduler の handle ごとに cancellation token を作り、drop・cancel がその execution だけを止める）" }
+acceptance = ["HCT-AT-01..04"]
+order      = 105
