@@ -1976,9 +1976,10 @@ fn hct_at_03_token_is_fixed_from_creation_and_wakers_do_not_carry_over() {
 }
 
 /// HCT-AT-04: drop はその execution の token を cancel し、Backpressure は context を変えない。
-/// language-state の rollback は、公開 API から作れる非 transactional handle では起きない
-/// （`finalize_session` は transactional な session だけ rollback する）ので、ここでは確かめず、
-/// 既存の `nonterminal_drop_cancels_and_rolls_back_without_blocking` に任せる。
+/// language-state の rollback は確かめない。公開 API の非 transactional な handle は drop・cancel で
+/// language-state を戻さず（`finalize_session` は transactional な session だけ rollback する）、
+/// `docs/execution-control.md` の逸脱一覧に行がある。既存の
+/// `nonterminal_drop_cancels_and_rolls_back_without_blocking` も token の cancel しか見ていない。
 #[test]
 fn hct_at_04_drop_cancels_own_token_and_backpressure_keeps_context() {
     let engine = Engine::with_limits(limits(1, 0));
