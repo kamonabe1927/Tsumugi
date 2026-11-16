@@ -692,7 +692,7 @@ order      = 92
 
 [[slice]]
 id         = "fix-windows-legacy-lexical-colon"
-title      = "Windows の legacy profile の lexical 検査が component 内の `:` を取りこぼさないようにし、platform 差のテストを足す（capability-model §5.5・§14.3、loop:drift #352 D-57）"
+title      = "Windows の legacy profile の lexical 検査が component 内の `:` を取りこぼさないようにし、platform 差のテストを足す（capability-model §8.2・§14.3、loop:drift #352 D-57）"
 status     = "todo"
 parent     = "AUD-020"
 order      = 26
@@ -960,3 +960,17 @@ spec       = { doc = "docs/execution-control.md", section = "fix-terminal-releas
 acceptance = ["TRS-AT-01..04"]
 design_pr  = 419
 order      = 103
+
+# loop:drift #420 の D-105（機械的）から作った fix。list_dir の事前要求が List だけで、§8.4 の表と §12 の matrix が求める Metadata＋List の
+# Metadata を見ないのを直す（capability-model §8.4・§12）。parent は path-handle の受入試験の AUD-020（fix-rename-destination-delete と同じ）。
+# 実装の範囲・受入基準は設計 PR で spec の小節に書く（todo）。同じ list_dir の DirectoryEntry.name の検査（D-106）は逸脱一覧の行だけを足し、
+# このスライスに含めるかは設計で決める。
+# order は loop-runbook §12.3・§8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
+# （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A、PR #403・PR #408・PR #410・PR #412・PR #416・PR #419）と
+# 同じく、この PR では付け直しをせず、仮にすべてのスライスより後（104）に置いた。マージ後に PM が付け直しだけの状態整理 PR で 35 より前へ移す。
+[[slice]]
+id         = "fix-list-dir-metadata-grant"
+title      = "list_dir が List に加えて Metadata の grant も事前に要求し、List だけの grant では通らないようにする（capability-model §8.4・§12、loop:drift #420 D-105）"
+status     = "todo"
+parent     = "AUD-020"
+order      = 104
