@@ -991,9 +991,11 @@ order      = 104
 [[slice]]
 id         = "fix-handle-execution-cancel-token"
 title      = "scheduler の handle ごとに cancellation token を作り、非 terminal の handle の drop・前の execution の token の cancel が同じ context の次の execution を止めないようにする（execution-control §8・§9.1・§10、issue #363）"
-status     = "ready"
+status     = "blocked"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-handle-execution-cancel-token 実装スライス（scheduler の handle ごとに cancellation token を作り、drop・cancel がその execution だけを止める）" }
 acceptance = ["HCT-AT-01..04"]
 design_pr  = 423
 order      = 105
+blocked_reason = "manifesto: 原則6（失敗を制御可能な結果にする）— handle ごとに token を作り直すと cancel・非 terminal の drop のあとも同じ context が再び使えるが、scheduler の handle は rollback しない（transactional: false）ため、途中まで進んだ execution の binding が次の execution から読める。HCT-AT-04 の rollback も満たせない（実装 PR #426 の審査、issue #427）"
+issues     = [427]
