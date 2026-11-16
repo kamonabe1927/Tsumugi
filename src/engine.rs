@@ -141,6 +141,11 @@ impl Engine {
     /// admit 済み slot から handle を組み立てる（設計 §4.1）。queue slot なら初期状態は
     /// `Yielded(AdmissionQueued { resume_to })`、active slot なら `resume_to` 相当の
     /// `Created` / `Linked`。
+    ///
+    /// admission が成功したあとにだけ呼ばれ、この execution 専用の新しい
+    /// [`CancellationToken`](crate::budget::CancellationToken) を context の評価器へ据える。
+    /// token は execution ごとに作られるので、前の execution の token（clone を含む）の cancel や
+    /// handle の drop は、同じ context の次の execution を止めない。
     fn new_handle<'e, 's, 'c>(
         shared: Arc<SchedulerShared>,
         slot: AdmissionSlot,
@@ -149,6 +154,9 @@ impl Engine {
         context: &'c mut ExecutionContext,
         request: ExecutionRequest,
     ) -> ExecutionHandle<'e, 's, 'c> {
+        context
+            .evaluator
+            .replace_cancellation_token(crate::budget::CancellationToken::new());
         let slot_id = slot.slot_id();
         let slot_state = slot.slot_state_arc();
         let state = if slot.is_active() {
@@ -646,6 +654,10 @@ impl ExecutionHandle<'_, '_, '_> {
 
     /// この実行の協調的 cancel token の clone を返す（第9.1節、REV-015 Slice 4）。
     ///
+    /// token は handle の作成時（`create_execution` / `start`）に execution ごとに作られ、作成から
+    /// terminal・drop まで同じ token の clone を返す。cancel はこの execution だけを止め、同じ
+    /// context の前後の execution には及ばない。
+    ///
     /// 返る [`CancellationToken`](crate::budget::CancellationToken) は `Arc<AtomicBool>` の
     /// clone で `Send + Sync`。host はこれを別スレッドで保持し、`cancel()` を呼ぶことで実行中
     /// の handle を協調的に停止できる（§8）。cancel は各 fuel charge 前と文/反復境界の
@@ -832,7 +844,8 @@ impl ExecutionHandle<'_, '_, '_> {
     /// `Some(w)` で以前の waker を置換し、`None` で解除する。host-call ticket 完了・cancel・
     /// deadline・admission 昇格が state を ready にしたときに、この waker を鳴らして host に
     /// 次 poll を促す。設定した waker は [`crate::budget::CancellationToken`] にも登録し、別 thread
-    /// の `cancel()` が待機中の handle を wake できるようにする（§8/§4.5）。別 thread から許可する
+    /// の `cancel()` が待機中の handle を wake できるようにする（§8/§4.5）。登録先はこの execution の
+    /// token なので、waker は同じ context の次の execution の cancel では鳴らない。別 thread から許可する
     /// handle 由来の操作は cancel と waker invocation だけ（§9.1）。terminal state では
     /// [`HandleError::Terminal`]、それ以外（非 pending を含む）は no-op 成功。
     pub fn set_waker(&mut self, waker: Option<ExecutionWaker>) -> Result<(), HandleError> {
@@ -1061,8 +1074,9 @@ impl Drop for ExecutionHandle<'_, '_, '_> {
         // 3. language-state rollback + continuation 破棄（step 3、Finding 6）。rollback 要否は
         //    abort_session 内部の self.session 有無で自己判定する（started は見ない）。
         self.context.evaluator.abort_session();
-        // 4. logical Terminal(Cancelled) append は context 側の cancel 済み状態で満たす。context は
-        //    poison しない（正常な cancel 終了、§4.8 step 4 / §10 規則4）。
+        // 4. logical Terminal(Cancelled) append はこの execution の cancel 済み token で満たす。token は
+        //    execution ごとに作られるので、cancel されるのはこの execution だけで、同じ context の
+        //    次の execution は新しい token で始まる（正常な cancel 終了、§4.8 step 4 / §10 規則4）。
         // 5. slot 解放は末尾 field `slot: AdmissionSlot` の drop で 1 個だけ行われる（step 5、§4.1）。
         //    Terminal の handle は finish_terminal で解放済みで、この drop 経路には来ない。
     }

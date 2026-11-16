@@ -906,6 +906,14 @@ impl Evaluator {
         self.budget.cancellation_token()
     }
 
+    /// cancellation token だけを差し替える（fix-handle-execution-cancel-token）。
+    ///
+    /// scheduler の handle 経路が execution ごとに新しい token を据えるために使う。budget の
+    /// config・counters・heap ledger・clock は変えない。
+    pub fn replace_cancellation_token(&mut self, cancellation: crate::budget::CancellationToken) {
+        self.budget.replace_cancellation_token(cancellation);
+    }
+
     /// cancel checkpoint を評価する（REV-015 Slice 5、設計 §4.6）。
     ///
     /// alpha facade（`engine.rs`）が admission queue 待ち中の cancel を観測するための委譲。

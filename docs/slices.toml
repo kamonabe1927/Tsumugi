@@ -991,9 +991,10 @@ order      = 104
 [[slice]]
 id         = "fix-handle-execution-cancel-token"
 title      = "scheduler の handle ごとに cancellation token を作り、非 terminal の handle の drop・前の execution の token の cancel が同じ context の次の execution を止めないようにする（execution-control §8・§9.1・§10、issue #363）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-handle-execution-cancel-token 実装スライス（scheduler の handle ごとに cancellation token を作り、drop・cancel がその execution だけを止める）" }
 acceptance = ["HCT-AT-01..04"]
 design_pr  = 423
+impl_pr    = 426
 order      = 105

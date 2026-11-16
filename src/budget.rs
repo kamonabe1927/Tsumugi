@@ -1068,6 +1068,14 @@ impl BudgetLedger {
         self.cancellation.clone()
     }
 
+    /// cancellation token だけを差し替える（fix-handle-execution-cancel-token）。
+    ///
+    /// scheduler の handle 経路が execution ごとに新しい token を据えるための入口。config・
+    /// counters・heap ledger・clock は変えない（`reset_config_with_token` と違い台帳を作り直さない）。
+    pub fn replace_cancellation_token(&mut self, cancellation: CancellationToken) {
+        self.cancellation = cancellation;
+    }
+
     /// この実行の deadline instant（REV-015 Slice 5、cooperative host-call context 用）。
     ///
     /// `config.deadline` をそのまま返す。clock 未注入でも値は返るが、deadline の実効化は

@@ -1785,3 +1785,235 @@ fn trs_at_04_non_terminal_drop_still_releases_slot() {
         .create_execution(&script, &mut c2, ExecutionRequest::new())
         .expect("非 terminal の drop で active が解放される");
 }
+
+// =============================================================================
+// fix-handle-execution-cancel-token（issue #363）: token は handle（execution）ごと
+// =============================================================================
+
+const HCT_LOOP: &str = "let i = 0\nwhile i < 100\n  i = i + 1\nend\n";
+
+/// 同じ context で次の execution が 2 回の `execute` と handle の poll で `Completed` に達する。
+fn hct_assert_context_still_runs(engine: &Engine, ctx: &mut ExecutionContext) {
+    let script = engine.compile("let a = 1\n").unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            engine
+                .execute(&script, ctx)
+                .expect("同じ context は止まらない"),
+            ExecutionOutcome::Completed
+        );
+    }
+    let mut h = engine
+        .create_execution(&script, ctx, ExecutionRequest::new())
+        .unwrap();
+    assert_eq!(run_to_terminal(&mut h), ExecutionOutcome::Completed);
+}
+
+/// HCT-AT-01: 非 terminal の handle を drop しても、同じ context の次の execution は完了する。
+#[test]
+fn hct_at_01_dropping_nonterminal_handle_does_not_stop_next_execution() {
+    let engine = Engine::with_limits(limits(2, 0));
+    let script = engine.compile("let a = 1\n").unwrap();
+    let looped = engine.compile(HCT_LOOP).unwrap();
+
+    // Created（issue #363 の再現）
+    let mut ctx = ExecutionContext::new();
+    drop(
+        engine
+            .create_execution(&script, &mut ctx, ExecutionRequest::new())
+            .unwrap(),
+    );
+    hct_assert_context_still_runs(&engine, &mut ctx);
+
+    // Linked（start のあと poll せず）
+    let mut ctx = ExecutionContext::new();
+    drop(
+        engine
+            .start(&script, &mut ctx, ExecutionRequest::new())
+            .unwrap(),
+    );
+    hct_assert_context_still_runs(&engine, &mut ctx);
+
+    // Yielded(SliceFuelExhausted)
+    let mut ctx = ExecutionContext::new();
+    {
+        let mut h = engine
+            .create_execution(&looped, &mut ctx, ExecutionRequest::new())
+            .unwrap();
+        match h.poll(PollSlice { max_fuel: 16 }).unwrap() {
+            PollResult::Yielded {
+                reason: YieldReason::SliceFuelExhausted,
+                ..
+            } => {}
+            other => panic!("SliceFuelExhausted の yield を期待: {other:?}"),
+        }
+    }
+    hct_assert_context_still_runs(&engine, &mut ctx);
+
+    // Paused
+    let mut ctx = ExecutionContext::new();
+    {
+        let mut h = engine
+            .create_execution(&looped, &mut ctx, ExecutionRequest::new())
+            .unwrap();
+        h.pause().unwrap();
+    }
+    hct_assert_context_still_runs(&engine, &mut ctx);
+}
+
+/// HCT-AT-02: 前の execution の token（clone）の cancel は次の execution を止めない。
+#[test]
+fn hct_at_02_previous_token_does_not_stop_next_execution() {
+    let engine = Engine::with_limits(limits(2, 0));
+    let script = engine.compile("let a = 1\n").unwrap();
+    let looped = engine.compile(HCT_LOOP).unwrap();
+    let mut ctx = ExecutionContext::new();
+
+    // h1 が Completed のあと drop し、t1 を cancel する。
+    let t1 = {
+        let mut h1 = engine
+            .create_execution(&script, &mut ctx, ExecutionRequest::new())
+            .unwrap();
+        let t1 = h1.cancellation_token();
+        assert_eq!(run_to_terminal(&mut h1), ExecutionOutcome::Completed);
+        t1
+    };
+    t1.cancel();
+    let mut h2 = engine
+        .create_execution(&script, &mut ctx, ExecutionRequest::new())
+        .unwrap();
+    assert_eq!(run_to_terminal(&mut h2), ExecutionOutcome::Completed);
+    drop(h2);
+
+    // h1 を t1 の cancel で Cancelled にしたあとも、h2 は Completed に達する。
+    let t1 = {
+        let mut h1 = engine
+            .create_execution(&looped, &mut ctx, ExecutionRequest::new())
+            .unwrap();
+        let t1 = h1.cancellation_token();
+        assert!(t1.cancel());
+        assert_eq!(run_to_terminal(&mut h1), ExecutionOutcome::Cancelled);
+        t1
+    };
+    assert!(t1.is_cancelled());
+    let mut h2 = engine
+        .create_execution(&script, &mut ctx, ExecutionRequest::new())
+        .unwrap();
+    let t2 = h2.cancellation_token();
+    assert!(!t2.is_cancelled(), "新しい token は未 cancel で始まる");
+    assert_eq!(run_to_terminal(&mut h2), ExecutionOutcome::Completed);
+    drop(h2);
+
+    // h2 の作成のあとに t1 を cancel しても h2 は止まらず、t2 の cancel で Cancelled になる。
+    let mut h2 = engine
+        .create_execution(&looped, &mut ctx, ExecutionRequest::new())
+        .unwrap();
+    let t2 = h2.cancellation_token();
+    t1.cancel();
+    assert!(!t2.is_cancelled());
+    assert!(t2.cancel(), "t2 の最初の cancel は true");
+    assert_eq!(run_to_terminal(&mut h2), ExecutionOutcome::Cancelled);
+}
+
+/// HCT-AT-03: token は作成時点から execution に固定され、waker は execution ごとに分かれる。
+#[test]
+fn hct_at_03_token_is_fixed_from_creation_and_wakers_do_not_carry_over() {
+    let engine = Engine::with_limits(limits(2, 0));
+    let looped = engine.compile(HCT_LOOP).unwrap();
+    let mut ctx = ExecutionContext::new();
+
+    // Created で取った clone の cancel は、最初の poll で Cancelled になる。
+    {
+        let mut h = engine
+            .create_execution(&looped, &mut ctx, ExecutionRequest::new())
+            .unwrap();
+        let t_created = h.cancellation_token();
+        t_created.cancel();
+        assert_eq!(run_to_terminal(&mut h), ExecutionOutcome::Cancelled);
+        assert!(h.cancellation_token().is_cancelled());
+    }
+
+    // 同じ handle の Created・Yielded・terminal の clone は同じ token。
+    {
+        let mut h = engine
+            .create_execution(&looped, &mut ctx, ExecutionRequest::new())
+            .unwrap();
+        let t_created = h.cancellation_token();
+        assert!(matches!(
+            h.poll(PollSlice { max_fuel: 16 }).unwrap(),
+            PollResult::Yielded { .. }
+        ));
+        let t_yielded = h.cancellation_token();
+        assert!(!t_yielded.is_cancelled());
+        t_created.cancel();
+        assert!(t_yielded.is_cancelled());
+        assert_eq!(run_to_terminal(&mut h), ExecutionOutcome::Cancelled);
+        let t_terminal = h.cancellation_token();
+        assert!(t_terminal.is_cancelled() && t_created.is_cancelled());
+    }
+
+    // h1 の waker は、h1 の drop のあと同じ context の h2 の token の cancel では鳴らない。
+    let (w1, c1) = fake_waker();
+    {
+        let mut h1 = engine
+            .create_execution(&looped, &mut ctx, ExecutionRequest::new())
+            .unwrap();
+        h1.set_waker(Some(w1)).unwrap();
+    }
+    let drop_wakes = c1.load(Ordering::SeqCst);
+    let (w2, c2) = fake_waker();
+    let mut h2 = engine
+        .create_execution(&looped, &mut ctx, ExecutionRequest::new())
+        .unwrap();
+    h2.set_waker(Some(w2)).unwrap();
+    assert!(h2.cancellation_token().cancel());
+    assert_eq!(
+        c1.load(Ordering::SeqCst),
+        drop_wakes,
+        "h1 の waker は h2 の cancel で鳴らない"
+    );
+    assert!(c2.load(Ordering::SeqCst) >= 1, "h2 の waker は鳴る");
+}
+
+/// HCT-AT-04: drop は rollback し、その execution の token を cancel し、Backpressure は context を変えない。
+#[test]
+fn hct_at_04_drop_cancels_own_token_rolls_back_and_backpressure_keeps_context() {
+    let engine = Engine::with_limits(limits(1, 0));
+    let set_x = engine.compile("let x = 1\n").unwrap();
+    let mut ctx = ExecutionContext::new();
+
+    // 非 terminal の drop は自分の token を cancel し、language-state を rollback する。
+    let token = {
+        let mut h = engine
+            .create_execution(&set_x, &mut ctx, ExecutionRequest::new())
+            .unwrap();
+        let token = h.cancellation_token();
+        assert!(!token.is_cancelled());
+        h.pause().unwrap();
+        token
+    };
+    assert!(token.is_cancelled(), "drop は自分の token を cancel する");
+    let read_x = engine.compile("x\n").unwrap();
+    assert!(
+        engine.execute(&read_x, &mut ctx).is_err(),
+        "x は rollback されて未定義"
+    );
+
+    // Backpressure のときは handle を作らず、context の token も変えない。
+    let mut ctx_a = ExecutionContext::new();
+    let h_a = engine
+        .create_execution(&set_x, &mut ctx_a, ExecutionRequest::new())
+        .unwrap();
+    let mut ctx_b = ExecutionContext::new();
+    assert!(matches!(
+        engine.create_execution(&set_x, &mut ctx_b, ExecutionRequest::new()),
+        Err(StartError::Backpressure { .. })
+    ));
+    drop(h_a);
+    // Backpressure の create は ctx_b を変えず、あとの execution は完了する。
+    let one = engine.compile("let a = 1\n").unwrap();
+    assert_eq!(
+        engine.execute(&one, &mut ctx_b).unwrap(),
+        ExecutionOutcome::Completed
+    );
+}
