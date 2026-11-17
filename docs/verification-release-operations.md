@@ -1,6 +1,6 @@
 # Tsumugi — 検証・リリース・運用設計
 
-最終更新: 2026-11-15
+最終更新: 2026-11-17
 設計ステータス: **実装仕様確定・部分実装**
 
 本文書の §1〜§18 は **到達目標の確定仕様**であり、現在の実装状態ではない。現在の実装が目標からどう逸脱しているか・どこが未実装かは、
@@ -222,6 +222,7 @@ cargo package --locked --list
 - third-party Actionが不要な処理はshell commandまたは公式Actionを優先する。
 - fork PRへwrite permission、OIDC token、package write、release writeを付与しない。
   - 例外: 凍結ガード（`.github/workflows/frozen-guard.yml`、[開発ループの守り](loop-guard.md) §3.2）は`pull_request_target`で動き、workflow単位で`pull-requests: write`と`statuses: write`を持つ。これは次の条件をすべて満たすときだけ許す。(1) workflowの定義と実行するscriptはmain側のものだけを使い、PRのコードをcheckout・実行しない。(2) checkoutは`persist-credentials: false`にする。(3) 権限はラベルの操作とstatusの付与に要る`pull-requests: write`・`statuses: write`だけを最小限に書き、`id-token`・`packages`・release（`contents`）のwriteは付けない。このwrite tokenはPRのコードではなくmain側の定義に渡るので、本項が禁じる「fork PRのコードへのwrite付与」とは別物である。凍結ガードの権限を外す・job単位に絞る案（B）は、凍結ファイルの変更で`frozen-ok`が要り（loop-guard §3.1）、ラベルの除去と必須statusの付与ができなくなると守りが働かなくなるので選ばなかった（loop:drift #318 の D-36 Q1=A。判断役が選択（issue #318））。
+  - 例外: 閉じたブランチの削除（`.github/workflows/delete-closed-branch.yml`）は`pull_request_target`の`closed`で動き、workflow単位で`contents: write`を持つ。マージされずに閉じたPRのブランチを消すためで、マージされたPRのブランチを消すリポジトリの設定（Automatically delete head branches）は閉じただけのPRには効かない。これは次の条件をすべて満たすときだけ許す。(1) workflowの定義はmain側のものだけを使い、PRのコードをcheckout・実行せず、`uses:`も使わない。(2) jobはマージされずに閉じた、同じrepositoryのbranchからのPRのときだけ動かし、fork PRではjobを動かさない（write tokenを作らない）。(3) 消すのはそのPRのhead branchだけで、既定のbranch、同じbranchをheadにするopenのPRがあるbranch、閉じた時点のhead commitから動いたbranchは消さない。(4) 権限は`contents: write`と`pull-requests: read`だけとし、`id-token`・`packages`のwriteは付けない。releaseは作らない。ループがPRを閉じて新しいbranchで出し直すたびにbranchが残っていたため、kamonabeが2026-11-17に対話で承認した。
 - provenance、署名、GHCR pushに必要な`id-token: write`と`packages: write`はprotected tagのrelease jobだけにjob単位で付与する。
 
 ### 4.5 CI artifact retention
