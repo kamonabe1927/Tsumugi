@@ -1,0 +1,63 @@
+name: Delete closed branch
+
+# マージされずに閉じた PR のブランチを消す。
+# マージされた PR のブランチは、リポジトリの設定（Automatically delete head branches）が消す。この設定は閉じただけの PR には効かないので、
+# ループが PR を閉じて新しいブランチで出し直すたび（loop:stuck・審査の疑い・作り直し）にブランチが残っていた。
+# pull_request_target なので、main 側のこの定義で動く。PR のコードは checkout しない・実行しない。読むのは event と GitHub API の情報だけ。
+# 権限の例外の条件は docs/verification-release-operations.md §4.4。
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  delete:
+    name: Delete closed branch
+    # マージされずに閉じた、同じリポジトリのブランチからの PR だけ。fork の PR では job を動かさない（write の token を作らない）。
+    if: >-
+      github.event.pull_request.merged == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete the head branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [ "$HEAD_REF" = "$DEFAULT_BRANCH" ] || [ "$HEAD_REF" = "main" ]; then
+            echo "skip: #$PR_NUMBER の head が既定のブランチ（$HEAD_REF）"
+            exit 0
+          fi
+
+          ref_path=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe="/"))' "$HEAD_REF")
+
+          # 同じブランチを head にする open の PR が他にあれば消さない
+          open_count=$(gh api "repos/$REPO/pulls?state=open&head=$OWNER:$ref_path" --jq 'length')
+          if [ "$open_count" != "0" ]; then
+            echo "skip: $HEAD_REF を使う open の PR が $open_count 本ある"
+            exit 0
+          fi
+
+          # 閉じたあとに commit が足されたブランチは消さない（ブランチが無ければ何もしない）
+          if ! current_sha=$(gh api "repos/$REPO/git/ref/heads/$ref_path" --jq '.object.sha' 2>/dev/null); then
+            echo "skip: $HEAD_REF はもう無い"
+            exit 0
+          fi
+          if [ "$current_sha" != "$HEAD_SHA" ]; then
+            echo "skip: $HEAD_REF は閉じた時点の head（$HEAD_SHA）から動いている（$current_sha）"
+            exit 0
+          fi
+
+          gh api -X DELETE "repos/$REPO/git/refs/heads/$ref_path"
+          echo "deleted: $HEAD_REF（#$PR_NUMBER はマージされずに閉じた）"
