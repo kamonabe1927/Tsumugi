@@ -68,13 +68,13 @@ const TEN: [(&str, &str); 10] = [
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Grant {
     Full,
-    NoGrant,
+    Absent,
     ReadOnly,
 }
 
 fn capabilities(base: &Path, grant: Grant) -> CapabilitySet {
     let pid = NonZeroU128::new(1).expect("non-zero");
-    if grant == Grant::NoGrant {
+    if grant == Grant::Absent {
         return CapabilitySet::empty();
     }
     let ops: BTreeSet<FsOperation> = if grant == Grant::Full {
@@ -153,7 +153,7 @@ fn fhc_at_02_each_builtin_counts_one_host_call() {
             let malformed = call.replace("@d/", "nomount/");
             let cases = [
                 ("成功", call.to_string(), Grant::Full),
-                ("grant 無し", call.to_string(), Grant::NoGrant),
+                ("grant 無し", call.to_string(), Grant::Absent),
                 ("操作の許可無し", call.to_string(), Grant::ReadOnly),
                 ("host error", missing, Grant::Full),
                 ("パスの形式エラー", malformed, Grant::Full),
@@ -189,7 +189,7 @@ fn fhc_at_03_byte_accounting() {
             assert_eq!(c.host_call_bytes, expected, "[{mode}] {name} call bytes");
 
             for (label, grant, call) in [
-                ("grant 無し", Grant::NoGrant, call.to_string()),
+                ("grant 無し", Grant::Absent, call.to_string()),
                 ("操作の許可無し", Grant::ReadOnly, call.to_string()),
                 (
                     "host error",

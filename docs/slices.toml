@@ -1011,11 +1011,12 @@ order      = 105
 [[slice]]
 id         = "fix-fs-builtin-host-call-charge"
 title      = "filesystem builtin の 14 個すべてを capability 判定の前に host call として課金し、path_exists などが max_host_calls を素通りしないようにする（execution-control §2・§6.1、issue #364）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-fs-builtin-host-call-charge 実装スライス（filesystem builtin のすべてを host call として回数・byte を課金する）" }
 acceptance = ["FHC-AT-01..05"]
 design_pr  = 425
+impl_pr    = 430
 order      = 106
 
 # issue #364 の本文の補足と loop:drift #420 の D-108 で逸脱一覧に載せた「登録 host function（同期・cooperative）の呼び出しが host-call 回数と
