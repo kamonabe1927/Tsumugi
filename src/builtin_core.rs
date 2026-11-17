@@ -1044,15 +1044,24 @@ pub fn builtin_format_time(args: &[Value], line: usize) -> Result<Value, Tsumugi
 // ファイルI/O系（サンドボックスチェック付き）
 // =============================================================================
 
-/// この builtin が host 境界（filesystem 等）を越える host call かどうか（§6.1、
-/// REV-015 Slice 2、I-O accounting）。
+/// この builtin が host 境界（filesystem 等）を越える host call として回数と byte を課金される
+/// かどうか（§6.1、REV-015 Slice 2、fix-fs-builtin-host-call-charge）。
 ///
 /// stdio（`print` / `input`）は各 engine が固有実装を持ち、`charge_output` /
-/// `charge_input` で別途課金するためここには含めない。本 Slice では読み書きの payload
-/// byte が明確な filesystem read/write builtin を host call として課金対象にする。
-/// path 判定・env・clock 等その他の host 境界 builtin の課金は Phase 2 の capability /
-/// host function 配線で扱う。
+/// `charge_input` で別途課金するためここには含めない。filesystem builtin の 14 個すべて
+/// （[`is_filesystem_builtin`]）が capability 判定・adapter の呼び出しの前に host call として
+/// 課金される。env・clock 等その他の host 境界 builtin の課金は本関数の範囲外。
 pub fn is_host_call_builtin(name: &str) -> bool {
+    is_filesystem_builtin(name)
+}
+
+/// 実行時監査の host-call triple（`HostCallStarted` → `CapabilityDecision` →
+/// `HostCallFinished`）と、その前の `BudgetCharged` の flush を出す builtin かどうか。
+///
+/// 課金（[`is_host_call_builtin`]）とは別の述語で、今は読み書きの payload byte が明確な
+/// `read_file` / `read_lines` / `write_file` / `append_file` の 4 つだけが真。残りの
+/// filesystem builtin への拡張は `audit-fs-builtin-scope` の範囲。
+pub fn emits_host_call_triple(name: &str) -> bool {
     matches!(
         name,
         "read_file" | "read_lines" | "write_file" | "append_file"
@@ -1061,8 +1070,8 @@ pub fn is_host_call_builtin(name: &str) -> bool {
 
 /// host call の request payload byte 長（host へ渡す内容）。§6.1、REV-015 Slice 2。
 ///
-/// write/append は書き込む内容の byte 長、read 系は request payload を持たないため 0。
-/// path 引数の byte は本 Slice では request に含めない（write 内容だけを payload とする）。
+/// write/append は書き込む内容の byte 長、他の filesystem builtin は request payload を持たない
+/// ため 0。path 引数の byte は request に含めない（write 内容だけを payload とする）。
 ///
 /// write/append の第 2 引数は [`render_fs_content_budgeted`] で `Str` へ描画済みであること
 /// （境界が request 課金の前に必ず通す）。`Str` 以外は予算を見ない描画をしないため 0 とする。
@@ -1101,15 +1110,16 @@ pub fn render_fs_content_budgeted(
 
 /// host call の response payload byte 長（host から受け取る内容）。§6.1、REV-015 Slice 2。
 ///
-/// read_file は読み込んだ文字列の byte 長、read_lines は各行の byte 長の合計。write /
-/// append は response payload を持たないため 0（返り値の `Bool` は payload ではない）。
+/// read_file は読み込んだ文字列の byte 長、read_lines は各行の byte 長の合計、list_dir は
+/// 返した名前の byte 長の合計。他の builtin は response payload を持たないため 0（返り値の
+/// `Bool` / `Int` は payload ではない）。
 pub fn host_call_response_bytes(name: &str, result: &Value) -> u64 {
     match name {
         "read_file" => match result {
             Value::Str(s) => s.len() as u64,
             _ => 0,
         },
-        "read_lines" => match result {
+        "read_lines" | "list_dir" => match result {
             Value::List(items) => items
                 .iter()
                 .map(|v| match v {
