@@ -1055,4 +1055,5 @@ status     = "ready"
 parent     = "REV-008"
 spec       = { doc = "docs/execution-control.md", section = "fix-handle-execution-rollback 実装スライス（scheduler の handle 経路の失敗の terminal で language-state を execution 開始時点へ rollback する）" }
 acceptance = ["HER-AT-01..05"]
+design_pr  = 436
 order      = 108
