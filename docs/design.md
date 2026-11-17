@@ -1,6 +1,6 @@
 # Tsumugi — 設計ドキュメント
 
-最終更新: 2026-11-05
+最終更新: 2026-11-17
 
 ## 目的と位置づけ
 
@@ -227,7 +227,7 @@ let result = filter(test, fn(item) item != "kani" end)
 - `return` 文は EvalResult::Return で早期脱出を表現
 - ランタイムエラー（型エラー、未定義変数、ゼロ除算等）に `Stmt.line` を付与
 - 組み込み関数の実装は `builtin.rs` に分離（eval.rs は制御フロー・式評価に専念）
-- `builtin.rs` はコンテキスト依存のビルトイン（push/pop/map/filter/each/print/input/exit/args）を処理し、それ以外は `builtin_core.rs` に委譲
+- `builtin.rs` はコンテキスト依存のビルトイン（push/pop/map/filter/each/print/input/exit/args/env/now）を処理し、それ以外は `builtin_core.rs` に委譲
 
 ### 環境 (env.rs)
 
@@ -293,7 +293,7 @@ fixture 追加手順は、`.tsg` と期待ファイルを置き、`fixture_tests
 
 ### スケーリングテスト
 
-`tests/scaling.rs` は計算量オーダーを固定する。実時間はCIランナーの負荷で揺れるため、カウントアロケータで**確保バイト数**を測る。解放漏れの検出だけは確保量ではなく生存量（確保 - 解放）を使う。検証している性質は次の6つで、いずれも両engineで確認する。
+`tests/scaling.rs` は計算量オーダーを固定する。実時間はCIランナーの負荷で揺れるため、カウントアロケータで**確保バイト数**を測る。解放漏れの検出だけは確保量ではなく生存量（確保 - 解放）を使う。代表的な性質は次のとおりで、いずれも両engineで確認する（網羅ではない。ほかにlive heap・peak heapの上限、ループ内で定義したclosureやbuiltinが作る文字列の解放などを固定している。一覧は`tests/scaling.rs`の各テストを見る）。
 
 | 性質 | 測り方 | 由来 |
 |---|---|---|
@@ -308,9 +308,9 @@ fixture 追加手順は、`.tsg` と期待ファイルを置き、`fixture_tests
 
 ### 防御的テスト
 
-`tests/defensive_vm.rs` は、library利用者が不正な `Chunk` を公開APIへ渡してもホストプロセスが落ちないことを検証する（AUD-023）。`tsumugi::` の公開APIだけを使い、`Vm::new` / `Vm::run_repl_chunk` に手組みのbytecodeを渡す。
+`tests/defensive_vm.rs` は、library利用者が不正な `Chunk` を公開APIへ渡してもホストプロセスが落ちないことを検証する（AUD-023）。`tsumugi::` の公開APIだけを使い、手組みのbytecodeを `VerifiedChunk::from_trusted` で検証を迂回して `Vm::new` / `Vm::run_repl_chunk`（どちらも `VerifiedChunk` を取る）へ渡す（REV-006）。
 
-固定しているのは、範囲外のlocal slot読み書き・定数参照・upvalue参照、stackが足りない `FStrConcat` / `PopN` / `Print` / `CallBuiltin`、関数先頭の `MakeClosure`、行番号表が空のChunk、`dispatch` へ到達する `try` 命令の8ケース。いずれも`internal`種別の構造化エラーになることを期待値とし、VM実装を修正前へ戻すと `index out of bounds` のpanicで失敗する。
+固定している区分は次のとおり。範囲外のlocal slot読み書き・定数参照・upvalue参照、stackが足りない `FStrConcat` / `PopN` / `Print` / `CallBuiltin` / `ListPushBinding`、範囲外の prototype を指す `MakeClosure`、行番号表が空のChunk、`dispatch` へ到達する `try` 命令、ループの外の `break` / `continue` 命令、印や引数の無い `JumpIfBuiltinMark` による builtin 呼び出し、REPLで失敗したChunkの巻き戻し。これらはhost panicせず`internal`などの構造化エラーで終わることを期待値とする（AUD-023の修正の記録は変更履歴の章にある）。あわせて、`Jump` の自己ループ・後方 `Loop`・`PrepareCall` を省いた再帰が watchdog・fuel・深度の上限で有限停止し、watchdog の上限到達を `try` で捕捉できないことも固定する。
 
 ### registry契約テスト
 
@@ -441,7 +441,7 @@ let f = fn(x) x * 2 end
 - 循環参照: `Rc<RefCell>`にはcycle collectorがなく、捕捉変数のListへその変数を捕捉したclosureを`push`すると、`cell → List → closure → cell`の循環を言語コードから構成できる。短命なscriptでは影響が限定的でも、REPLや長時間実行では解放されないメモリが累積し得る
 - 捕捉範囲: treeは本体が言及する名前のセルを共有し、VMは自由変数だけをupvalue化する（AUD-042で可視binding全捕捉から変更）。treeの判定は厳密な自由変数解析ではなく保守的な近似で、`let`・parameter・`for`変数・`catch`変数のように本体で束縛される名前も集める。そのため同名の外側bindingがある場合、本体がそれを読まなくてもセルを保持し、VMのupvalue集合より広くなることがある。観測可能な挙動は変わらないが、生存量ではこの差が残る
 - 意味論の重複: 共通Resolver/HIRはなく、scope・名前解決・call・比較・mutation・importの規則をEvaluatorとCompiler/VMが別々に実装する。拡張時はdifferential testで両engineの観測可能な挙動を固定する必要がある
-- パフォーマンス: `RefCell`の実行時借用チェックに加え、値cloneやVMのstack/cell管理コストがある。VMが常に高速とは限らず、workloadごとに優劣が異なる。判断はフェーズ別ベンチマーク（`parse` / `compile` / `execute` / `end_to_end`）の実測に基づき、最新値は `docs/roadmap.md` のスナップショットに記録する
+- パフォーマンス: `RefCell`の実行時借用チェックに加え、値cloneやVMのstack/cell管理コストがある。VMが常に高速とは限らず、workloadごとに優劣が異なる。判断はフェーズ別ベンチマーク（`parse` / `compile` / `execute` / `end_to_end`）の実測に基づき、最新値は [`docs/history/benchmarks.md`](history/benchmarks.md) に記録する
 
 ## モジュール / import の設計
 
@@ -513,12 +513,12 @@ Parserはプログラム直下とblock内の文を区別し、block内のimport�
 ### 概要
 
 ツリーウォークインタプリタに加え、バイトコードコンパイラ + スタックVMを並行実装する。
-`--vm`フラグで実行方式を切り替え可能。Lexer・Parser・ASTは共有し、両方式が同じ規範仕様を満たすことを目標とする。比較（AUD-014）、index代入（AUD-013）、context依存builtin（AUD-012）、import解決時点（AUD-030）、error kind・message・line（AUD-019）、関数値の同一性（AUD-048）、同一scopeの`let`再宣言でのcell identity（AUD-016）、未捕捉エラー後のREPL状態の巻き戻し（AUD-024）はいずれも統一済みである。ただし意味解析以降は別実装である。現時点のVMは互換性・性能ともに実験的backendとして扱い、非適合は`roadmap.md`で管理する。
+`--vm`フラグで実行方式を切り替え可能。Lexer・Parser・ASTは共有し、両方式が同じ規範仕様を満たすことを目標とする。比較（AUD-014）、index代入（AUD-013）、context依存builtin（AUD-012）、import解決時点（AUD-030）、error kind・message・line（AUD-019）、関数値の同一性（AUD-048）、同一scopeの`let`再宣言でのcell identity（AUD-016）、未捕捉エラー後のREPL状態の巻き戻し（AUD-024）はいずれも統一済みである。ただし意味解析以降は別実装である。現時点のVMは互換性・性能ともに実験的backendとして扱い、非適合は各領域別正本（[組み込みAPI仕様](embedding-api.md)ほか）の逸脱一覧が持つ。
 
 ### 動機
 
 - ツリーウォークは「AST → 再帰で直接実行」で、言語意味論と実装の対応を追いやすい
-- バイトコードVMは「AST → 一次元の命令列 → dispatch loop」という別方式を学べる。ただし一律の高速化は保証しない。AUD-040後の`execute`フェーズ実測では、再帰（`fib_20`）と高階関数・クロージャ生成でVMが速く、f-stringとループでtreeが速く、辞書操作はほぼ同等である。最新値は`docs/roadmap.md`のスナップショットを参照する
+- バイトコードVMは「AST → 一次元の命令列 → dispatch loop」という別方式を学べる。ただし一律の高速化は保証しない。AUD-040後の`execute`フェーズ実測では、再帰（`fib_20`）と高階関数・クロージャ生成でVMが速く、f-stringとループでtreeが速く、辞書操作はほぼ同等である。最新値は[`docs/history/benchmarks.md`](history/benchmarks.md)を参照する
 - 言語処理系の学習として、コード生成、stack frame、upvalue、例外unwind、VM実行loopはツリーウォークとは異なる知見を得られる
 - 共通Resolver/HIRがないため、既存テストの流用だけでなく、stdout・stderr・終了コード・副作用順を比較する厳密なdifferential testを互換性条件とする
 
@@ -592,16 +592,20 @@ top-levelの`let` / `fn`は`RegisterGlobal(name, slot)`で宣言実行時に公�
 
 ### 実装フェーズ
 
-| Phase | 内容 | 状態 |
-|---|---|---|
-| 0+1 | OpCode定義 + Chunk + Compiler + VM骨格 + 定数 + 算術 + Print | ✅ 完了 |
-| 2 | 変数（let / 再代入 / 参照） | ✅ 完了 |
-| 3 | 比較 + 条件ジャンプ（if / while / for） | ✅ 完了 |
-| 4 | 関数定義・呼び出し（コールフレーム） | ✅ 完了 |
-| 5 | クロージャ（upvalue） | ✅ 完了 |
-| 6 | 組み込み関数（53個） | ✅ 完了 |
-| 7 | 互換性修正（min/max混合型・remove・write_file） | ✅ 完了 |
-| 8 | 浮動小数点 IEEE 754 統一（VM ゼロ除算→inf/NaN、ツリーウォーク Float 比較追加） | ✅ 完了 |
+VMを段階的に実装した順の記録である（下の「Print を専用 OpCode にした理由」などが Phase 番号で参照する）。状態は持たない。
+
+| Phase | 内容 |
+|---|---|
+| 0+1 | OpCode定義 + Chunk + Compiler + VM骨格 + 定数 + 算術 + Print |
+| 2 | 変数（let / 再代入 / 参照） |
+| 3 | 比較 + 条件ジャンプ（if / while / for） |
+| 4 | 関数定義・呼び出し（コールフレーム） |
+| 5 | クロージャ（upvalue） |
+| 6 | 組み込み関数 |
+| 7 | 互換性修正（min/max混合型・remove・write_file） |
+| 8 | 浮動小数点 IEEE 754 統一（VM ゼロ除算→inf/NaN、ツリーウォーク Float 比較追加） |
+
+判断役が選択（issue #429 D-125 Q1=A）: 状態の列（「✅ 完了」）と組み込み関数の個数を消し、表は段階の順の記録として本節に残した。理由: 状態の再掲は[ドキュメント運用ガイド](documentation-guide.md)「状態の正本は粒度ごとに1箇所だけ」に、個数は本書の「関数の数は書かない」と実装（`PUBLIC_BUILTINS`）に反しており、この2点だけを消すのが最小の変更である（[マニフェスト](manifesto.md) 原則8）。段階の順序は学習の経緯として、本文の Phase 参照と同じ章で照合できる形で残す（原則9。tree-walk 側の段階も本文に状態なしで書いている）。変更履歴の章へ移す案は、日付つきの問題／決定の記録と形が合わず、Phase 参照が離れた章を指すことになるため採らなかった。
 
 ### Rc\<Chunk\> による関数値の共有
 
@@ -609,11 +613,13 @@ top-levelの`let` / `fn`は`RegisterGlobal(name, slot)`で宣言実行時に公�
 
 ```rust
 VmFn {
+    id: FunctionId,       // 関数値の同一性（AUD-048）
     name: String,
     arity: usize,
     params: Vec<String>,
     chunk: Rc<Chunk>,     // ← ポインタコピーで共有
-    upvalues: Vec<Value>,
+    upvalues: Vec<SharedValue>,
+    // ほか heap 課金用のトークン（REV-015）
 }
 ```
 
@@ -652,7 +658,7 @@ builtin_core.rs
 設計方針:
 - **引数は評価済み `&[Value]`** — 引数評価自体は各engineが担当し、共通モジュールは評価済みの値だけ受け取る
 - **context builtinは評価前に共通検証** — `input` / `args` / `exit` / `push` / `pop` / `map` / `filter` / `each`は共通validatorでarityを検査する。`push` / `pop`は第1引数が識別子かも検査し、失敗時は引数を評価しない。VMはbuiltin branch内の`ValidateBuiltinCall` opcodeで実行時に検査する
-- **エンジン固有のビルトインは各モジュールに残す** — `push`/`pop`（binding更新）、`map`/`filter`/`each`（クロージャ呼び出し）、`print`/`input`/`exit`/`args`（I/O・プロセス操作）
+- **エンジン固有のビルトインは各モジュールに残す** — `push`/`pop`（binding更新）、`map`/`filter`/`each`（クロージャ呼び出し）、`print`/`input`/`exit`/`args`/`env`/`now`（I/O・プロセス操作・環境変数・時刻）
 - **user bindingをbuiltinより優先する** — `print`以外の識別子calleeはlocal/upvalue/runtime globalを先に探し、bindingがない場合だけbuiltinへfallbackする。VMは`JumpIfGlobalDefined`で実行時のglobal登録状態を分岐し、builtin branchとuser-call branchの評価順を混在させない
 - **破壊的List操作はbindingへ書き戻す** — builtin `push`/`pop`が選ばれた場合、第1引数はlocal/upvalue/runtime globalの識別子bindingに限定する。第1引数の値を先にsnapshotし、更新後のListを同じbindingへ書き戻す。一時Listは永続化先がないため拒否する
 - **builtin名の正本は単一registry** — language-visible builtin名は `builtin_registry.rs` の `PUBLIC_BUILTINS`（`BuiltinSpec` 配列）1か所で定義する（AUD-049）。tree の委譲判定（`is_pure_core_builtin`）、Compiler の builtin 判定（`is_builtin` → `is_public_builtin`）、context 判定（`is_context_builtin`）、VM の dispatch はすべてこの registry から導出し、手書きの名前一覧を持たない。VM の `CallBuiltin` opcode は名前文字列ではなく `BuiltinId` を保持するため、typo は compile 時に検出される。新規ビルトイン追加は「handler 実装（`builtin_core.rs` の `dispatch` アーム、または各engineのcontext実装）+ `BuiltinSpec` 1 entry + tests」に一本化される。内部命令 `__pop_update` は public registry へ置かず、`pop` の書き戻し専用 opcode `OpCode::PopUpdate` として実装するため source から到達できない。`builtin_registry` 内の contract test と `tests/builtin_registry_contract.rs` が、全 entry の一意性・往復・tree/VM の名前解決・`__pop_update` 非到達を自動検査する
@@ -663,7 +669,7 @@ builtin_core.rs
 
 - 既存の全機能が動く実装を壊さない安全弁
 - VM が段階的に育つ間、ユーザーは `--vm` なしで従来通り使える
-- 両方式の出力を比較するテストが書ける（将来）
+- 両方式の出力を比較するテストが書ける（`tests/differential.rs`、`fixture_tests!` が生成する tree / VM 両方の fixture テスト、`tests/canonical_error_inventory.rs`）
 
 #### OpCode の粒度
 
@@ -747,7 +753,7 @@ REPLの未捕捉エラーは、外部I/Oを含む完全なACID transactionでは
 
 ### コレクションサイズ上限
 
-`TSUMUGI_MAX_COLLECTION_SIZE`（デフォルト1,000,000）を、言語から到達するList/Dictの主要な生成・拡張経路へ共通適用する。チェックは可能な限り追加前に行い、上限超過時は`ErrorKind::CollectionLimit`を返す。
+`BudgetConfig::max_collection_elements`（既定1,000,000。CLIでは非推奨の`TSUMUGI_MAX_COLLECTION_SIZE`で上書きできる）を、言語から到達するList/Dictの主要な生成・拡張経路へ共通適用する。チェックは可能な限り追加前に行い、上限超過時は`ErrorKind::CollectionLimit`を返す。
 
 対象にはliteral、`push`、辞書の新規キー、`range`、`split`、`read_lines`、`keys`/`values`、`map`/`filter`、`list_dir`、for用変換を含む。文字列のbyte数や全Valueの総メモリ量を追跡するglobal heap quotaではない。
 
