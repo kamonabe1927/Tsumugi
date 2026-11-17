@@ -158,17 +158,20 @@ impl Evaluator {
         mut evaluated: Vec<Value>,
         line: usize,
     ) -> Result<Option<Value>, TsumugiError> {
-        // filesystem host call の count + request bytes（書き込み内容）を、境界へ
-        // 入る（副作用が始まる）前に課金する（§6.1、REV-015 Slice 2）。read 系は
-        // request 0 byte。
+        // filesystem host call（14 個すべて）の count + request bytes（書き込み内容）を、境界へ
+        // 入る（副作用が始まる）前に課金する（§6.1、REV-015 Slice 2、fix-fs-builtin-host-call-charge）。
+        // write/append 以外は request 0 byte。監査の triple を出すのは 4 つだけ。
         let is_host_call = crate::builtin_core::is_host_call_builtin(name);
+        let emits_triple = crate::builtin_core::emits_host_call_triple(name);
         // request byte 数は課金と、Phase 6 の host-call lifecycle 監査（HostCallStarted /
         // request payload）で共有する。非 host-call は 0。
         let request_bytes_for_audit = if is_host_call {
-            // §7.3: host call の開始前に accumulator を flush する。host call より前の消費の
-            // `BudgetCharged` が、この host call の `HostCallStarted` より前に出る。host call 自身の
-            // 課金（以降の request・response）は次の flush 点で出る。
-            self.flush_charges_into_audit_events();
+            if emits_triple {
+                // §7.3: host call の開始前に accumulator を flush する。host call より前の消費の
+                // `BudgetCharged` が、この host call の `HostCallStarted` より前に出る。host call
+                // 自身の課金（以降の request・response）は次の flush 点で出る。
+                self.flush_charges_into_audit_events();
+            }
             // write/append の非 Str 内容は予算付きで 1 回だけ描画し、request bytes・書き込み内容・
             // 監査の body で共有する。描画の fuel は host call 自身の課金（flush の後）。
             crate::builtin_core::render_fs_content_budgeted(name, &mut evaluated, &mut self.budget)
@@ -245,7 +248,7 @@ impl Evaluator {
             // するときだけ emission され、sink 無し経路は drain しない（opt-in、byte 不変）。
             // 既存の制御フロー（成功時 response byte 課金・error 伝播）は triple を積んだ後
             // も厳密に保つため、`fs_result` を `?` で畳む前に triple を構築・push する。
-            if is_host_call {
+            if emits_triple {
                 let response_bytes = match &fs_result {
                     Ok(value) => crate::builtin_core::host_call_response_bytes(name, value),
                     Err(_) => 0,

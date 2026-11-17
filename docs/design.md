@@ -641,7 +641,7 @@ builtin_core.rs
 │   Filesystem 未 grant なら adapter/OS call なしで sandbox error）
 ├── resolve_env, resolve_now, resolve_input, resolve_print, resolve_exit
 │   （env / clock / 標準入出力 / exit。注入された capability だけを使い、未 grant なら capability error）
-├── is_host_call_builtin, host_call_triple, ...（host function 呼び出しの共有処理）
+├── is_host_call_builtin, emits_host_call_triple, host_call_triple, ...（host function 呼び出しの共有処理）
 ├── check_arity, check_arity_count, is_context_builtin,
 │   validate_context_builtin_call, assign_index（共通検査・共有処理）
 └── format_unix_timestamp, is_leap_year（ヘルパー）

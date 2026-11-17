@@ -2154,9 +2154,9 @@ impl Vm {
         mut args: Vec<Value>,
         line: usize,
     ) -> Result<Value, TsumugiError> {
-        // filesystem host call の count + request bytes を、境界へ入る（副作用が始まる）
+        // filesystem host call（14 個すべて）の count + request bytes を、境界へ入る（副作用が始まる）
         // 前に課金する（§6.1、REV-015 Slice 2、I-O accounting）。tree engine（builtin.rs
-        // の PureCore wrapper）と同じ論理位置・同じ規則で課金する。read 系は request 0 byte。
+        // の PureCore wrapper）と同じ論理位置・同じ規則で課金する（14 個すべて。write/append 以外は request 0 byte）。
         let is_host_call = crate::builtin_core::is_host_call_builtin(name);
         if is_host_call {
             // write/append の非 Str 内容は予算付きで 1 回だけ描画してから request を課金する
