@@ -310,7 +310,7 @@ fixture 追加手順は、`.tsg` と期待ファイルを置き、`fixture_tests
 
 `tests/defensive_vm.rs` は、library利用者が不正な `Chunk` を公開APIへ渡してもホストプロセスが落ちないことを検証する（AUD-023）。`tsumugi::` の公開APIだけを使い、手組みのbytecodeを `VerifiedChunk::from_trusted` で検証を迂回して `Vm::new` / `Vm::run_repl_chunk`（どちらも `VerifiedChunk` を取る）へ渡す（REV-006）。
 
-固定している区分は次のとおり。範囲外のlocal slot読み書き・定数参照・upvalue参照、stackが足りない `FStrConcat` / `PopN` / `Print` / `CallBuiltin` / `ListPushBinding`、範囲外の prototype を指す `MakeClosure`、行番号表が空のChunk、`dispatch` へ到達する `try` 命令、ループの外の `break` / `continue` 命令、印や引数の無い `JumpIfBuiltinMark` による builtin 呼び出し、REPLで失敗したChunkの巻き戻し。これらは`internal`などの構造化エラーで終わることを期待値とし、VM実装を修正前へ戻すと `index out of bounds` のpanicで失敗する。あわせて、`Jump` の自己ループ・後方 `Loop`・`PrepareCall` を省いた再帰が watchdog・fuel・深度の上限で有限停止し、watchdog の上限到達を `try` で捕捉できないことも固定する。
+固定している区分は次のとおり。範囲外のlocal slot読み書き・定数参照・upvalue参照、stackが足りない `FStrConcat` / `PopN` / `Print` / `CallBuiltin` / `ListPushBinding`、範囲外の prototype を指す `MakeClosure`、行番号表が空のChunk、`dispatch` へ到達する `try` 命令、ループの外の `break` / `continue` 命令、印や引数の無い `JumpIfBuiltinMark` による builtin 呼び出し、REPLで失敗したChunkの巻き戻し。これらはhost panicせず`internal`などの構造化エラーで終わることを期待値とする（AUD-023の修正の記録は変更履歴の章にある）。あわせて、`Jump` の自己ループ・後方 `Loop`・`PrepareCall` を省いた再帰が watchdog・fuel・深度の上限で有限停止し、watchdog の上限到達を `try` で捕捉できないことも固定する。
 
 ### registry契約テスト
 
