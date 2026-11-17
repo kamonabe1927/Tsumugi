@@ -65,6 +65,18 @@ const TEN: [(&str, &str); 10] = [
     ("rename", "rename(\"@d/f\", \"@d/g\")"),
 ];
 
+/// 呼び出しを、存在しない path を指して host error になる形に直す。`mkdir` は親が無い path、
+/// `remove_tree` は存在しない directory を指す（そのままでは成功してしまうため）。
+fn host_error_call(name: &str, call: &str) -> String {
+    match name {
+        "mkdir" => "mkdir(\"@d/nodir/x\")".to_string(),
+        "remove_tree" => "remove_tree(\"@d/missing\")".to_string(),
+        _ => call
+            .replace("@d/f", "@d/missing")
+            .replace("@d/sub", "@d/missing"),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Grant {
     Full,
@@ -147,9 +159,7 @@ fn fhc_at_02_each_builtin_counts_one_host_call() {
     for use_vm in [false, true] {
         let mode = if use_vm { "VM" } else { "tree" };
         for (name, call) in TEN {
-            let missing = call
-                .replace("@d/f", "@d/missing")
-                .replace("@d/sub", "@d/missing");
+            let missing = host_error_call(name, call);
             let malformed = call.replace("@d/", "nomount/");
             let cases = [
                 ("成功", call.to_string(), Grant::Full),
@@ -160,6 +170,14 @@ fn fhc_at_02_each_builtin_counts_one_host_call() {
             ];
             for (label, call, grant) in cases {
                 let dir = TestDir::new();
+                if label == "host error" && !matches!(name, "path_exists" | "is_file" | "is_dir") {
+                    // 述語の 3 個は存在しない path でも false を返し error にならない。
+                    // 守りの try を外すと実際にエラーで止まる（host error の経路を通っている）。
+                    let (raw, raw_usage) =
+                        run_engine(&format!("{call}\n"), &dir.path, grant, use_vm);
+                    assert!(raw.is_err(), "[{mode}] {name}: host error にならない");
+                    assert_eq!(raw_usage.committed.host_calls, 1, "[{mode}] {name}");
+                }
                 let (result, usage) = run_engine(&guarded(&call), &dir.path, grant, use_vm);
                 result.unwrap_or_else(|e| panic!("[{mode}] {name} {label}: {e}"));
                 assert_eq!(
@@ -191,11 +209,7 @@ fn fhc_at_03_byte_accounting() {
             for (label, grant, call) in [
                 ("grant 無し", Grant::Absent, call.to_string()),
                 ("操作の許可無し", Grant::ReadOnly, call.to_string()),
-                (
-                    "host error",
-                    Grant::Full,
-                    call.replace("@d/sub", "@d/missing"),
-                ),
+                ("host error", Grant::Full, host_error_call(name, call)),
             ] {
                 let dir = TestDir::new();
                 let (result, usage) = run_engine(&guarded(&call), &dir.path, grant, use_vm);

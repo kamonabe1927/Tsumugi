@@ -583,7 +583,7 @@ order      = 40
 
 [[slice]]
 id         = "audit-fs-builtin-scope"
-title      = "fs builtin 全体の監査範囲（rename ほか非課金 fs builtin への監査 triple 拡張）"
+title      = "fs builtin 全体の監査範囲（rename ほか triple を出さない fs builtin への監査 triple 拡張）"
 status     = "todo"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
