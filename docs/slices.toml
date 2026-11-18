@@ -1051,9 +1051,10 @@ order      = 107
 [[slice]]
 id         = "fix-handle-execution-rollback"
 title      = "scheduler の handle 経路のすべての execution を transaction にし、未捕捉 error・cancel・deadline の terminal と非 terminal の drop で language-state を execution 開始時点へ rollback する（execution-control §9.1・§10、AUD-024、issue #431）"
-status     = "ready"
+status     = "done"
 parent     = "REV-008"
 spec       = { doc = "docs/execution-control.md", section = "fix-handle-execution-rollback 実装スライス（scheduler の handle 経路の失敗の terminal で language-state を execution 開始時点へ rollback する）" }
 acceptance = ["HER-AT-01..05"]
 design_pr  = 436
+impl_pr    = 440
 order      = 108

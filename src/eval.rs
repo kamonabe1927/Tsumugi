@@ -707,7 +707,8 @@ struct RunSession {
     newly_loaded: Vec<crate::module::LoadedModule>,
     /// 実行完了しなかったとき未展開へ戻す、graph から新しく展開した module（capability-model §10）。
     newly_expanded: Vec<crate::embedding::ModuleId>,
-    /// REPL transaction 経路か（未捕捉エラーで language-state を rollback する。AUD-024）。
+    /// transaction 経路か（未捕捉エラー・cancel・deadline・drop で language-state を execution
+    /// 開始時点へ rollback する。AUD-024）。scheduler の handle 経路・facade・REPL はすべて true。
     transactional: bool,
 }
 
