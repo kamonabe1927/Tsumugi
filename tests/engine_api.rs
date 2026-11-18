@@ -1138,6 +1138,8 @@ fn new_with_clock_rejects_foreign_clock() {
 
 /// 非 terminal の handle を drop すると cancel が linearize され、rollback が blocking なしで
 /// 完了する（設計 §4.8、AC-5 の smoke）。drop 後も同じ context の cancel 済み状態を観測できる。
+/// language-state の rollback は `src/engine.rs` の単体テスト `her_at_03_*` が binding を直接読んで
+/// 確かめる（fix-handle-execution-rollback）。
 #[test]
 fn nonterminal_drop_cancels_and_rolls_back_without_blocking() {
     let engine = Engine::new();
@@ -2913,4 +2915,161 @@ print(f())
         assert!(matches!(outcome, EmbeddingOutcome::Completed { .. }));
         assert_eq!(stdout, "[1, 2]\n[1, 2]\n");
     }
+}
+
+// =============================================================================
+// fix-handle-execution-rollback: handle 経路の transaction（execution-control §9.1・§10）
+// =============================================================================
+
+fn her_prepared_context(engine: &Engine) -> ExecutionContext {
+    let mut context = ExecutionContext::new();
+    let script = engine.compile("let a = 1\nlet xs = [1]\n").unwrap();
+    assert_eq!(
+        engine.execute(&script, &mut context),
+        Ok(ExecutionOutcome::Completed)
+    );
+    context
+}
+
+/// `a == 1`・`len(xs) == 1` が成り立ち、`b` が未定義であること（後続の `execute` で確かめる）。
+fn her_assert_rolled_back(engine: &Engine, context: &mut ExecutionContext) {
+    let ok = engine
+        .compile("if a != 1 or len(xs) != 1\n  nope\nend\n")
+        .unwrap();
+    assert_eq!(
+        engine.execute(&ok, context),
+        Ok(ExecutionOutcome::Completed)
+    );
+    let b = engine.compile("let c = b\n").unwrap();
+    assert!(engine.execute(&b, context).is_err(), "b は未定義");
+}
+
+// HER-AT-01（予算超過の rollback は src/engine.rs の単体テストで確かめる）
+#[test]
+fn her_at_01_execute_error_rolls_back_language_state() {
+    let engine = Engine::new();
+    let mut context = her_prepared_context(&engine);
+    let failing = engine
+        .compile("a = 10\nlet b = 2\npush(xs, 2)\nnope\n")
+        .unwrap();
+    assert!(engine.execute(&failing, &mut context).is_err());
+    her_assert_rolled_back(&engine, &mut context);
+}
+
+// HER-AT-02（RuntimeError。cancel・deadline は src/engine.rs の単体テスト）
+#[test]
+fn her_at_02_runtime_error_across_yields_rolls_back_for_create_and_start() {
+    let engine = Engine::new();
+    let source = "a = 10\nlet b = 2\nlet i = 0\nwhile i < 100\n  i = i + 1\nend\nnope\n";
+    let script = engine.compile(source).unwrap();
+    for use_start in [false, true] {
+        let mut context = her_prepared_context(&engine);
+        {
+            let mut handle = if use_start {
+                engine.start(&script, &mut context, ExecutionRequest::new())
+            } else {
+                engine.create_execution(&script, &mut context, ExecutionRequest::new())
+            }
+            .expect("admit");
+            let mut yields = 0;
+            let outcome = loop {
+                match handle.poll(PollSlice { max_fuel: 16 }).unwrap() {
+                    PollResult::Yielded { .. } => yields += 1,
+                    PollResult::Terminal { outcome, .. } => break outcome,
+                    other => panic!("想定外: {other:?}"),
+                }
+            };
+            assert!(yields >= 2);
+            assert!(matches!(outcome, ExecutionOutcome::RuntimeError { .. }));
+        }
+        her_assert_rolled_back(&engine, &mut context);
+    }
+}
+
+// HER-AT-03（drop の rollback は src/engine.rs の単体テストで確かめる。token の cancel はここでも見る）
+#[test]
+fn her_at_03_nonterminal_drop_cancels_token() {
+    let engine = Engine::new();
+    let script = engine
+        .compile("a = 10\nlet b = 2\nlet i = 0\nwhile i < 100\n  i = i + 1\nend\n")
+        .unwrap();
+    let mut context = her_prepared_context(&engine);
+    let token = {
+        let mut handle = engine
+            .create_execution(&script, &mut context, ExecutionRequest::new())
+            .unwrap();
+        let _ = handle.poll(PollSlice { max_fuel: 16 }).unwrap();
+        handle.cancellation_token()
+    };
+    assert!(token.is_cancelled());
+}
+
+// HER-AT-04
+#[test]
+fn her_at_04_success_terminals_commit_and_outcome_classes_are_unchanged() {
+    use tsumugi::{CapabilitySet, ProcessExit};
+    let engine = Engine::new();
+    let poll_all = |script: &tsumugi::CompiledScript, context: &mut ExecutionContext| {
+        let mut handle = engine
+            .create_execution(script, context, ExecutionRequest::new())
+            .unwrap();
+        loop {
+            if let PollResult::Terminal { outcome, .. } =
+                handle.poll(PollSlice { max_fuel: 16 }).unwrap()
+            {
+                return outcome;
+            }
+        }
+    };
+
+    // Completed と、try で catch したあとの Completed は commit する。
+    let mut context = her_prepared_context(&engine);
+    let script = engine
+        .compile("a = 10\nlet b = 2\npush(xs, 2)\ntry\n  nope\ncatch e\n  b = 3\nend\n")
+        .unwrap();
+    assert_eq!(poll_all(&script, &mut context), ExecutionOutcome::Completed);
+    let check = engine
+        .compile("if a != 10 or b != 3 or len(xs) != 2\n  nope\nend\n")
+        .unwrap();
+    assert_eq!(
+        engine.execute(&check, &mut context),
+        Ok(ExecutionOutcome::Completed)
+    );
+
+    // exit の ProcessExit は commit する。
+    let mut context = her_prepared_context(&engine);
+    context.set_capabilities(
+        CapabilitySet::builder()
+            .process_exit(ProcessExit::new(std::num::NonZeroU128::new(1).unwrap()))
+            .unwrap()
+            .build(),
+    );
+    let script = engine.compile("a = 10\nlet b = 2\nexit(3)\n").unwrap();
+    let _ = poll_all(&script, &mut context);
+    assert_eq!(context.take_pending_exit(), Some(3));
+    assert_eq!(
+        engine.execute(&check_a_b(&engine), &mut context),
+        Ok(ExecutionOutcome::Completed)
+    );
+
+    // Link の失敗は LinkError のまま、context を変えず、解決マーカーも残さない。
+    let mut context = her_prepared_context(&engine);
+    let link = engine.compile("import \"__no_such_module__\"\n").unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            poll_all(&link, &mut context),
+            ExecutionOutcome::LinkError { .. }
+        ));
+    }
+    her_assert_rolled_back(&engine, &mut context);
+
+    // execute_repl_submission の Link の失敗は今と同じく Err。
+    assert!(engine.execute_repl_submission(&link, &mut context).is_err());
+    her_assert_rolled_back(&engine, &mut context);
+}
+
+fn check_a_b(engine: &Engine) -> tsumugi::CompiledScript {
+    engine
+        .compile("if a != 10 or b != 2\n  nope\nend\n")
+        .unwrap()
 }

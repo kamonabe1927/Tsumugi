@@ -165,7 +165,7 @@ impl Engine {
             request,
             state,
             outcome: None,
-            transactional: false,
+            repl_submission: false,
             started: false,
             shared,
             slot_id,
@@ -186,6 +186,7 @@ impl Engine {
     /// 戻り値契約は従来どおり: 正常完了なら [`ExecutionOutcome::Completed`]、失敗なら
     /// その [`TsumugiError`] を `Err` で返す。構造化 terminal（`RuntimeError` /
     /// `LinkError` の `usage` 付き）は [`ExecutionHandle::poll`] で観測できる。
+    /// `Err` を返したときは、context の language-state を execution 開始時点へ戻す（§10）。
     ///
     /// `ExecutionContext` はスレッド局所の評価状態を保持するため、十分なスタックを
     /// 持つ同一スレッド内で生成・利用する。CLI はツリーウォークの再帰評価のために
@@ -210,8 +211,9 @@ impl Engine {
     /// 入力開始時点へ巻き戻す。正常完了と catch されて完了した入力は commit する。
     /// stdout やファイル書き込みなどの外部効果は巻き戻さない。
     ///
-    /// PR-a では handle を terminal まで poll する互換 wrapper であり、内部で
-    /// transaction 経路（`run_repl_submission`）を使う。
+    /// handle を terminal まで poll する互換 wrapper である。transaction は handle 経路の
+    /// すべての execution が張るので [`Self::execute`] と同じで、違いは Link の失敗も
+    /// `RuntimeError` の terminal にする点だけである。
     pub fn execute_repl_submission(
         &self,
         script: &CompiledScript,
@@ -221,7 +223,7 @@ impl Engine {
         let mut handle = self
             .create_execution(script, context, request)
             .map_err(Self::start_error_to_tsumugi_error)?;
-        handle.transactional = true;
+        handle.repl_submission = true;
         Self::drive_to_outcome(&mut handle)
     }
 
@@ -585,8 +587,10 @@ pub struct ExecutionHandle<'engine, 'script, 'context> {
     request: ExecutionRequest,
     state: ExecutionState,
     outcome: Option<ExecutionOutcome>,
-    /// REPL 用に transaction 経路（`run_repl_submission`）で実行するか。
-    transactional: bool,
+    /// REPL の 1 入力（[`Engine::execute_repl_submission`]）か。true なら Link の失敗も
+    /// `RuntimeError` の terminal にする（REPL の約束）。language-state の transaction は
+    /// この flag と関係なく、handle 経路のすべての execution が張る（§10、AUD-024）。
+    repl_submission: bool,
     /// 実行セッションを開始済みか（REV-015 Slice 3 PR-d-2）。初回 poll で `begin_execution`
     /// を呼んで true にし、以降の poll は `run_slice` で resume する。
     started: bool,
@@ -967,15 +971,17 @@ impl ExecutionHandle<'_, '_, '_> {
     /// [`SlicePoll::Yielded`] を返し、terminal に達すると [`SlicePoll::Terminal`] を返す。
     fn drive_one_slice(&mut self, slice_fuel: u64) -> SlicePoll {
         let source_bytes = self.script.source_bytes;
-        let transactional = self.transactional;
+        let repl_submission = self.repl_submission;
 
         if !self.started {
             // 初回 poll: link + Link フェーズ課金 + root frame push。まだ 1 文も実行しない。
+            // handle 経路のすべての execution は transaction（submission journal を開始時点で
+            // 張り、Completed / exit は commit、それ以外の terminal と drop は rollback。§10）。
             let program = &self.script.program;
             match self
                 .context
                 .evaluator
-                .begin_execution(program, source_bytes, transactional)
+                .begin_execution(program, source_bytes, true)
             {
                 Ok(()) => {
                     self.started = true;
@@ -988,9 +994,9 @@ impl ExecutionHandle<'_, '_, '_> {
                         Some(crate::error::ErrorKind::DeadlineExceeded) => {
                             ExecutionOutcome::DeadlineExceeded
                         }
-                        // それ以外の Link 失敗は terminal。transaction 経路は Link/Run を
+                        // それ以外の Link 失敗は terminal。REPL の入力は Link/Run を
                         // 区別せず RuntimeError。
-                        _ if transactional => ExecutionOutcome::RuntimeError { error },
+                        _ if repl_submission => ExecutionOutcome::RuntimeError { error },
                         _ => match phase {
                             RunPhase::Link => ExecutionOutcome::LinkError { error },
                             RunPhase::Run => ExecutionOutcome::RuntimeError { error },
@@ -1065,5 +1071,307 @@ impl Drop for ExecutionHandle<'_, '_, '_> {
         //    poison しない（正常な cancel 終了、§4.8 step 4 / §10 規則4）。
         // 5. slot 解放は末尾 field `slot: AdmissionSlot` の drop で 1 個だけ行われる（step 5、§4.1）。
         //    Terminal の handle は finish_terminal で解放済みで、この drop 経路には来ない。
+    }
+}
+
+/// fix-handle-execution-rollback（HER-AT-01..04）: handle 経路の失敗の terminal と drop で
+/// language-state が execution 開始時点へ戻ることを、評価器の binding を直接読んで確かめる。
+/// cancel・drop のあとは context の token が cancel 済みのまま残るので、次の `execute` では
+/// 読めない。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::budget::{BudgetConfig, FakeClock};
+    use crate::value::Value;
+
+    const PREPARE: &str = "let a = 1\nlet xs = [1]\n";
+    /// 途中まで実行した状態（代入・新規 binding・mutation）を残してから、最後に失敗する。
+    const FAILING: &str =
+        "a = 10\nlet b = 2\npush(xs, 2)\nlet i = 0\nwhile i < 100\n  i = i + 1\nend\nnope\n";
+
+    fn binding(context: &ExecutionContext, name: &str) -> Option<Value> {
+        context.evaluator.env.get(name)
+    }
+
+    fn assert_rolled_back(context: &ExecutionContext) {
+        assert!(matches!(binding(context, "a"), Some(Value::Int(1))), "a");
+        match binding(context, "xs") {
+            Some(Value::List(xs)) => assert_eq!(xs.len(), 1, "xs"),
+            other => panic!("xs を期待: {other:?}"),
+        }
+        assert!(binding(context, "b").is_none(), "b は未定義");
+        assert!(binding(context, "i").is_none(), "i は未定義");
+    }
+
+    fn prepared(engine: &Engine, mut context: ExecutionContext) -> ExecutionContext {
+        let script = engine.compile(PREPARE).unwrap();
+        assert_eq!(
+            engine.execute(&script, &mut context),
+            Ok(ExecutionOutcome::Completed)
+        );
+        context
+    }
+
+    fn yield_twice(handle: &mut ExecutionHandle<'_, '_, '_>) {
+        for _ in 0..2 {
+            match handle.poll(PollSlice { max_fuel: 16 }).unwrap() {
+                PollResult::Yielded { .. } => {}
+                other => panic!("yield を期待: {other:?}"),
+            }
+        }
+    }
+
+    fn poll_to_terminal(handle: &mut ExecutionHandle<'_, '_, '_>) -> ExecutionOutcome {
+        loop {
+            if let PollResult::Terminal { outcome, .. } =
+                handle.poll(PollSlice { max_fuel: 16 }).unwrap()
+            {
+                return outcome;
+            }
+        }
+    }
+
+    // HER-AT-01
+    #[test]
+    fn her_at_01_execute_rolls_back_on_runtime_error_and_budget_exceeded() {
+        let engine = Engine::new();
+        let mut context = prepared(&engine, ExecutionContext::new());
+        let script = engine.compile(FAILING).unwrap();
+        assert!(engine.execute(&script, &mut context).is_err());
+        assert_rolled_back(&context);
+
+        // 予算超過（fuel）で止まった execution も rollback する。
+        let small = ExecutionContext {
+            evaluator: Evaluator::with_budget(BudgetConfig::for_legacy(400, 1_000)),
+        };
+        let mut context = prepared(&engine, small);
+        let loops = engine
+            .compile("a = 10\nlet b = 2\npush(xs, 2)\nlet i = 0\nwhile true\n  i = i + 1\nend\n")
+            .unwrap();
+        assert!(engine.execute(&loops, &mut context).is_err());
+        assert_rolled_back(&context);
+    }
+
+    // HER-AT-02
+    #[test]
+    fn her_at_02_runtime_error_across_yields_rolls_back_for_create_and_start() {
+        let engine = Engine::new();
+        let script = engine.compile(FAILING).unwrap();
+        for use_start in [false, true] {
+            let mut context = prepared(&engine, ExecutionContext::new());
+            {
+                let mut handle = if use_start {
+                    engine.start(&script, &mut context, ExecutionRequest::new())
+                } else {
+                    engine.create_execution(&script, &mut context, ExecutionRequest::new())
+                }
+                .expect("admit");
+                yield_twice(&mut handle);
+                assert!(matches!(
+                    poll_to_terminal(&mut handle),
+                    ExecutionOutcome::RuntimeError { .. }
+                ));
+            }
+            assert_rolled_back(&context);
+        }
+    }
+
+    // HER-AT-02
+    #[test]
+    fn her_at_02_cancel_and_deadline_roll_back() {
+        let engine = Engine::new();
+        let script = engine.compile(FAILING).unwrap();
+
+        let mut context = prepared(&engine, ExecutionContext::new());
+        {
+            let mut handle = engine
+                .create_execution(&script, &mut context, ExecutionRequest::new())
+                .unwrap();
+            yield_twice(&mut handle);
+            handle.cancellation_token().cancel();
+            assert_eq!(poll_to_terminal(&mut handle), ExecutionOutcome::Cancelled);
+        }
+        assert_rolled_back(&context);
+
+        let clock = Arc::new(FakeClock::new());
+        let config = BudgetConfig::standard(clock.as_ref()).unwrap();
+        let mut evaluator = Evaluator::with_budget(config);
+        evaluator.set_deadline_clock(clock.clone());
+        let mut context = prepared(&engine, ExecutionContext { evaluator });
+        {
+            let mut handle = engine
+                .start(&script, &mut context, ExecutionRequest::new())
+                .unwrap();
+            yield_twice(&mut handle);
+            clock.advance(31 * 1_000_000_000);
+            assert_eq!(
+                poll_to_terminal(&mut handle),
+                ExecutionOutcome::DeadlineExceeded
+            );
+        }
+        assert_rolled_back(&context);
+    }
+
+    /// 一度も完了しない cooperative host function（`h()`）。
+    struct PendingHost {
+        descriptor: crate::host_function::HostFunctionDescriptor,
+    }
+
+    // completer は `Value`（`!Send`）を運ぶので、adapter（`Sync`）には持たせず thread_local に退避する。
+    thread_local! {
+        static COMPLETERS: std::cell::RefCell<Vec<crate::host_pending::HostCallCompleter<Value>>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    impl crate::host_function::CooperativeHostFunction for PendingHost {
+        fn descriptor(&self) -> &crate::host_function::HostFunctionDescriptor {
+            &self.descriptor
+        }
+        fn start(
+            &self,
+            _context: &mut crate::capability::CapabilityCallContext<'_>,
+            _arguments: &[Value],
+        ) -> crate::HostCallPoll<Value> {
+            let (ticket, completer) = crate::host_pending::new_ticket::<Value>(1);
+            COMPLETERS.with(|c| c.borrow_mut().push(completer));
+            crate::HostCallPoll::Pending(ticket)
+        }
+    }
+
+    fn host_context() -> ExecutionContext {
+        use crate::host_function::{Arity, HostCost, HostFunctionDescriptor, HostFunctionRegistry};
+        let id = crate::HostFunctionId::new(std::num::NonZeroU128::new(1).unwrap());
+        let adapter = Arc::new(PendingHost {
+            descriptor: HostFunctionDescriptor {
+                id,
+                name: "h".to_string(),
+                arity: Arity::Exact(0),
+                cost: HostCost::default(),
+                argument_audit: Vec::new(),
+                result_audit: crate::AuditValuePolicy::Omit,
+                may_block: true,
+            },
+        });
+        let registry = HostFunctionRegistry::builder()
+            .register_cooperative(adapter)
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut context = ExecutionContext::new();
+        context.set_host_registry(Arc::new(registry));
+        context.set_capabilities(
+            crate::capability::CapabilitySet::builder()
+                .grant_host_function(id)
+                .unwrap()
+                .build(),
+        );
+        context
+    }
+
+    // HER-AT-03
+    #[test]
+    fn her_at_03_nonterminal_drop_rolls_back() {
+        let engine = Engine::new();
+        let script = engine.compile(FAILING).unwrap();
+        let host_script = engine
+            .compile("a = 10\nlet b = 2\npush(xs, 2)\nlet i = 0\nwhile i < 100\n  i = i + 1\nend\nlet r = h()\n")
+            .unwrap();
+
+        // Yielded(SliceFuelExhausted)
+        let mut context = prepared(&engine, ExecutionContext::new());
+        let token = {
+            let mut handle = engine
+                .create_execution(&script, &mut context, ExecutionRequest::new())
+                .unwrap();
+            yield_twice(&mut handle);
+            handle.cancellation_token()
+        };
+        assert!(token.is_cancelled());
+        assert_rolled_back(&context);
+
+        // Paused
+        let mut context = prepared(&engine, ExecutionContext::new());
+        let token = {
+            let mut handle = engine
+                .start(&script, &mut context, ExecutionRequest::new())
+                .unwrap();
+            yield_twice(&mut handle);
+            handle.pause().unwrap();
+            assert!(matches!(handle.state(), ExecutionState::Paused(_)));
+            handle.cancellation_token()
+        };
+        assert!(token.is_cancelled());
+        assert_rolled_back(&context);
+
+        // Yielded(HostCallPending)
+        let mut context = prepared(&engine, host_context());
+        let token = {
+            let mut handle = engine
+                .create_execution(&host_script, &mut context, ExecutionRequest::new())
+                .unwrap();
+            loop {
+                match handle.poll(PollSlice { max_fuel: 16 }).unwrap() {
+                    PollResult::Yielded {
+                        reason: YieldReason::HostCallPending { .. },
+                        ..
+                    } => break,
+                    PollResult::Yielded { .. } => {}
+                    other => panic!("yield を期待: {other:?}"),
+                }
+            }
+            handle.cancellation_token()
+        };
+        assert!(token.is_cancelled());
+        assert_rolled_back(&context);
+
+        // Created / Linked で drop しても binding は変わらない（token は cancel される）。
+        for use_start in [false, true] {
+            let mut context = prepared(&engine, ExecutionContext::new());
+            let token = {
+                let handle = if use_start {
+                    engine.start(&script, &mut context, ExecutionRequest::new())
+                } else {
+                    engine.create_execution(&script, &mut context, ExecutionRequest::new())
+                }
+                .unwrap();
+                handle.cancellation_token()
+            };
+            assert!(token.is_cancelled());
+            assert_rolled_back(&context);
+        }
+    }
+
+    // HER-AT-03（AdmissionQueued）
+    #[test]
+    fn her_at_03_admission_queued_drop_keeps_bindings() {
+        use std::num::{NonZeroU64, NonZeroUsize};
+        let engine = Engine::with_limits(EngineLimits {
+            max_active_executions: NonZeroUsize::new(1).unwrap(),
+            max_queued_executions: 1,
+            default_slice_fuel: NonZeroU64::new(10_000).unwrap(),
+        });
+        let script = engine.compile(FAILING).unwrap();
+        let mut active_context = ExecutionContext::new();
+        let _active = engine
+            .create_execution(&script, &mut active_context, ExecutionRequest::new())
+            .unwrap();
+        let mut context = prepared_unlimited(&engine);
+        let token = {
+            let handle = engine
+                .create_execution(&script, &mut context, ExecutionRequest::new())
+                .unwrap();
+            assert!(matches!(
+                handle.state(),
+                ExecutionState::Yielded(YieldReason::AdmissionQueued { .. })
+            ));
+            handle.cancellation_token()
+        };
+        assert!(token.is_cancelled());
+        assert_rolled_back(&context);
+    }
+
+    /// 同期 `execute` は active slot を使い終えて返すので、別 engine で下準備する。
+    fn prepared_unlimited(_engine: &Engine) -> ExecutionContext {
+        prepared(&Engine::new(), ExecutionContext::new())
     }
 }
