@@ -1057,3 +1057,23 @@ spec       = { doc = "docs/execution-control.md", section = "fix-handle-executio
 acceptance = ["HER-AT-01..05"]
 design_pr  = 436
 order      = 108
+
+# issue #365（kamonabe、不具合の報告。§8 の仕分けで「受け入れ」）から作った fix。VM の compile_for が反復列と位置を
+# __collection__ / __index__ という名前の local に置き、名前の解決が区別なく引くため、ループ本体（中の関数・lambda を含む）から
+# 読み書きでき、tree では未定義名になる差を、隠しローカルを名前の解決から外す形で直す（言語仕様「名前の可視性と解決時期」、
+# determinism-and-audit §2.1）。tree/VM の適合のスライスなので、fix-vm-builtin-call-lowering・fix-vm-loop-control-outside-loop と
+# 同じく determinism-and-audit §14 の Slice 6（VM conformance）に小節を置き、parent は Phase 5 残にした。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
+# （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A、PR #403・PR #408・PR #410・PR #412・PR #416・PR #419・
+# PR #423・PR #425・PR #436）と同じく、この PR では付け直しをせず、仮にすべてのスライスより後（109）に置いた。マージ後に PM が
+# 付け直しだけの状態整理 PR で 35 より前へ移す。
+# 見積もり: src/ 5〜30 行、触る仕組みは VM の for の隠しローカルの名前の解決 1 つ、受入基準 4。
+[[slice]]
+id         = "fix-vm-for-hidden-locals"
+title      = "VM の for の隠しローカル（反復列と位置）をスクリプトの名前の解決から外し、__index__ / __collection__ の読み書きを tree と同じ未定義名の error にする（言語仕様「名前の可視性と解決時期」、issue #365）"
+status     = "ready"
+parent     = "Phase 5 残"
+spec_slice = "determinism Slice 6"
+spec       = { doc = "docs/determinism-and-audit.md", section = "fix-vm-for-hidden-locals 実装スライス（VM の `for` の隠しローカルをスクリプトの名前から見えなくする）" }
+acceptance = ["VFH-AT-01..04"]
+order      = 109

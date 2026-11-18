@@ -1,6 +1,6 @@
 # Tsumugi 決定性・実行時監査仕様
 
-最終更新: 2026-11-03
+最終更新: 2026-11-18
 
 設計ステータス: **到達目標の確定仕様（§1〜§13）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -2137,6 +2137,50 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
   - **VLC-AT-03（catch できる範囲が tree と同じ）**: 同じ関数本体（トップレベルを含む）の `try` の中・`catch` ブロックの中・入れ子の `try` の中の `break` / `continue` を、その `try` が catch しない。関数の境界の外の `try`（呼び出し元・callback を呼んだ builtin の呼び出し元）が catch でき、`e["type"]` が `control_flow`、`e["line"]` が文の行で、catch の後の文が両 backend で同じように実行される。外した handler が残って後の error を誤って catch しない（`try` の中で `break` に到達して catch された後に、別の error を起こす）。確かめ方: differential test と golden fixture（tree・VM の両方で実行される fixture）。
   - **VLC-AT-04（REPL と既存挙動）**: REPL で、ループの外の `break` を含む入力が、それより前の出力を出してから error になり、その入力が加えた binding を rollback し、次の入力が両 backend で同じように続く。既存の `error_break_outside_loop`・`error_continue_outside_loop`・`try_break_continue`・`break_continue` fixture、`tests/differential.rs`・`tests/defensive_vm.rs` が無改変で緑。足した・意味を変えた命令について、`src/verifier.rs` が compiler の出力を受け入れ、手組みの不正な Chunk を VM が panic せず `internal` error にする。確かめ方: REPL の paired test、既存 test、verifier と `tests/defensive_vm.rs` への追加。
 - **想定の変更規模**: `src/compiler.rs` 約 30〜60 行（ループの外の `break` / `continue` の lowering、関数本体ごとの `try` の深さ）、`src/vm.rs` 約 20〜50 行（error を出す命令と trace の扱い）、`src/opcode.rs`・`src/verifier.rs`・`src/chunk.rs` 合わせて約 10〜30 行。合わせて約 60〜140 行。テストは differential test・CLI の paired test・fixture・verifier で約 200〜350 行。触る仕組みは VM のループ制御の lowering 1 つ、受入基準は 4 項目。
+
+#### fix-vm-for-hidden-locals 実装スライス（VM の `for` の隠しローカルをスクリプトの名前から見えなくする）
+
+> 状態: **未実装**（設計のみ）。issue #365（kamonabe、仕分け「受け入れ」）から作った `fix` スライス。[言語仕様](language-spec.md)「名前の可視性と解決時期」（この設計 PR で、`for` が内部で持つ状態はスクリプトの名前から読み書きできないことを書き足した）と、§2.1 の適合方針（tree が規範）を、VM の `for` の lowering で満たす。
+
+設計時点（main `69ab342`、debug build の CLI）の事実:
+
+- VM の Compiler（`src/compiler.rs` の `compile_for`）は、反復列と位置を `add_local("__collection__")`・`add_local("__index__")` で名前付きの local slot に置く。名前の解決（`resolve_local`・`resolve_upvalue`、子の Compiler へ渡す `build_ancestor_vars`）は local の名前を区別なく引くので、ループ本体と、本体の中で作った関数・lambda から、この 2 つの名前で slot を読み書きできる。`__index__` も `__collection__` も字句解析では通常の識別子である（`_` で始まる英数字の並び）。
+- tree（`src/eval.rs`）は反復列と位置を frame（`FrameKind::For`）に持ち、名前の binding を作らない。
+- 名前を引く compiler 内部の local は、ほかに lambda の slot 0 の `<lambda>` があるが、`<` を含むので識別子として書けず、スクリプトから引けない。非公開 builtin の `__pop_update` は、両 backend とも `未定義の変数または関数: __pop_update` になる（差は無い）。
+- 再現（`--vm` と tree の比較。tree の error は終了コード 1）:
+
+| script | tree | VM（今） |
+|---|---|---|
+| `for x in ["a", "b"]` の本体で `print(__index__)` | `2行目: 未定義の変数または関数: __index__` | `0`・`1` を出して終了コード 0 |
+| 本体で `print(__collection__)` | 同じく `未定義の変数または関数: __collection__` | 反復列 `[1, 2]` を 2 回出す |
+| 本体で `print(x)` の後に `__index__ = 3`（要素 4 個） | `a` を出してから `3行目: 未定義の変数に代入: __index__` | `a` だけ出して終了コード 0（反復を飛ばす） |
+| 本体で `__collection__ = [9, 9, 9]` の後に `print(x)` | `2行目: 未定義の変数に代入: __collection__` | `1`・`9`・`9`（反復列を差し替える） |
+| 本体で `__collection__ = 5` | 同じく代入の error | `1行目: len の第 1 引数は List/Str/Dict である必要があります: Int`（`for` の行の、script に無い操作の error） |
+| 本体で `__index__ = -5` の後に `print(x)` | 代入の error | `1` を出してから `1行目: List のインデックスが範囲外です: -4 (長さ: 2)` |
+| 本体で `try print(__index__) catch e print(e["type"]) end` | `name` を 2 回 | `0`・`1`（catch しない） |
+| 本体の lambda が `__index__` を返し、本体で呼ぶ | `未定義の変数または関数: __index__` と `in <lambda>() (3行目)` | `0`・`1` |
+| 関数の中の `for` の本体の lambda が `__collection__` を返す | 同じく未定義名の error と trace | `[1]` |
+| `let __index__ = 10` の後の `for` の本体と `for` の後で `print(__index__)` | `10` を 3 回 | `0`・`1`・`10`（利用者の binding を隠す） |
+| ループ変数の名前が `__index__`（`for __index__ in [7, 8]`） | `7`・`8` | `7`・`8`（差なし。ループ変数の slot が後に積まれるため） |
+
+- **実装範囲**:
+  - `compile_for` が反復列と位置のために作る 2 つの local を、スクリプトの名前の解決（`resolve_local`・`resolve_upvalue`・`build_ancestor_vars` を通る、読み・代入・upvalue の捕捉のすべて）から引けないようにする。slot の番号・`GetLocal` / `LenLocal` / `IndexLocal` / `SetLocal` で slot を直接指す今の lowering は変えない。引けなくする方法（識別子として字句解析できない名前にする、`Local` に「名前で引かない」印を持たせる、など）は実装 PR で決めてよい（compiler の内部で、公開 API・bytecode の形を変えない）。
+  - 結果として、本体（入れ子の関数・lambda を含む）の `__index__` / `__collection__` は、ほかの名前と同じく、外側に利用者の binding があればそれに、無ければ global に解決され、どちらも無ければ tree と同じ `name` の runtime error（`未定義の変数または関数` / `未定義の変数に代入`）になる。
+- **変えないもの**: tree の挙動（このスライスは VM だけを tree に合わせる）。この 2 つの名前を書かない script の bytecode（命令列・定数・local の数）と、その出力・fuel・step・heap / peak_heap。`for` の反復の課金（execution-control §5.2・§5.3、`tests/for_iter_charge.rs`・`tests/for_iter_copy_order.rs`）、反復ごとに新しいセルへ bind するループ変数の規則（言語仕様「ブロックスコープ」）。
+- **範囲外**:
+  - `_` で始まる名前を予約語にする・識別子として禁じること。言語仕様の字句の目標を変える言語挙動の変更で、tree も変わる。issue #365 の期待（tree と同じく未定義になる）はこのスライスで満たせる。
+  - 非公開 builtin（`__pop_update` など）の名前。設計時点で両 backend とも未定義名になり、差が無い。
+  - `while` の lowering、`for` の反復列の作り方（`ToIterList`）と課金。
+- **不採用案**:
+  - 隠しローカルを tree にも作り、両 backend で読めるようにする: 処理系の内部状態を言語の名前として公開することになり、スクリプトが反復の位置・反復列を書き換えて `for` の意味を変えられる（上の表の VM の動き）。言語仕様「ループ」の `for` の目標（各要素を順に bind する）に無い挙動で、manifesto 原則 8（小さく理解可能な中核）にも沿わない。
+  - parser で `__` で始まる識別子を拒否する: 上の範囲外のとおり言語挙動の変更で、既存の script（`let __index__ = 10` など、tree で今動くもの）を両 backend で拒否するようになる。
+- **done PR で行う逸脱一覧の更新**: [言語仕様](language-spec.md)の逸脱一覧の「`--vm` 版の `for` が、反復列と位置を `__collection__` / `__index__` という名前の…」の行を削除する（本書の逸脱一覧には行を置いていない）。
+- **受入基準**:
+  - **VFH-AT-01（読めない）**: トップレベル・関数本体・入れ子の `for`・本体の中の lambda と関数（upvalue の捕捉）・関数の中の `for` の本体の lambda で、`__index__` / `__collection__` を読むと、VM が tree と同じ kind・message・行・call trace・終了コードの `name` error になり、それより前の出力も一致する。本体の `try` で catch でき、`e["type"]` が `name` で、catch の後の文が両 backend で同じように実行される。確かめ方: tree/VM の differential test（`tests/differential.rs` かこのスライスの新しい test file）と CLI の paired test（tree と `--vm` の stdout・stderr・終了コードの比較）。
+  - **VFH-AT-02（書けない）**: 本体（入れ子の lambda を含む）で `__index__` / `__collection__` へ代入すると、VM が tree と同じ `未定義の変数に代入` の error になり、反復の回数・順序が変わらない（上の表の `__index__ = 3`・`__collection__ = [9, 9, 9]`・`__collection__ = 5`・`__index__ = -5` の各形で、出力・error・終了コードが tree と一致する）。確かめ方: differential test と CLI の paired test。
+  - **VFH-AT-03（利用者の同名 binding を隠さない）**: `__index__` / `__collection__` をトップレベルの `let`・関数の local・関数から読む global・ループ変数の名前（`for __index__ in …`）・入れ子の `for` の外側のループ変数として宣言した script で、`for` の本体・本体の lambda・`for` の後の読み書きが tree と同じ値を返す（上の表の `let __index__ = 10` は `10` を 3 回）。VM の REPL で、前の入力で宣言した `__index__` を後の入力の `for` の本体で読んでも tree と同じ値になる。確かめ方: differential test と REPL の paired test。
+  - **VFH-AT-04（非破壊）**: この 2 つの名前を書かない `for`（List・Dict・Str、`break` / `continue`、入れ子、本体でのクロージャの作成）の compile 結果の命令列・定数・local の数が変わらない。既存の `tests/differential.rs`・golden fixture・`tests/for_iter_charge.rs`・`tests/for_iter_copy_order.rs`・`tests/defensive_vm.rs`・`tests/scaling.rs` が無改変で緑。確かめ方: `src/compiler.rs` の `#[cfg(test)]` の unit test（代表の `for` の Chunk を変更前の命令列と比べる）と既存 test。
+- **想定の変更規模**: `src/compiler.rs` 約 5〜30 行（隠しローカルの作り方と名前の解決の 3 か所）。合わせて約 5〜30 行。テストは differential test・CLI と REPL の paired test・compiler の unit test で約 150〜250 行。触る仕組みは VM の `for` の隠しローカルの名前の解決 1 つ、受入基準は 4 項目。
 
 ## 15. 受入基準
 
