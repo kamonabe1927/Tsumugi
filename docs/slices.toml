@@ -1076,4 +1076,5 @@ parent     = "Phase 5 残"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "fix-vm-for-hidden-locals 実装スライス（VM の `for` の隠しローカルをスクリプトの名前から見えなくする）" }
 acceptance = ["VFH-AT-01..04"]
+design_pr  = 441
 order      = 109
