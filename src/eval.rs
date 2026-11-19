@@ -2646,8 +2646,7 @@ impl Evaluator {
             }
             CallDest::WhileFirst => {
                 if value.is_truthy() {
-                    let frame = self.enter_while(owner, stmt_index, line)?;
-                    self.frames.push(frame);
+                    self.start_while(owner, stmt_index, line)?;
                 }
             }
             CallDest::WhileIter => {
@@ -3519,7 +3518,8 @@ impl Evaluator {
                 if !cond.is_truthy() {
                     return Ok(StmtStep::Val);
                 }
-                Ok(StmtStep::Enter(self.enter_while(owner, stmt_index, *line)?))
+                self.start_while(owner, stmt_index, *line)?;
+                Ok(StmtStep::Val)
             }
 
             Stmt::For { iter, line, .. } => {
@@ -3782,6 +3782,28 @@ impl Evaluator {
         })
     }
 
+    /// 初回の条件が真だった `while` の While controller frame を積み、条件を評価し直さずに
+    /// 最初の反復の本体を積む（条件は反復ごとに 1 回だけ評価する。`advance_frame` が次反復で
+    /// 立てるのと同じく `pending_step` を立ててから `begin_loop_iteration` を呼ぶ）。
+    fn start_while(
+        &mut self,
+        owner: &Block,
+        stmt_index: usize,
+        line: usize,
+    ) -> Result<(), TsumugiError> {
+        let mut frame = self.enter_while(owner, stmt_index, line)?;
+        let FrameKind::While {
+            body, pending_step, ..
+        } = &mut frame.kind
+        else {
+            unreachable!("enter_while は While frame を返す");
+        };
+        *pending_step = true;
+        let body = body.clone();
+        self.frames.push(frame);
+        self.begin_loop_iteration(body, line)
+    }
+
     /// `while` の本体 1 反復ぶんのスコープを作り、本体 Block frame と While frame を
     /// まとめて返す（driver は返された frame を push し、以降 advance_frame が反復を回す）。
     fn enter_while(
@@ -3791,8 +3813,8 @@ impl Evaluator {
         line: usize,
     ) -> Result<Frame, TsumugiError> {
         // While frame（反復制御）自身はスコープ・heap を持たない空 stmts の controller。
-        // driver が push した直後に cursor==0>=len==0 で advance_frame へ入り、そこで
-        // condition を評価して反復本体（begin_loop_iteration）を積む。反復ごとのスコープ・
+        // 最初の反復は `start_while` が積み、本体が終わって controller に戻った時点で
+        // advance_frame が condition を評価して次の反復本体を積む。反復ごとのスコープ・
         // continuation heap は本体 Block frame 側が持つ。condition / body は owner[stmt_index]
         // （Stmt::While）から読み出す。body は controller に持たせて反復ごとに clone する。
         let body = match &owner[stmt_index] {
