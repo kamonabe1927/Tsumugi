@@ -1,6 +1,6 @@
 # Tsumugi 決定性・実行時監査仕様
 
-最終更新: 2026-11-18
+最終更新: 2026-11-20
 
 設計ステータス: **到達目標の確定仕様（§1〜§13）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -60,7 +60,7 @@ host call 開始前に `BudgetCharged` を flush しない行（loop:drift #342 
 | `DeterminismInput` tuple と `ContextSnapshot` | §3.1 | record/replay スライスへ延期 |
 | `HostBoundary` dispatcher と `FakeHost` | §5 | Slice 2（HostBoundaryとFakeHost）へ延期 |
 | engine 全体の audit drain queue byte 上限（16 MiB）。per-execution 上限（`max_pending_bytes`）は B-2 で実装済み | §10.2 | 複数 execution 共有の queue 会計と wake 経路が scheduler（E10 統合）と不可分なため延期 |
-| sink callback 中の再入検出は facade の 5 入口（`compile` / `link` / `run` / `run_for_repl` / `run_audited`）だけが対象（`link_for_repl` は fix-repl-import-gate で削除した）。scheduler の `ExecutionHandle` の操作（§10 の start/poll/pause/resume）の再入検出と、拒否に返す値は未実装（scheduler の `Engine` は sink を持たない） | §10 | sink を持つ scheduler 経路は E10 統合のスライスで扱う |
+| sink callback 中の再入検出は facade の入口だけが対象で、scheduler の `ExecutionHandle` の操作（§10 の start/poll/pause/resume）の再入検出と、拒否に返す値は未実装（scheduler の `Engine` は sink を持たない） | §10 | sink を持つ scheduler 経路は E10 統合のスライスで扱う |
 
 ## 1. 位置づけ
 
@@ -731,8 +731,8 @@ pub struct AuditAck {
 - deliveryはat-least-once、logical eventはexactly-onceである。ack喪失時は同じenvelopeを再送する。
 - 1 execution内のbatchとevent順序を維持する。異なるexecution間の順序は保証しない。
 - sink callback中に同じEngineのcompile/start/poll/pause/resume/cancel、host function、別audit emitを呼んではならない。thread-local reentrancy guardで検出し`AuditSinkError::Reentrant`にする。
-  - 対象の入口: start/poll/pause/resume/cancelはschedulerの`ExecutionHandle`の操作を指す。sinkを持つfacadeの`Engine`では、`compile`・`link`・`link_for_repl`・`run`・`run_for_repl`・`run_audited`の6入口を対象にする（startとpollはrun系3入口の中にあり、pause/resumeの入口は無い）。host functionと別audit emitはrun系の入口を通らなければ呼べないため、この6入口で覆う。`CancellationToken::cancel`は任意threadから呼べるflag（[組み込みAPI仕様](embedding-api.md)第7節・第9節）でEngineの入口ではないため、callbackから呼んでよい。`ExecutionHandle`の操作で拒否に返す値は、sinkをscheduler経路へ配線するとき（E10統合）に決める。
-  - 再入した呼び出しへ返す値: 何も実行せず、既存のInternalFailure系で拒否する。公開型は増やさない。`run`・`run_for_repl`は`ExecutionOutcome::InternalFailure`、`run_audited`は`AuditedOutcome::Outcome(InternalFailure)`、`compile`は`CompileDiagnosticCode::InternalFault`の診断1件の`CompileErrors`、`link`・`link_for_repl`は`LinkError::InternalFailure`を返す。渡されたcontextは変えず、poisonもしない。
+  - 対象の入口: start/poll/pause/resume/cancelはschedulerの`ExecutionHandle`の操作を指す。sinkを持つfacadeの`Engine`では、`compile`・`link`・`run`・`run_for_repl`・`run_audited`の5入口を対象にする（startとpollはrun系3入口の中にあり、pause/resumeの入口は無い）。host functionと別audit emitはrun系の入口を通らなければ呼べないため、この5入口で覆う。`CancellationToken::cancel`は任意threadから呼べるflag（[組み込みAPI仕様](embedding-api.md)第7節・第9節）でEngineの入口ではないため、callbackから呼んでよい。`ExecutionHandle`の操作で拒否に返す値は、sinkをscheduler経路へ配線するとき（E10統合）に決める。
+  - 再入した呼び出しへ返す値: 何も実行せず、既存のInternalFailure系で拒否する。公開型は増やさない。`run`・`run_for_repl`は`ExecutionOutcome::InternalFailure`、`run_audited`は`AuditedOutcome::Outcome(InternalFailure)`、`compile`は`CompileDiagnosticCode::InternalFault`の診断1件の`CompileErrors`、`link`は`LinkError::InternalFailure`を返す。渡されたcontextは変えず、poisonもしない。
   - 外側のexecution: guardは「このthreadで今sink callbackの中にいるEngineの列」を持ち、再入の印を列の要素ごとに持つ。再入を拒否したら、再入されたEngineの要素にだけ印を立てる。`submit`から戻ったとき自分の要素に印があれば、sinkが返した値（`Ack`を含む）を捨てて`Failed(AuditSinkError::Reentrant)`として扱い、§10.1のとおり`AuditFailure::Sink`でfail-closedにする（`AuditFailure`にvariantは足さない）。
   - 入れ子: Engine Aのcallbackの中で別のEngine Bを実行し、Bのcallbackから Engine Aへ再入した場合、fail-closedになるのはAのexecutionだけで、Bのexecutionは通常どおり進む。Aへの再入は、Aのcallbackを出るまで（Bのcallbackを出たあとも）拒否する。別のEngineをcallbackから呼ぶこと自体は許す。
   - 検出はthread-localであり、別threadからの呼び出しは対象外とする。engine lockを保持したままsinkへ入らない（次項）ため、別threadからの呼び出しでdeadlockしない。
