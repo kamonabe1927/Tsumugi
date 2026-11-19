@@ -1079,3 +1079,40 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "fix-vm-for-hidd
 acceptance = ["VFH-AT-01..04"]
 design_pr  = 441
 order      = 109
+
+# loop:drift #429 の D-130・D-133・D-134 で embedding-api の逸脱一覧に足した行の fix（loop-runbook §12.3、ずれの修正の PR で追加）。
+# 実装の範囲・受入基準は設計 PR で spec の小節に書く（todo）。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に空きが無い
+# （done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A、PR #403 以降のずれの修正・設計 PR）と同じく、
+# この PR では付け直しをせず、仮にすべてのスライスより後（110〜112）に置いた。マージ後に PM が付け直しだけの状態整理 PR で 35 より前へ移す。
+#
+# fix-run-audit-failure-outcome（D-130）: audit sink 付きの Engine::run が監査失敗を Cancelled（空 usage）で返す写像の fix。
+#   ExecutionOutcome に AuditFailure の variant が無い（逸脱一覧の 1 行目）ので、variant を足すか別の写像にするかを含め、挙動の直し方は設計で決める。
+#   触る仕組みは Engine::run の監査付き経路の outcome の写像 1 つ（CLI の exit code の写像が変わるかも設計で確かめる）。
+# fix-engine-config-audit-fields（D-133、判断役が選択 Q1=A）: EngineConfig から audit_sink・audit_slice_fuel を外し、audit_sink は builder だけに、
+#   audit_slice_fuel は audit_budget_for_test と同じ #[doc(hidden)] のテスト用の扱いにする。tests/ の統合テストが使うので外から呼べる形は保つ。
+#   触る仕組みは EngineConfig と EngineBuilder の公開 surface 1 つ。
+# fix-cli-repl-compile-diagnostics（D-134、判断役が選択 Q1=A）: CLI の REPL の EOF の診断を Engine::compile の CompileErrors から出す。
+#   継続判定のトークン走査を許すかは設計で決める。VM REPL の run_repl_vm の直接呼び出しは VM 経路の逸脱（E9 の残り）の範囲で、このスライスでは無くならない。
+#   parent は AUD-018（embedding-api §14 の E8a・§16 の AUD-018 の項が CLI 入口統合を AUD-018 に結びつける）。roadmap の AUD-018 はこの子があるので 🟡 にした
+#   （PR #442 のレビュー指摘 2、判断役が選択 Q1=A）。
+[[slice]]
+id         = "fix-run-audit-failure-outcome"
+title      = "audit sink 付きの Engine::run が監査失敗を Cancelled（空 usage）で返さず、§8 の AuditFailure と §12 の exit code 70 に合う形で返す（embedding-api §8・§10・§12、loop:drift #429 D-130）"
+status     = "todo"
+parent     = "Phase 6 残"
+order      = 110
+
+[[slice]]
+id         = "fix-engine-config-audit-fields"
+title      = "EngineConfig を backend・language_revision の 2 field にし、audit_sink は builder だけに、audit_slice_fuel は #[doc(hidden)] のテスト用の扱いにする（embedding-api §3、loop:drift #429 D-133）"
+status     = "todo"
+parent     = "Phase 6 残"
+order      = 111
+
+[[slice]]
+id         = "fix-cli-repl-compile-diagnostics"
+title      = "CLI の REPL の EOF の parse 診断を Engine::compile の CompileErrors から出し、finish_repl_at_eof の Lexer・Parser の直接呼び出しを無くす（継続判定の is_incomplete の扱いは設計で決める。embedding-api §12、loop:drift #429 D-134）"
+status     = "todo"
+parent     = "AUD-018"
+order      = 112
