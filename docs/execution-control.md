@@ -1,6 +1,6 @@
 # Tsumugi 実行予算・協調実行仕様
 
-最終更新: 2026-11-17
+最終更新: 2026-11-19
 
 設計ステータス: **到達目標の確定仕様（§1〜§13）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -30,6 +30,7 @@ handle 経路を §3 の `ExecutionRequest` と組み込みAPI仕様 §8 の `Ex
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
 | tree evaluator の slice fuel の使用量は `count_step`（文・反復・呼び出しの fuel）だけを数え、builtin が台帳へ直接課金する per-element fuel（`sort` の走査・比較課金、index 代入・`pop` の深度の読み直しの課金など）を数えない。total fuel は正しいが、1 回の poll で実行する fuel が「slice + 区間内の bulk builtin 1 回分」を超えうる（bulk builtin を含む文が 1 slice に複数回あると、その回数ぶん超える） | §4.2 | Slice 3 PR-d |
+| Dict の heap の delta 課金（`Value::retrack_dict`、`src/value.rs`）は、挿入・上書きのたびに全 key の byte 長を合計し直す。VM の Dict リテラルの構築（`OpCode::DictInsert`）と、index 代入による Dict の構築（tree・VM）は entry 数 × 挿入の回数の時間になり、fuel（文・反復・呼び出し）に比例しない。重複した key を含むリテラルをループで評価したときの時間と fuel の比も、深度の読み直しを無くした後（fix-vm-dict-literal-depth-settle）もこのために source の大きさに比例して開く。fix スライス fix-dict-retrack-key-bytes（todo）で直し、issue #374 の「時間が fuel に比例する」受入基準もそこに置く（判断役が選択（PR #447）、Q1=A） | §5.1 | REV-015 Slice 2（heap accounting） |
 | `ExecutionRequest`（`src/embedding.rs` の `ExecutionRequest`、crate root では `EmbeddingRequest`）の field は private で、目標に無い `clock: Arc<dyn MonotonicClock>`（`budget.deadline` を効かせる clock）を持つ。`execution_id` は `Option<ExecutionId>` で、`with_execution_id` で設定し、監査 sink を設定した engine で実行するときだけ必須（未設定なら script work 前に fail-closed、sink 無しなら無視）。`arguments` は `Arc<[String]>` でなく `Vec<String>`。constructor は目標の `new(execution_id, capabilities, budget)` でなく `new(budget, clock) -> Result<Self, ConfigError>` で、capability は `with_capabilities`（既定は `CapabilitySet::empty`）、引数は `with_arguments(Vec<String>)`（目標は `arguments(impl Into<Arc<[String]>>)`）で設定する。`cancellation` builder は目標どおり | §3 | REV-015 最終形移行 Slice 1・Slice 2、Phase 6 A-1（`execution_id`） |
 | scheduler（`src/engine.rs`、crate root の `Engine`）の handle 経路の `ExecutionRequest`（`src/engine.rs` の `ExecutionRequest`、crate root では `ExecutionRequest`）は field を持たない骨格（`new()` / `Default` だけ）で、§3 の `ExecutionRequest` と別型である。budget は context 内の評価器が持つ `BudgetConfig` を使い、capability・cancellation token・実行 ID を request で渡せない | §3/§9.1 | Slice 3 PR-a |
 | `Engine::create_execution`（`src/engine.rs`）に `link_options: LinkOptions` 引数が無い（`LinkOptions` 型も無い）。`Engine::start` は `&LinkedScript` でなく `&CompiledScript`（`src/engine.rs` の `CompiledScript`）を取り、Link を初回 poll で行う。`create_execution` との違いは開始 phase（Created / Linked）だけである | §9.1 | Slice 3 PR-a |
@@ -2651,6 +2652,32 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
   - **VDS-AT-02（往復は fuel で止まる）:** issue #304 の敵対的入力（要素数 50,000 の List の最も深い要素の `xs[0] = 0` / `xs[0] = e` の往復と、最も深い末尾の要素の `pop` / `push` の往復を、`while true` で繰り返す）と、Dict の同じ形が、既定の budget で `BudgetExceeded(Fuel)` の terminal で止まり、壁時計の上限（例: 10 秒）以内に終わる。`try` / `catch` の内側でも catch されない。確かめ方: CLI を subprocess で起動して、exit code・stderr の fuel 超過の診断・経過時間を確かめるテスト（両 backend）。
   - **VDS-AT-03（値を変える前に課金する）:** 残りの fuel が読み直す子の数より少ないときの index 代入・`pop` が `BudgetExceeded(Fuel)` で止まり、超過の記録（`resource`・`requested`）が読み直す子の数を示し、対象の backing を共有する別名があっても COW の複製の heap を課金しない（`live_heap` / `peak_heap` が操作の前と同じ）。tree-walk 版と VM 版で同じ resource・同じ committed fuel になる。確かめ方: 小さい `total_fuel` を設定した実行で usage と超過の記録を比べるテスト（両 backend）。
   - **VDS-AT-04（ほかの観測は不変）:** 既存のテスト（`tests/value_nesting_depth_limit.rs` の VND-AT-01..05 と `tests/` 一式、unit test）が期待値の変更なしで通る。読み直しの起きない script で fuel・step・`live_heap` / `peak_heap` が変更前と同じで、tree と VM の differential test が一致する。確かめ方: 既存のテスト一式。期待値を変えたテストがあれば、読み直しが起きることを PR 本文に示す。
+
+### fix-vm-dict-literal-depth-settle 実装スライス（VM の Dict リテラルの構築で深度を読み直さない）
+
+[issue #374](https://github.com/kamonabe1927/Tsumugi/issues/374)（kamonabe が PR #349 の判断 Q2 を A から C へ変えた `判断:` の反映）から作ったスライス（`slices.toml` の `fix-vm-dict-literal-depth-settle`）。目標の規範は[次期意味論・実装決定](semantic-decisions.md) §21.3 の「リテラル」で、このスライスの設計 PR で足した。現在の差は同書の逸脱一覧の行にある。上の fix-value-depth-settle-quadratic 小節の Q2=A（VM の読み直しを課金しないまま残す）は、その時点の記録として残す。
+
+- **現状の不具合:** VM の Dict リテラルは、空の Dict の定数を積んだあと、key と値の組ごとに `OpCode::DictInsert` で 1 つずつ入れる（`src/compiler.rs` の `Expr::Dict`）。`DictInsert` は `Value::index_set_tracked_uncharged_settle`（`src/value.rs`）を通り、値を入れるたびに backing の深度の要約（`child_max`・`child_max_count`）を更新するので、重複した key で最も深い値を浅い値で上書きすると、その場で全 entry の保存済み深度を読み直す（課金しない。PR #349 の Q2=A）。tree の Dict リテラル（`src/eval.rs` の `Expr::Dict` の 2 経路）は `BTreeMap` に入れてから `Value::new_dict` で最後に 1 回だけ要約するので読み直さない。リテラルはループで何度も評価できるので、`{"a": e, "a": 1, "a": e, "a": 1, …}` のように上書きを繰り返すリテラルを評価するたびに「entry 数 × 上書きの回数」の読み直しが起き、合計の時間と fuel の比が source の大きさに比例して開く（issue #374）。
+- **実装範囲:**
+  - VM の Dict リテラルの構築を tree と同じ形にする。key と値の組を入れるあいだは backing の深度の要約を更新せず（読み直しもしない）、リテラルを作り終えたときに 1 回だけ全 entry から要約する（`Tracked::summarized` と同じ要約。tree の `Value::new_dict` と同じ量の仕事）。要約は、リテラルの値がスタックから使われる前（外側のリテラルの `ListPush` / `DictInsert` の深度の検査、代入、引数など）に済ませる。作り終えたことを VM が知るための命令（例: 空でない Dict リテラルの最後に 1 回だけ出す命令、または最後の `DictInsert` の operand）は実装 PR で決めてよい（`OpCode` は `unstable-bytecode` feature の下でだけ公開され、安定した公開 API ではない）。空の Dict リテラル `{}` は今と同じ（定数の要約は 0 で正しい）。verifier（`src/verifier.rs`）が新しい命令・operand を受け付けるようにする。
+  - List / Dict の backing（`Tracked`）に field を足さない（「要約が古い」の印などを持たない。[次期意味論・実装決定](semantic-decisions.md) §21.3 の決定記録で histogram を採らなかったのと同じく、§5.1 の論理サイズに入らないメモリを backing ごとに足さない）。構築中の Dict はスクリプトから見えず（スタックの上にだけあり、key・値の式からは参照できない）、エラーで構築を抜けるときは捨てられるので、要約の無い backing は外へ出ない。
+  - 値を入れるたびの検査は今と同じ位置・同じ順に残す: key の型、新しい key のときの `check_collection`、入れる値の深度の検査（`Value::check_element_depth`。PR #301 の判断 Q1=A）、heap の delta 課金（`retrack_dict`）。`{"a": e, "a": 1}`（`e` は深度 256）は今と同じく `overflow` になる。
+  - 課金は足さない。リテラルの構築は今も読み直しに課金していないので、fuel は変わらず、tree と VM の fuel の一致を保つ（§4.1「その他のVM内部opcode dispatch 0」。新しい命令を足す場合もその dispatch は 0）。スクリプトの index 代入・`pop` の読み直しの課金（fix-value-depth-settle-quadratic、PR #371）はそのまま残す。
+  - 使われなくなる `Value::index_set_tracked_uncharged_settle` と `index_set_impl` の `charge_settle` 引数は削除してよい（`index_set_tracked` の挙動は変えない）。
+  - done にする実装 PR で、[次期意味論・実装決定](semantic-decisions.md) の逸脱一覧から「VM の Dict リテラルの構築で深度を読み直す」行を削除する。
+- **範囲外:**
+  - `retrack_dict`（Dict の heap の delta 課金が、挿入のたびに全 key の byte 長を数え直す）による、Dict の構築が entry 数の 2 乗の時間になる件。仕組みが別なので、`slices.toml` の `fix-dict-retrack-key-bytes`（`todo`）で扱う（issue #374）。このスライスの後も、重複した key を上書きするたびに `retrack_dict` が全 key を数え直すので、VM の Dict リテラルの構築の時間は「entry 数 × 挿入の回数」のままである（読み直しと同じ形）。そのため、issue #374 の「重複した key を含むリテラルをループで評価したとき、時間が fuel に比例する」ことの壁時計での確かめは、このスライスでは読み直しの回数で確かめ（VDL-AT-01）、時間は `fix-dict-retrack-key-bytes` の受入基準に置く。issue #374 の目標（時間と fuel の比を source の大きさに依らず保つ。[マニフェスト](manifesto.md)原則 1・3）は 2 本がそろって満たされ、`fix-dict-retrack-key-bytes` が done になるまでは未達である（冒頭の逸脱一覧の `retrack_dict` の行）。
+    - **決定記録（判断役が選択（PR #447）、Q1=A）:** 理由: issue #374 は「時間が fuel に比例することを受入基準で確かめる」と「`retrack_dict` はこのスライスに含めず別の fix にする」の両方を指示している。`retrack_dict` は挿入のたびに全 key の byte 長を合計し直し、`DictInsert` は上書きのときもこれを通るので、このスライス単独では時間が fuel に比例せず、壁時計では確かめられない。このスライスで直す性質（構築の途中で読み直さない）は読み直しの回数という決定的な量で確かめ（原則 9「再現可能なテストと計測」）、時間の確かめはそれが実際に成り立つ `fix-dict-retrack-key-bytes`（depends_on このスライス）に置く。2 つの指示をどちらも落とさず、スライスごとに触る仕組みを 1 つに保てる（原則 8、[開発ループ手順書](loop-runbook.md) §14.1）。採らなかった案: B（`retrack_dict` の直しをこのスライスに含める）は issue #374 の明示の指示に反し、触る仕組みが VM の lowering と heap の delta 課金の 2 つになる。C（時間の受入基準をこのスライスに置き、「変更前の半分以下」のような相対の壁時計の上限で確かめる）は `retrack_dict` の 2 乗が残るので比例を確かめたことにならず、計測も環境に左右されて再現しにくい（優先順位の表「再現可能な検証」、原則 9）。
+  - List リテラル（`ListPush` は子を足すだけで読み直さない）。
+  - tree のリテラルの構築（変えない）。
+  - F-2 の式・操作の課金点（リテラルの entry ごとの fuel）。現状の fuel は文・反復・呼び出しだけを数える（冒頭の未実装範囲）。
+- **課金の変化:** なし。fuel・step・`live_heap` / `peak_heap` は変わらない。`fuel_accounting_revision` と `language_revision` は変えない。
+- **想定の変更規模:** `src/` は 40〜100 行程度（`src/compiler.rs` の `Expr::Dict` の lowering 2〜6 行、`src/opcode.rs` 0〜5 行、`src/verifier.rs` 0〜10 行、`src/vm.rs` の `DictInsert` と終わりの処理 10〜30 行、`src/value.rs` の要約を更新しない挿入と最後の要約 15〜35 行、`index_set_tracked_uncharged_settle` の削除 −10〜−20 行）。テストは `tests/` と unit test で 100〜200 行。docs は semantic-decisions の逸脱一覧の 1 行の削除。触る仕組みは「VM の Dict リテラルの lowering（compiler の出す命令・VM の dispatch・それが呼ぶ value の primitive）」1 つ。受入基準は 4 項目。§14.1（[開発ループ手順書](loop-runbook.md)）に収まる。
+- **受入基準:**
+  - **VDL-AT-01（構築の途中で読み直さない）:** VM で、重複した key で最も深い値を浅い値に上書きすることを繰り返す Dict リテラル（例: 1,000 個の key と、`"a": e` / `"a": 1` の組を 1,000 回）を評価したとき、全 entry の深度の読み直しがリテラル 1 つにつき作り終えたときの 1 回だけで、tree と同じ回数である。ループでそのリテラルを L 回評価したとき、読み直しの回数は L に比例し、entry 数 × 上書きの回数に比例しない。確かめ方: 全 entry から深度を要約する処理の呼び出し回数を数える unit test（例: `cfg(test)` の counter）を、両 backend で同じ script について比べる。
+  - **VDL-AT-02（深度は正確）:** 重複した key で最も深い値を浅い値に上書きした Dict リテラルの深度は、作り終えた内容で決まる（`{"a": e, "b": 1, "a": 1}` は値が `1` と `1` だけになるので、深度は `e` の深度に依らず 1。スカラーの深度は 0、Dict の深度は「1 + 値の深度の最大」、[次期意味論・実装決定](semantic-decisions.md) §21.3）。その値をさらに入れ子にした値が 256 段まで作れ 257 段で `overflow` になり、tree と VM で同じ kind・message・line になる。入れ子のリテラル（`{"x": {"a": e, "a": 1}}`、`[{"a": e, "a": 1}]`）でも同じ。確かめ方: 両 backend の paired test。
+  - **VDL-AT-03（検査の位置と課金は不変）:** 構築の途中のエラー（key の型、`max_collection_elements` の超過、値の深度の `overflow`、heap の超過）が今と同じ位置・同じ順で起き、`[e, print("side")]` と `{"a": e, "a": 1}`（`e` は深度 256）は両 backend で今と同じく `overflow` になる。重複した key を含む Dict リテラルの fuel・step・`live_heap` / `peak_heap` が変更前と同じで、tree と VM で fuel が一致する（VDS-AT-01 のリテラルの場合を含む）。確かめ方: 両 backend の paired test と既存の VND-AT-01・VDS-AT-01 のテスト。
+  - **VDL-AT-04（ほかの観測は不変）:** 既存のテスト一式が期待値の変更なしで通る。ただし `src/compiler.rs` の bytecode の期待文字列は、Dict リテラルの終わりの命令・operand の変化に限って更新してよい（変えた行を PR 本文に示す）。確かめ方: 既存のテスト一式。
 
 ### fix-fs-write-content-budgeted-render 実装スライス（`write_file` / `append_file` の内容の予算付き描画）
 

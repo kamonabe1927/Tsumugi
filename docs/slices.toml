@@ -1110,3 +1110,37 @@ title      = "CLI の REPL の EOF の parse 診断を Engine::compile の Compi
 status     = "todo"
 parent     = "AUD-018"
 order      = 112
+
+# issue #374（kamonabe、PR #349 の判断 Q2 を A から C へ変えた `判断:`。§8 の仕分けで「受け入れ」）から作った fix 2 本。
+# fix-vm-dict-literal-depth-settle: VM の Dict リテラルの構築（OpCode::DictInsert）で途中の深度の読み直しを無くし、tree と同じく
+#   作り終えたときに 1 回だけ要約する（semantic-decisions §21.3「リテラル」、この設計 PR で足した）。課金は足さない。parent は
+#   fix-value-depth-settle-quadratic と同じ REV-001。見積もり: src/ 40〜100 行、触る仕組みは VM の Dict リテラルの lowering 1 つ、受入基準 4。
+# fix-dict-retrack-key-bytes: retrack_dict（Dict の heap の delta 課金）が挿入のたびに全 key の byte 長を数え直し、VM の Dict リテラルと
+#   index 代入による Dict の構築が entry 数の 2 乗の時間になる件（PR #371 のレビューで出た）。issue #374 が「仕組みが別なので別の fix」と
+#   したもの。未設計（todo）。判断役が選択（PR #447）した Q1=A により、issue #374 の「重複した key を含むリテラルをループで評価したとき
+#   時間が fuel に比例する」受入基準をこのスライスに置く（retrack_dict が残る間は VM の時間が entry 数 × 挿入の回数のままで、
+#   fix-vm-dict-literal-depth-settle だけでは壁時計で確かめられないため）。このスライスが done になるまで issue #374 の目標（時間と fuel の比を
+#   source の大きさに依らず保つ）は未達で、execution-control の逸脱一覧の retrack_dict の行で追う。設計ではその受入基準を必ず入れる。直し方の見込み: dict_body は 24 + 64 × entry 数 + key の byte 長の
+#   合計なので、新しい key のときだけ 64 + key の byte 長を足す delta にでき、backing に field は要らない。見積もり: src/ 15〜40 行、触る仕組みは
+#   値の表現の heap の delta 課金 1 つ、受入基準 2〜3。parent は heap accounting を入れた REV-015。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 35 で 0〜34 に
+#   空きが無い（done を含む全スライスで重複を弾く）。先例（PR #368・PR #381・PR #388 の Q1=A、PR #399 の設計）と同じく、この PR では
+#   付け直しをせず、仮にすべてのスライスより後（113・114）に置いた。マージ後に PM が付け直しだけの状態整理 PR で 35 より前へ移す。
+[[slice]]
+id         = "fix-vm-dict-literal-depth-settle"
+title      = "VM の Dict リテラルの構築で途中の深度の読み直しを無くし、tree と同じく作り終えたときに 1 回だけ要約する（semantic-decisions §21.3、issue #374）"
+status     = "ready"
+parent     = "REV-001"
+spec       = { doc = "docs/execution-control.md", section = "fix-vm-dict-literal-depth-settle 実装スライス（VM の Dict リテラルの構築で深度を読み直さない）" }
+acceptance = ["VDL-AT-01..04"]
+depends_on = ["fix-value-depth-settle-quadratic"]
+design_pr  = 447
+order      = 113
+
+[[slice]]
+id         = "fix-dict-retrack-key-bytes"
+title      = "retrack_dict が挿入のたびに全 key の byte 長を数え直し、Dict の構築が entry 数の 2 乗の時間になるのを、新しい key の分だけの delta にして直す（execution-control §5.1、issue #374）"
+status     = "todo"
+parent     = "REV-015"
+depends_on = ["fix-vm-dict-literal-depth-settle"]
+order      = 114
