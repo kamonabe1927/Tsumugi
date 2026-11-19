@@ -635,34 +635,26 @@ spec_slice     = "determinism Slice 5"
 depends_on     = ["B-2"]
 blocked_reason = "E10 統合後（roadmap.md「Phase 6 残」の記載どおり）"
 
-# issue #327（kamonabe）から作った 3 本。判断役の Q1=A・Q2=A・Q3=A（issue #327）を capability-model §10 に書いた。
+# issue #327（kamonabe）から作った 3 本（PR #339）。判断役の Q1=A・Q2=A・Q3=A（issue #327）を capability-model §10 に書いた。
 # order は loop-runbook §8 の既定（「優先」でも不具合の報告でもないので、すべてのスライスより後）。parent は #291 の 2 本と同じ AUD-020。
-# 触る仕組みが別（tree REPL の link/run の入口、VM REPL の session、alpha Engine の handle）なので分けた。
-# fix-repl-import-gate-tree: 見積もり src/ 150〜300 行（削除を含む）、受入基準 4。
-# fix-repl-import-gate-vm: 見積もり src/ 160〜310 行（削除を含む）、受入基準 4。
+# REPL の 2 本（fix-repl-import-gate-tree〔90〕・fix-repl-import-gate-vm〔91〕）は issue #353 で blocked（原則 5）にした後、
+# issue #366（kamonabe、#353 は A）で fix-repl-import-gate の 1 本にまとめた。元の 2 本の id は置き換えて残さない（blocked は #366 を根拠に解いた。
+# loop-guard §4.3）。order は元の 90 を引き継ぐ（#366 に「優先」の指定は無く、既存スライスの置き換えのため）。
+# fix-repl-import-gate: 見積もり src/ 310〜610 行（削除を含む）、受入基準 5（RIT-AT-01..04・RIV-AT-01..04 を差分テストに寄せて整理）。
+#   触る仕組みは 2 つ（tree REPL の link/run の入口と VM REPL の session）で §14.1 の「1 つまで」を超えるが、原則 5 を守るための例外として
+#   issue #366 で認められた（spec の小節に理由を書いた）。
 # fix-handle-import-from-link: 見積もり src/ 400〜700 行（削除が主）、受入基準 4。形は PR #339 の Q1=A・Q2=A（判断役が選択）。
-#   小節は書いたが depends_on の 2 本が done でないため ready の条件 3 を満たさず todo。2 本が done になったら設計 PR で ready にし design_pr を記入する。
+#   小節は書いたが depends_on が done でないため ready の条件 3 を満たさず todo。depends_on は #366 で fix-repl-import-gate に付け替えた。
+#   それが done になったら設計 PR で ready にし design_pr を記入する。
 [[slice]]
-id         = "fix-repl-import-gate-tree"
-title      = "tree REPL の import を submission ごとに link 時の resolver gate に通し、link の graph から展開する（capability-model §10、issue #327）"
-status     = "blocked"
+id         = "fix-repl-import-gate"
+title      = "tree REPL と VM REPL の import を同じ PR で submission ごとに link 時の resolver gate に通し、link の graph から展開する（capability-model §10、issue #327・#366）"
+status     = "ready"
 parent     = "AUD-020"
-spec       = { doc = "docs/capability-model.md", section = "fix-repl-import-gate-tree 実装スライス（tree REPL の import を resolver gate に通す）" }
-acceptance = ["RIT-AT-01..04"]
-design_pr  = 339
+spec       = { doc = "docs/capability-model.md", section = "fix-repl-import-gate 実装スライス（tree REPL と VM REPL の import を同じ PR で resolver gate に通す）" }
+acceptance = ["RIG-AT-01..05"]
+design_pr  = 444
 order      = 90
-blocked_reason = "manifesto: 原則5（予測可能性）— tree と VM を別スライスで入れると、間の期間に同じ REPL 入力・同じ権限で tree は Denied・--vm は import 成功となり backend 間の差が増える（#339 の事後点検）。取り消しの #351 も原則2・9 の疑いで止めた（issue #353）"
-
-[[slice]]
-id         = "fix-repl-import-gate-vm"
-title      = "VM REPL の import を submission ごとに link 時の resolver gate に通し、ModuleLoader を外す（capability-model §10、issue #327）"
-status     = "blocked"
-parent     = "AUD-020"
-spec       = { doc = "docs/capability-model.md", section = "fix-repl-import-gate-vm 実装スライス（VM REPL の import を resolver gate に通す）" }
-acceptance = ["RIV-AT-01..04"]
-design_pr  = 339
-order      = 91
-blocked_reason = "manifesto: 原則5（予測可能性）— tree と VM を別スライスで入れると、間の期間に同じ REPL 入力・同じ権限で tree は Denied・--vm は import 成功となり backend 間の差が増える（#339 の事後点検）。取り消しの #351 も原則2・9 の疑いで止めた（issue #353）"
 
 [[slice]]
 id         = "fix-handle-import-from-link"
@@ -671,7 +663,7 @@ status     = "todo"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-handle-import-from-link 実装スライス（scheduler の handle 経路の import を link 済み graph から展開）" }
 acceptance = ["HIL-AT-01..04"]
-depends_on = ["fix-repl-import-gate-tree", "fix-repl-import-gate-vm"]
+depends_on = ["fix-repl-import-gate"]
 order      = 92
 
 # loop:drift #352 の D-57・D-62・D-63・D-64・D-67・D-68 で逸脱一覧に載せた差の延期先。未設計（todo）。

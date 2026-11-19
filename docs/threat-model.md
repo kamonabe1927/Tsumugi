@@ -21,7 +21,7 @@ file/stdin に絞る案（判断役の Q1=A）は、それを反映した PR #31
 なった。目標を保ったまま逸脱として記録すれば、その疑いを避け、目標と逸脱一覧の食い違いもなくなる。REPL の import を塞ぐか
 どうか（[Capability Model仕様](capability-model.md) §10 の issue #291 Q1=A「REPL は範囲外」の見直しを含む）は、別の
 `needs-design` issue で決める。これは issue #327 で決まった（REPL と scheduler の handle 経路も link 時の resolver gate に揃える。Q1=A・Q2=A・Q3=A、
-判断役が選択。決定記録は [Capability Model仕様](capability-model.md) §10、実装は同書 §18 の fix-repl-import-gate-tree / -vm と fix-handle-import-from-link）。
+判断役が選択。決定記録は [Capability Model仕様](capability-model.md) §10、実装は同書 §18 の fix-repl-import-gate〔issue #366 で tree・VM の 2 本 fix-repl-import-gate-tree / -vm を 1 本にまとめた〕と fix-handle-import-from-link）。
 
 ## 逸脱一覧（目標仕様に対する現在の逸脱）
 
