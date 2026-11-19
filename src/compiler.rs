@@ -11,6 +11,12 @@ use crate::opcode::{CaptureDesc, MutationTarget, OpCode};
 use crate::value::Value;
 use crate::verifier::VerifiedChunk;
 
+/// `for` が内部で持つ反復列と位置の local 名。`<` を含み識別子として書けないので、
+/// 名前の解決（resolve_local / resolve_upvalue / 祖先の捕捉）はスクリプトの名前と一致しない
+/// （言語仕様「名前の可視性と解決時期」、fix-vm-for-hidden-locals）。
+const HIDDEN_FOR_COLLECTION: &str = "<for-collection>";
+const HIDDEN_FOR_INDEX: &str = "<for-index>";
+
 /// ローカル変数の情報
 #[derive(Debug, Clone)]
 struct Local {
@@ -471,12 +477,12 @@ impl Compiler {
         // 辞書/文字列をリストに変換（リストはそのまま）
         self.chunk.emit(OpCode::ToIterList, line);
         let collection_slot = self.locals.len();
-        self.add_local("__collection__".to_string());
+        self.add_local(HIDDEN_FOR_COLLECTION.to_string());
 
         // インデックスカウンタ (0) を積む
         self.chunk.emit_constant(Value::Int(0), line);
         let index_slot = self.locals.len();
-        self.add_local("__index__".to_string());
+        self.add_local(HIDDEN_FOR_INDEX.to_string());
 
         // ループ変数をnullで初期化
         self.chunk.emit_constant(Value::Null, line);
@@ -1543,5 +1549,55 @@ mod tests {
             .patch_jump(99)
             .expect_err("範囲外の offset を patch できてしまった");
         assert_eq!(out_of_range.kind(), Some(crate::error::ErrorKind::Internal));
+    }
+
+    /// VFH-AT-04: `for` の隠しローカルは名前の解決に引かれない名前を持ち、この 2 つの名前を書かない
+    /// `for` の命令数・定数の数・local の数は隠しローカルの名前に依らない（名前だけを変えた）。
+    #[test]
+    fn vfh_at_04_for_hidden_locals_are_unnameable_and_shape_is_stable() {
+        let compile = |source: &str| {
+            let program = parse(source);
+            Compiler::new()
+                .compile(&program)
+                .expect("compile に失敗")
+                .into_inner()
+        };
+        // (script, 命令数, 定数の数, max_locals)。変更前の Chunk から取った値。
+        let cases: [(&str, usize, usize, usize); 4] = [
+            ("for x in [1, 2]\n  print(x)\nend\n", 27, 7, 3),
+            (
+                "for x in \"ab\"\n  if x == \"a\"\n    continue\n  end\n  break\nend\n",
+                25,
+                5,
+                3,
+            ),
+            (
+                "for k in {\"a\": 1}\n  for y in [1]\n    print(k)\n  end\nend\n",
+                46,
+                12,
+                6,
+            ),
+            (
+                "fn f()\n  for x in [1]\n    let g = fn()\n      return x\n    end\n    g()\n  end\nend\nf()\n",
+                8,
+                0,
+                1,
+            ),
+        ];
+        for (source, code, constants, max_locals) in cases {
+            let chunk = compile(source);
+            assert_eq!(
+                (chunk.code.len(), chunk.constants.len(), chunk.max_locals),
+                (code, constants, max_locals),
+                "{source}"
+            );
+        }
+        // 隠しローカルの名前は識別子として書けない（resolve_local が script の名前と一致させない）。
+        for name in [HIDDEN_FOR_COLLECTION, HIDDEN_FOR_INDEX] {
+            assert!(
+                !name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()),
+                "{name} が識別子として書ける"
+            );
+        }
     }
 }

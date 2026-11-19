@@ -1072,10 +1072,11 @@ order      = 108
 [[slice]]
 id         = "fix-vm-for-hidden-locals"
 title      = "VM の for の隠しローカル（反復列と位置）をスクリプトの名前の解決から外し、__index__ / __collection__ の読み書きを tree と同じ未定義名の error にする（言語仕様「名前の可視性と解決時期」、issue #365）"
-status     = "ready"
+status     = "done"
 parent     = "Phase 5 残"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "fix-vm-for-hidden-locals 実装スライス（VM の `for` の隠しローカルをスクリプトの名前から見えなくする）" }
 acceptance = ["VFH-AT-01..04"]
 design_pr  = 441
+impl_pr    = 443
 order      = 109
