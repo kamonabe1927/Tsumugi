@@ -1144,3 +1144,18 @@ status     = "todo"
 parent     = "REV-015"
 depends_on = ["fix-vm-dict-literal-depth-settle"]
 order      = 114
+
+# issue #400（kamonabe、issue #393 の不具合の取り込み。§8 の仕分けで「受け入れ」）から作った fix。原因は tree の `while` が初回の条件が
+#   真のとき条件を 2 回評価すること（条件の副作用・fuel が VM と食い違い、ステップ上限の行がずれる）。見積もり: src/ 15〜60 行、触る仕組みは
+#   tree の while の driver 1 つ、受入基準 4。parent は tree の frame driver を入れた REV-015。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前。issue #400 の仕分けでは #399 から作ったスライスより後）にすべきだが、
+#   ready の最小は 35 で 0〜34 に空きが無い。先例（PR #447 など）と同じく、この PR では付け直しをせず仮にすべてのスライスより後（115）に置いた。
+#   マージ後に PM が付け直しだけの状態整理 PR で 35 より前へ移す。
+[[slice]]
+id         = "fix-tree-while-condition-once"
+title      = "tree の while が初回の条件を 2 回評価するのを直し、条件の副作用・fuel・ステップ上限の行を VM と一致させる（language-spec「while」、issue #393・#400）"
+status     = "ready"
+parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-tree-while-condition-once 実装スライス（tree の `while` が初回の条件を 2 回評価しない）" }
+acceptance = ["TWC-AT-01..04"]
+order      = 115
