@@ -136,3 +136,109 @@ fn vdl_at_03_fuel_matches_and_settle_is_not_charged() {
         tree(&overwrite_deep).expect("tree").committed.fuel
     );
 }
+
+fn run_with(
+    source: &str,
+    config: tsumugi::budget::BudgetConfig,
+    use_vm: bool,
+) -> (BudgetUsage, Result<(), tsumugi::error::TsumugiError>) {
+    let tokens = Lexer::new(source).tokenize();
+    let program = Parser::new(tokens).parse().expect("parse");
+    if use_vm {
+        let chunk = Compiler::new().compile(&program).expect("compile");
+        let mut machine = Vm::with_budget(chunk, config);
+        machine
+            .charge_link(source.len() as u64, &[])
+            .expect("charge_link");
+        let result = machine.run();
+        (machine.budget_usage(), result)
+    } else {
+        let mut evaluator = Evaluator::with_budget(config);
+        let result = evaluator.run(&program, source.len() as u64);
+        (evaluator.budget_usage(), result)
+    }
+}
+
+fn base_config() -> tsumugi::budget::BudgetConfig {
+    tsumugi::budget::BudgetConfig::for_legacy(100_000_000, 1_000_000)
+}
+
+/// 重複した key を含む、`keys` 個の key と上書き 40 組の Dict リテラルを 1 回作る script。
+fn dup_literal_script(keys: usize, first: &str) -> String {
+    let mut items: Vec<String> = (0..keys).map(|i| format!("\"k{i}\": 0")).collect();
+    for _ in 0..40 {
+        items.push(format!("\"a\": {first}"));
+        items.push("\"a\": 1".to_string());
+    }
+    format!(
+        "let e = [[1]]\nlet z = 0\nlet d = {{{}}}\n",
+        items.join(", ")
+    )
+}
+
+/// VDL-AT-03: 構築の途中の `max_collection_elements` の超過と heap の超過は、tree と VM で同じ kind・line で止まる。
+/// 重複した key（既存の key の上書き）は collection の候補サイズに数えない。
+#[test]
+fn vdl_at_03_collection_and_heap_limits_stop_in_both_engines() {
+    let source = dup_literal_script(30, "e");
+    // collection: 30 key + "a" の 31 entry。上限 31 は通り、30 は新しい "a" の挿入で止まる。
+    for use_vm in [false, true] {
+        let mut ok = base_config();
+        ok.max_collection_elements = 31;
+        let (_, r) = run_with(&source, ok, use_vm);
+        assert!(r.is_ok(), "vm={use_vm}: 31 entry は通る: {r:?}");
+    }
+    let mut limited = base_config();
+    limited.max_collection_elements = 30;
+    let (tu, t) = run_with(&source, limited, false);
+    let (vu, v) = run_with(&source, limited, true);
+    let (t, v) = (t.expect_err("tree"), v.expect_err("vm"));
+    assert_eq!(t.kind(), Some(tsumugi::error::ErrorKind::CollectionLimit));
+    assert_eq!(t, v, "terminal の全 field が一致");
+    assert_eq!(tu.committed, vu.committed, "止まった時点の累積が一致");
+
+    // heap: 各 backend の無制限の peak より少し小さい上限で、構築の途中に止まる。
+    let (tp, _) = run_with(&source, base_config(), false);
+    let (vp, _) = run_with(&source, base_config(), true);
+    for (use_vm, peak) in [(false, tp.peak_heap_bytes), (true, vp.peak_heap_bytes)] {
+        let mut small = base_config();
+        small.max_live_heap_bytes = peak - 100;
+        let (_, r) = run_with(&source, small, use_vm);
+        let e = r.expect_err("heap の上限");
+        assert_eq!(
+            e.kind(),
+            Some(tsumugi::error::ErrorKind::HeapLimit),
+            "vm={use_vm}: {e:?}"
+        );
+        assert_eq!(e.line(), 3, "vm={use_vm}");
+        let mut exact = base_config();
+        exact.max_live_heap_bytes = peak;
+        assert!(
+            run_with(&source, exact, use_vm).1.is_ok(),
+            "vm={use_vm}: peak ちょうどは通る"
+        );
+    }
+}
+
+/// VDL-AT-03: 深い値を浅い値で上書きする形と、上書きしても深度が変わらない形で、各 backend の
+/// 累積（fuel・string・collection の peak など）と `live_heap` / `peak_heap` が同じ（読み直しは課金も heap も動かさない）。
+#[test]
+fn vdl_at_03_usage_does_not_depend_on_overwrite_depth() {
+    // 最後に残る内容は同じ（"a": 1）。途中で深い値 `e` を入れて浅い値で上書きするか、浅い値だけか。
+    let shallow = dup_literal_script(50, "z");
+    let deep = dup_literal_script(50, "e");
+    for use_vm in [false, true] {
+        let (a, ra) = run_with(&shallow, base_config(), use_vm);
+        let (b, rb) = run_with(&deep, base_config(), use_vm);
+        ra.expect("shallow");
+        rb.expect("deep");
+        assert_eq!(a.committed, b.committed, "vm={use_vm}");
+        assert_eq!(a.peaks, b.peaks, "vm={use_vm}");
+        // 2 形は変数の読み取り（`z` と `e`）だけが違い、bytecode・source の大きさは同じ。
+        assert_eq!(a.live_heap_bytes, b.live_heap_bytes, "vm={use_vm}");
+        assert_eq!(a.peak_heap_bytes, b.peak_heap_bytes, "vm={use_vm}");
+    }
+    let (t, _) = run_with(&shallow, base_config(), false);
+    let (v, _) = run_with(&shallow, base_config(), true);
+    assert_eq!(t.committed, v.committed, "tree と VM の累積");
+}
