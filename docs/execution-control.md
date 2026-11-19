@@ -3066,6 +3066,31 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
 - **外した語**: 跨入力生成の不変量の見出しの「finding 2」（PR-6b の設計レビューの指摘番号）、実現機構の見出しの「設計として確定・実装者が選ぶ余地を残さない」、関数 header の token を指す「PR-c の」、engine 共通の単一基準へ寄せる却下案の名前「A-2」（2 か所。「A-2 のような」「A-2 のように」。A-2 の定義は §14 Slice 6 にある）。
 - **直前の小節のメモとの対応**: 直前の小節「§5.3 にあった設計レビュー対応メモ」の [MEDIUM] の 3 項目めが撤回したと書く「再利用」の表現と、「走査を body 単位の小計へ再構成する必須作業」の文は、§5.3 から外し、この小節の「tree の走査を改造する必要があった理由」の引用へ移した（§5.3 には走査の規則だけが残る）。
 
+### fix-tree-while-condition-once 実装スライス（tree の `while` が初回の条件を 2 回評価しない）
+
+[issue #400](https://github.com/kamonabe1927/Tsumugi/issues/400)（kamonabe、[issue #393](https://github.com/kamonabe1927/Tsumugi/issues/393) の不具合の取り込み。issue の仕分けで「受け入れ」）から作ったスライス（`slices.toml` の `fix-tree-while-condition-once`）。issue は原因の調査を設計に含めるとしたので、この設計 PR で調べた。目標の規範は[言語仕様](language-spec.md)「while」（この設計 PR で条件の評価回数を書き足した。判断役が選択（PR #449）、Q1=A）と「エラーの kind とメッセージ（正本）」で、現在の差は同書の逸脱一覧の行にある。
+
+- **決定記録（判断役が選択（PR #449）、Q1=A）:** `while` の条件は各イテレーションの前に 1 回だけ評価する（初回も同じ）と決め、tree を VM に揃える（[言語仕様](language-spec.md)「while」に書き足した）。理由: A・B ともマニフェストに反しないが、A は条件の副作用と課金の回数が反復の回数だけで決まり（n 回実行なら n + 1 回、`break` なら n 回）、利用者が予測できる（原則 5 の説明可能性）。[決定性・実行時監査仕様](determinism-and-audit.md) §2.1 は tree を規範 backend としつつ tree の bug を無条件に仕様へ昇格しないと定めており、初回だけの 2 回評価は driver の作りから生じたもので意図した意味ではない。`if`（条件 1 回）・`for`（反復元 1 回）とも揃い、§14 F-1 の (F2)「呼び出し 1 回につき 1」の定義を変えずに二重課金が消える。変更は tree の `while` の driver の初回 1 か所で、VM・課金点・`fuel_accounting_revision` は変えない（原則 8）。「反復ごとに 1 回」は TWC-AT-01..04 の paired test でそのまま確かめられる（原則 9）。採らなかった案: B（tree の初回 2 回評価を規範にして VM を合わせる）は、条件の副作用と課金が初回だけ重複する説明しにくい意味を言語仕様に固定し、§2.1 の「tree の bug を仕様へ昇格しない」とも合わず、正しく動いている VM の lowering に重複した評価を足すことになる。issue #400 は「tree が規範なので VM 側を tree に揃える」と書くが、同じ issue が原因の調査を設計に含めるとしており、調べた結果、原因は tree 側だった。issue の期待する挙動（終了理由の kind・message・line が tree と VM で完全に一致する）は A で満たす。
+- **原因（main e9e7aa8 で確かめた）:** issue #393 の行番号の差は、fuel の課金点と行の対応のずれではなく、tree の `while` が、初回の条件が真のとき条件を 2 回評価することによる。`Stmt::While`（`src/eval.rs` の `exec_stmt`）と、条件が式 frame を要するときの `CallDest::WhileFirst`（同 `exec_driver_slot_stmt` から積む根の式 frame の受け渡し先）は、どちらも条件を 1 回評価して真なら `enter_while` で While controller frame（空の stmts、`pending_step: false`）を積むだけで、本体は積まない。driver はその frame をすぐ `advance_frame` の `LoopAction::While` へ渡し、そこで条件をもう一度評価してから最初の反復の本体を積む。そのため条件の副作用が初回だけ 2 回起きる。
+  - 出力: `fn t(x)` が `print("c")` して `x` を返すとき、`while t(n < 1)` で本体が `n = n + 1` のプログラムは、tree が `c` を 3 回、`--vm` 版が 2 回出す。`while t(true)` の本体が `break` だけなら tree 2 回・VM 1 回。builtin の副作用（`while print("c") == null and n < 1`）でも同じ（tree 3 回・VM 2 回）。どれも CLI（既定の safe profile）で確かめた。
+  - fuel: 条件にユーザー関数の呼び出しがあると (F2) `PrepareCall` の課金が初回だけ 1 つ多い。`fn f(p) return p end` のもとで `while f(n < 1)` が 1 回回るのに要る最小の fuel は tree 4・VM 3、2 回なら tree 6・VM 5（条件に呼び出しの無い `while n < 1` は両方 1、`while f(false)` は両方 1）。課金の順序が 1 つずれるので、ステップ上限で止まったときの行が fuel によって入れ替わる（issue #393 のプログラムでは、課金の 1 周期が「6 行目の `f(f)`・9 行目の `f(g)`・6 行目の back-edge」の 3 つで、fuel 3 の倍数のときだけ一致する）。外側の `try` と内側の `while` は関係せず、`while f(f)` を `while true` にすると条件の呼び出しが無くなるので一致する。
+  - VM（`src/compiler.rs` の `Stmt::While` の lowering）は反復ごとに条件を 1 回だけ評価しており、変えない。
+- **実装範囲:**
+  - tree の `while` で、条件が真になった評価 1 回につき本体を 1 回積む。`Stmt::While` の直接の経路と `CallDest::WhileFirst` の経路の両方で、初回の条件が真なら While controller frame を積んだうえで、条件を評価し直さずに最初の反復の本体を積む（`pending_step` を立てて `begin_loop_iteration` を呼ぶのと同じ状態にする）。2 回目以降の反復（`LoopAction::While` と `CallDest::WhileIter`）は変えない。形（`enter_while` に最初の反復を積ませるか、controller に「初回の条件は評価済み」の印を持たせるか）は実装 PR で決めてよい。
+  - fuel の課金点（(F1) back-edge・(F2) `PrepareCall`・(F3) callback、§14「F-1 実装スライス」）とその行は変えない。条件の評価が 1 回減ることで、条件の中の呼び出しの課金が初回だけ 1 つ減り、VM と一致する。
+  - slice yield と resume（tree-expr-continuation-e2b の式 frame の経路）でも、条件の評価回数と fuel が同期の実行と同じになる。
+  - done にする実装 PR で、`tests/random_input_robustness.rs` の `known_divergence_step_limit_line_after_caught_error` の `#[ignore]` を外し、`KNOWN_STEP_LIMIT_LINE_DIVERGENCES` から `program#143` を消す（中身が空になる定数と `without_step_limit_line` を残すか消すかは実装 PR で決めてよい）。[言語仕様](language-spec.md)の逸脱一覧から issue #393 の行を削除する。
+- **範囲外:**
+  - VM の `while`、`for`（反復元は 1 回だけ評価し、items を controller が持つ）、`if`（条件は 1 回）。どれもこの不具合を持たない。
+  - F-2 の課金表への移行（式・操作の課金点）。現状の fuel は文・反復・呼び出しだけを数える（冒頭の未実装範囲）。
+- **課金の変化:** 条件にユーザー関数の呼び出しがあり初回の条件が真になる `while` で、tree の fuel が初回の条件の呼び出しの課金ぶん（呼び出し 1 つにつき 1）減り、VM と同じになる。VM は変わらない。tree の fuel が変わるが、変更前の値は §14「F-1 実装スライス」の (F2) の課金点の定義（呼び出し 1 回につき 1。条件の評価 1 回につき呼び出しを 1 回課金）に反した二重課金なので、`fuel_accounting_revision` は変えない（実装 PR の「仕様外で判断した点」で扱う。課金点の定義は変わらない）。`language_revision` も変えない（目標の挙動は VM と同じで、tree の挙動を目標へ戻す修正）。
+- **想定の変更規模:** `src/` は 15〜60 行程度（`src/eval.rs` の `Stmt::While`・`CallDest::WhileFirst`・`enter_while` まわり）。テストは `tests/` と unit test で 80〜200 行。docs は言語仕様の逸脱一覧の 1 行の削除。触る仕組みは「tree の `while` の driver（controller frame の初回）」1 つ。受入基準は 4 項目。§14.1（[開発ループ手順書](loop-runbook.md)）に収まる。
+- **受入基準:**
+  - **TWC-AT-01（条件は反復ごとに 1 回）:** 条件に副作用（`print` するユーザー関数、`print` の builtin）がある `while` で、本体が n 回実行されるとき条件の副作用がちょうど n + 1 回（`break` で抜けるときは n 回）起き、tree と VM で stdout が一致する。n = 0・1・2 と、初回の反復で `break`・`continue` する場合を含む。確かめ方: 両 backend の paired test（CLI と `Evaluator` / `Vm` の両方）。
+  - **TWC-AT-02（fuel の一致）:** 条件にユーザー関数の呼び出しがある `while`（`while f(n < k)`、k = 1・2・3、入れ子の `while` と `try` の中を含む）で、tree と VM の `committed.fuel` が一致し、上限 N に対する成功・失敗の境界が一致する（`while f(n < 1)` は fuel 3 で成功、2 で `limit`）。確かめ方: 両 backend の paired test（semantic-decisions の「fuel parity」と同じ形）。
+  - **TWC-AT-03（issue #393 の再現）:** issue #393 のプログラムを fuel 1〜30 と 20,000 で実行したとき、終了理由の kind・message・行が tree と VM で完全に一致する。`known_divergence_step_limit_line_after_caught_error` が `#[ignore]` なしで通り、`KNOWN_STEP_LIMIT_LINE_DIVERGENCES` に `program#143` が無い状態で `random_valid_programs_never_panic_and_engines_agree` が通る。確かめ方: `tests/random_input_robustness.rs` と、fuel を振る paired test。
+  - **TWC-AT-04（yield をまたいでも同じ）:** 条件の呼び出しの途中・本体の途中で slice yield する実行（scheduler の handle 経路で小さい `max_fuel` の slice に分ける）で、条件の副作用の回数・stdout・`committed.fuel` が同期の実行と同じになる。確かめ方: 既存の tree-expr-continuation-e2b のテストと同じ形の test。
+
 ## 15. 境界受入テスト
 
 実装完了には、通常unit testに加えて次をすべて自動化する。
