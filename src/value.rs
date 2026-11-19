@@ -98,8 +98,19 @@ impl ChildDepth for Vec<Value> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// 空でない Dict の全 entry の深度を読んだ回数（unit test 専用。VDL-AT-01 で、Dict リテラルの
+    /// 構築の読み直しが 1 リテラルにつき 1 回であることを両 backend で比べる）。
+    pub(crate) static DICT_SUMMARY_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 impl ChildDepth for BTreeMap<String, Value> {
     fn child_depth_summary(&self) -> (u32, u32) {
+        #[cfg(test)]
+        if !self.is_empty() {
+            DICT_SUMMARY_READS.with(|c| c.set(c.get() + 1));
+        }
         summarize_depths(self.values())
     }
 }
@@ -1312,20 +1323,44 @@ impl Value {
         budget: &mut crate::budget::BudgetLedger,
         phase: ExecutionPhase,
     ) -> Result<(), ControlStop> {
-        self.index_set_impl(target, value, budget, phase, true)
+        self.index_set_impl(target, value, budget, phase)
     }
 
-    /// [`Value::index_set_tracked`] の、深度の読み直しに fuel を課金しない版。VM の Dict
-    /// リテラルの構築（`DictInsert`）専用。tree の Dict リテラルは最後に 1 回だけ要約して
-    /// 読み直さないので、lowering の差を script の fuel に出さないために課金しない（§4.1）。
-    pub(crate) fn index_set_tracked_uncharged_settle(
+    /// VM の Dict リテラルの構築（`DictInsert`）で 1 組を入れる。backing の深度の要約は更新せず
+    /// （読み直しもしない）、heap の delta 課金だけを行う。リテラルを作り終えたとき
+    /// [`Value::dict_literal_settle`] が 1 回だけ全 entry から要約する（tree の `Value::new_dict` と
+    /// 同じ量の仕事、semantic-decisions §21.3「リテラル」）。構築中の Dict はスクリプトから見えない。
+    pub(crate) fn dict_literal_insert(
         &mut self,
-        target: IndexTarget,
+        key: String,
         value: Value,
         budget: &mut crate::budget::BudgetLedger,
         phase: ExecutionPhase,
     ) -> Result<(), ControlStop> {
-        self.index_set_impl(target, value, budget, phase, false)
+        if let Value::Dict(dict) = self {
+            Value::detach_dict(dict, budget, phase)?;
+            let old_bytes = dict.bytes;
+            {
+                let tracked = Rc::get_mut(dict).expect("detach 後は一意所有");
+                tracked.data_mut().insert(key, value);
+            }
+            Value::retrack_dict(dict, old_bytes, budget, phase)?;
+        }
+        Ok(())
+    }
+
+    /// Dict リテラルを作り終えたとき、全 entry の深度を 1 回だけ要約する。fuel は課金しない。
+    pub(crate) fn dict_literal_settle(
+        &mut self,
+        budget: &mut crate::budget::BudgetLedger,
+        phase: ExecutionPhase,
+    ) -> Result<(), ControlStop> {
+        if let Value::Dict(dict) = self {
+            Value::detach_dict(dict, budget, phase)?;
+            let tracked = Rc::get_mut(dict).expect("detach 後は一意所有");
+            tracked.settle_child_depth(true);
+        }
+        Ok(())
     }
 
     fn index_set_impl(
@@ -1334,7 +1369,6 @@ impl Value {
         value: Value,
         budget: &mut crate::budget::BudgetLedger,
         phase: ExecutionPhase,
-        charge_settle: bool,
     ) -> Result<(), ControlStop> {
         match (self, target) {
             (Value::List(list), IndexTarget::ListIndex(idx)) => {
@@ -1344,7 +1378,7 @@ impl Value {
                     .data
                     .get(idx)
                     .is_some_and(|old| list.settle_needed(old.depth(), Some(new_depth)));
-                if needed && charge_settle {
+                if needed {
                     budget.charge_fuel(list.data.len() as u64, phase)?;
                 }
                 Value::detach_list(list, budget, phase)?;
@@ -1367,7 +1401,7 @@ impl Value {
                     .data
                     .get(&key)
                     .is_some_and(|old| dict.settle_needed(old.depth(), Some(new_depth)));
-                if needed && charge_settle {
+                if needed {
                     budget.charge_fuel(dict.data.len() as u64, phase)?;
                 }
                 Value::detach_dict(dict, budget, phase)?;
@@ -2429,21 +2463,6 @@ mod tests {
             6,
             "entry 数（5 + 新 key）"
         );
-
-        // リテラルの構築（課金しない版）は、読み直しが起きても課金しない。
-        let mut map = BTreeMap::new();
-        map.insert("a".to_string(), deep(&mut budget));
-        let mut lit = Value::new_dict(map, &mut budget, ExecutionPhase::Run).unwrap();
-        let before = budget.committed_fuel();
-        lit.index_set_tracked_uncharged_settle(
-            IndexTarget::DictKey("a".to_string()),
-            Value::Int(1),
-            &mut budget,
-            ExecutionPhase::Run,
-        )
-        .unwrap();
-        assert_eq!(budget.committed_fuel(), before);
-        assert_eq!(lit.depth(), 1);
     }
 
     #[test]
