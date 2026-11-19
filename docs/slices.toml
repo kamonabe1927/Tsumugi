@@ -653,6 +653,7 @@ status     = "ready"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-repl-import-gate 実装スライス（tree REPL と VM REPL の import を同じ PR で resolver gate に通す）" }
 acceptance = ["RIG-AT-01..05"]
+design_pr  = 444
 order      = 90
 
 [[slice]]
