@@ -1308,6 +1308,59 @@ issue #327 の Q2=A を scheduler の handle 経路（alpha `Engine`、`src/engi
   [脅威モデル](threat-model.md) の逸脱一覧の REPL・handle 経路の行のうち handle の部分を削除する（REPL の 2 本が done なら行ごと削除する）。execution-control の逸脱一覧（§9.1）の行は形の差として残す。
 - **依存**: REPL の 2 本（fix-repl-import-gate-tree / -vm）が `ModuleLoader` を使わなくなってから削除するので、その 2 本に依存する。2 本が done になったら、設計 PR（`design_pr` を記入）で `ready` にする。
 
+### fix-repl-import-gate 実装スライス（tree REPL と VM REPL の import を同じ PR で resolver gate に通す）
+
+issue #366（kamonabe、issue #353 の進め方 A）により、fix-repl-import-gate-tree と fix-repl-import-gate-vm（どちらも PR #339 の設計、issue #353 で `blocked`）を
+この 1 本にまとめる。2 本は `slices.toml` から外し（分割のときと同じく、元の id は置き換えて残さない）、上の 2 つの小節は PR #339 の時点の記録として残す。
+目標（§10、issue #327 の Q1=A、PR #339 の設計）は変えない。取り消し（PR #351 の方向）はしない。
+fix-handle-import-from-link の `depends_on` は、この 1 本に付け替えた（同小節の「依存」の「REPL の 2 本」は、このスライスを指すものとして読む）。
+
+- **まとめた理由**: 2 本を別の実装 PR にすると、片方だけが入った間に、同じ REPL 入力・同じ権限で tree は `Denied`・`--vm` は import が成功する（またはその逆）。
+  これは [マニフェスト](manifesto.md) 原則 5（予測可能性。backend 間で意味論を変えない）に反するため（issue #353 の経緯、issue #366）。
+  tree と VM の REPL の import の挙動は、この 1 本の実装 PR で同時に変える。
+- **§14.1 の例外**: [開発ループ手順書](loop-runbook.md) §14.1 の「触る仕組みは 1 つまで」を超える（tree REPL の link/run の入口と、VM REPL の session の 2 つ）。
+  同じ変更（submission ごとに link 時の resolver gate に通し、link の graph から展開する）を 2 つの backend に当てるもので、原則 5 を守るための例外として
+  issue #366 で kamonabe が認めた。`src/` の行数（下の「想定の変更規模」）と受入基準の数は §14.1 の上限に収まる。この例外は、このスライスだけに当てはまる。
+- **実装範囲**: fix-repl-import-gate-tree の実装範囲 1〜3 と、fix-repl-import-gate-vm の実装範囲 1〜3 を合わせたもの（内容は上の 2 つの小節のとおり。要点を次に挙げる）。
+  1. tree REPL（`src/main.rs` の `run_repl` / `execute_repl_submission`）: 各 submission を `link_for_repl` でなく `Engine::link`（session の frozen set）に通し、
+     `LinkError` は `print_link_error` で表示して language-state を変えずに次の入力へ進む（`InternalFailure` だけは session を終える）。
+  2. `src/embedding.rs` の `run_for_repl`: link が確かめた graph から import を展開する（§10 の展開の規則、完了しなかった submission が展開した module の巻き戻し、
+     run の `Link` フェーズでの課金）。REPL の budget のライフサイクルは変えない。`link_for_repl` と REPL 用の `ModuleLoader` の分岐を削除する。
+  3. VM REPL（`src/main.rs` の `run_repl_vm`）: 各 submission を `EmbeddingEngine::compile`（`retain_source = true`）→ `Engine::link` に通し、`LinkError` は tree と同じく表示して次へ進む。
+     session が `ModuleId → source_hash` の展開済みの表を持ち、§10 の規則をそのまま当てはめる。表は `compiler_checkpoint` と同じ transaction に入れ、
+     compile error・runtime error で終わった submission が足した行を巻き戻す。source/import の課金は Link フェーズで行う。
+  4. `run_repl_vm` と `src/main.rs` から `ModuleLoader` を外す。
+  5. REPL の import の固定エラー文字列や `ModuleLoader` を前提にする既存テスト（`tests/integration.rs` の `tree_repl_retries_failed_import`・
+     `repl_imported_names_resolve_across_submissions_in_both_engines`・`repl_resolves_imports_before_execution_in_both_engines`、ILG-AT-04 の「REPL は不変」の部分）を、
+     `--allow-import-root` を渡す形と file/stdin の診断に、tree と `--vm` の両方で直す。
+- **範囲外**: scheduler の handle 経路（fix-handle-import-from-link）、`ModuleLoader` 本体・`sandbox.rs` の削除（handle 経路が使う）、VM backend adapter（E9 残）、
+  REPL の起動時の既定 grant（issue #327 の Q1 の案 B。採らない）、REPL のプロンプト・バナーの文言。
+- **観測される変化**: tree と `--vm` の REPL で、`--allow-import-root` なしの import は file/stdin と同じ `Denied` の診断になり、session は続く。
+  `--allow-import-root default=.` を渡せば今までの CWD 相対の import と同じ使い方になる。import の失敗の文字列は file/stdin と同じになる。
+  `TSUMUGI_SANDBOX` は REPL の import の成否に関わらなくなる。どの入力でも tree と `--vm` の結果は同じである。
+- **受入基準（fix-repl-import-gate）**: RIT-AT-01..04 と RIV-AT-01..04（計 8 項目）を引き継ぎ、§14.1 の 5 項目に収めるため、tree と `--vm` に同じ入力を与えて
+  同じ結果になることを確かめる差分テストに寄せて整理した（issue #366）。subprocess test は、1 つの入力と期待値の組を tree と `--vm` の両方で回す形にする。
+  - **RIG-AT-01**（未 grant。RIT-AT-01・RIV-AT-01）: tree と `--vm` の REPL を `--allow-import-root` なしで起動し、CWD にある `m.tsg` を `import "m.tsg"` すると、両方とも
+    stderr に file/stdin と同じ `Denied` の診断が出て、`m.tsg` の top-level の効果（`print`）が出ない。続く submission（`print(1)`）は実行され、EOF で exit 0。
+    stdout・stderr・exit code は tree と `--vm` で一致する。確かめ方: `tests/integration.rs` の subprocess test（両 backend を同じ期待値で回す）。resolver を呼ばないことは
+    埋め込み API の test（呼ばれたら数える resolver を grant しない `Engine::link` が `Denied`）で確かめる。
+  - **RIG-AT-02**（grant あり・submission をまたぐ。RIT-AT-02・RIV-AT-02）: `--allow-import-root default=.` で `import "m.tsg"` した名前が後の submission から使え、
+    同じ `import` を 2 回目の submission に書いても top-level の効果は 1 回だけ出る。tree と `--vm` で出力が一致する。確かめ方: RIG-AT-01 と同じ形の subprocess test。
+  - **RIG-AT-03**（巻き戻しと hash。RIT-AT-03・RIV-AT-03）: (a) import の後に未捕捉の runtime error で終わった submission の後、同じ import を書いた submission で
+    module が再び展開される（top-level の効果が出る）。(b) compile error で終わった submission の import も同じく巻き戻される。(c) 展開済みの `m.tsg` の内容を
+    submission の間に書き換えて再び import すると、1 文も実行せずに §10 の hash の食い違いの失敗になり、session は続く。(a)〜(c) とも tree と `--vm` で出力が一致する。
+    確かめ方: RIG-AT-01 と同じ形の subprocess test。
+  - **RIG-AT-04**（run は graph だけを読む。RIT-AT-04）: in-memory resolver（on-disk に無い module を返す）を grant した `Engine::link` の `LinkedScript` を
+    `run_for_repl` に渡すと、その module が展開されて実行される。import を含み graph に module の無い `LinkedScript` を渡すと `InternalFailure`（§10 の内部契約違反）。
+    確かめ方: `src/embedding.rs` か `tests/` の埋め込み API の test。
+  - **RIG-AT-05**（ambient な経路を使わない。RIV-AT-04 と fix-repl-import-gate-tree の実装範囲 3）: `src/main.rs` に `ModuleLoader` の参照が無く、`src/embedding.rs` に
+    `link_for_repl` が無い。`TSUMUGI_SANDBOX` を import root と関係の無いディレクトリにしても、tree と `--vm` の REPL の import の成否が `--allow-import-root` だけで決まり、
+    両 backend で一致する。確かめ方: subprocess test と、`grep` の確認を PR 本文に貼る。
+- **想定の変更規模**: fix-repl-import-gate-tree の 150〜300 行と fix-repl-import-gate-vm の 160〜310 行を合わせ、`src/` は 310〜610 行（削除を含む）。
+  テストは +180〜350 行と既存 3〜4 本の修正。§14.1 の行数（1000 行以内）と受入基準（5 項目以内）に収まり、触る仕組みは上の例外のとおり 2 つ。
+  done にする実装 PR で、逸脱一覧の REPL（tree・VM）の行を削除し、[脅威モデル](threat-model.md) の逸脱一覧の REPL・handle 経路の行から REPL の部分を除く。
+- **依存**: なし（fix-import-run-from-link-graph は done）。
+
 ## 19. 受入基準
 
 | ID | Phase | 基準 |
