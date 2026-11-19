@@ -11,6 +11,12 @@ use crate::opcode::{CaptureDesc, MutationTarget, OpCode};
 use crate::value::Value;
 use crate::verifier::VerifiedChunk;
 
+/// `for` が内部で持つ反復列と位置の local 名。`<` を含み識別子として書けないので、
+/// 名前の解決（resolve_local / resolve_upvalue / 祖先の捕捉）はスクリプトの名前と一致しない
+/// （言語仕様「名前の可視性と解決時期」、fix-vm-for-hidden-locals）。
+const HIDDEN_FOR_COLLECTION: &str = "<for-collection>";
+const HIDDEN_FOR_INDEX: &str = "<for-index>";
+
 /// ローカル変数の情報
 #[derive(Debug, Clone)]
 struct Local {
@@ -471,12 +477,12 @@ impl Compiler {
         // 辞書/文字列をリストに変換（リストはそのまま）
         self.chunk.emit(OpCode::ToIterList, line);
         let collection_slot = self.locals.len();
-        self.add_local("__collection__".to_string());
+        self.add_local(HIDDEN_FOR_COLLECTION.to_string());
 
         // インデックスカウンタ (0) を積む
         self.chunk.emit_constant(Value::Int(0), line);
         let index_slot = self.locals.len();
-        self.add_local("__index__".to_string());
+        self.add_local(HIDDEN_FOR_INDEX.to_string());
 
         // ループ変数をnullで初期化
         self.chunk.emit_constant(Value::Null, line);
@@ -1543,5 +1549,69 @@ mod tests {
             .patch_jump(99)
             .expect_err("範囲外の offset を patch できてしまった");
         assert_eq!(out_of_range.kind(), Some(crate::error::ErrorKind::Internal));
+    }
+
+    /// VFH-AT-04: `for` の隠しローカルは名前の解決に引かれない名前を持ち、この 2 つの名前を書かない
+    /// `for` の命令列・定数・local の数は隠しローカルの名前に依らない（名前だけを変えた）。
+    #[test]
+    fn vfh_at_04_for_hidden_locals_are_unnameable_and_shape_is_stable() {
+        let compile = |source: &str| {
+            let program = parse(source);
+            Compiler::new()
+                .compile(&program)
+                .expect("compile に失敗")
+                .into_inner()
+        };
+        // 命令列・定数・max_locals（main と関数・lambda の prototype を深さ優先で並べた Debug 表記）。
+        fn dump(chunk: &crate::chunk::Chunk, out: &mut Vec<String>) {
+            out.push(format!(
+                "{:?} constants={:?} max_locals={}",
+                chunk.code, chunk.constants, chunk.max_locals
+            ));
+            for proto in &chunk.prototypes {
+                dump(&proto.chunk, out);
+            }
+        }
+        let cases = [
+            "for x in [1, 2]\n  print(x)\nend\n",
+            "for x in \"ab\"\n  if x == \"a\"\n    continue\n  end\n  break\nend\n",
+            "for k in {\"a\": 1}\n  for y in [1]\n    print(k)\n  end\nend\n",
+            "for x in [1]\n  let g = fn()\n    return x\n  end\n  g()\nend\n",
+            "fn f()\n  for x in [1]\n    let g = fn()\n      return x\n    end\n    g()\n  end\nend\nf()\n",
+        ];
+        // 変更前（隠しローカルの名前が `__collection__` / `__index__` のとき）の命令列。
+        let golden: [&[&str]; 5] = [
+            &[
+                "[LoadConst(0), LoadConst(1), ListPush, LoadConst(2), ListPush, ToIterList, LoadConst(3), LoadConst(4), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(25), Pop, GetLocal(1), IndexLocal(0), GetLocal(2), Print(1), LoadConst(5), Pop, GetLocal(1), LoadConst(6), Add, SetLocal(1), Pop, Loop(8), PopN(3), Return] constants=[List([]), Int(1), Int(2), Int(0), Null, Null, Int(1)] max_locals=3",
+            ],
+            &[
+                "[LoadConst(0), ToIterList, LoadConst(1), LoadConst(2), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(23), Pop, GetLocal(1), IndexLocal(0), GetLocal(2), LoadConst(3), Eq, JumpIfFalse(16), Jump(17), Jump(23), GetLocal(1), LoadConst(4), Add, SetLocal(1), Pop, Loop(4), PopN(3), Return] constants=[Str(\"ab\"), Int(0), Null, Str(\"a\"), Int(1)] max_locals=3",
+            ],
+            &[
+                "[LoadConst(0), LoadConst(1), LoadConst(2), DictInsert, ToIterList, LoadConst(3), LoadConst(4), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(44), Pop, GetLocal(1), IndexLocal(0), LoadConst(5), LoadConst(6), ListPush, ToIterList, LoadConst(7), LoadConst(8), GetLocal(4), LenLocal(3), Lt, JumpIfFalse(37), Pop, GetLocal(4), IndexLocal(3), GetLocal(2), Print(1), LoadConst(9), Pop, GetLocal(4), LoadConst(10), Add, SetLocal(4), Pop, Loop(20), PopN(3), GetLocal(1), LoadConst(11), Add, SetLocal(1), Pop, Loop(7), PopN(3), Return] constants=[Dict({}), Str(\"a\"), Int(1), Int(0), Null, List([]), Int(1), Int(0), Null, Null, Int(1), Int(1)] max_locals=6",
+            ],
+            &[
+                "[LoadConst(0), LoadConst(1), ListPush, ToIterList, LoadConst(2), LoadConst(3), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(26), Pop, GetLocal(1), IndexLocal(0), MakeClosure(0), PrepareCall, GetLocal(3), ValidateCall(0), Call(0), Pop, PopN(1), GetLocal(1), LoadConst(4), Add, SetLocal(1), Pop, Loop(6), PopN(3), Return] constants=[List([]), Int(1), Int(0), Null, Int(1)] max_locals=4",
+                "[GetUpvalue(0), ReturnValue, LoadConst(0), ReturnValue] constants=[Null] max_locals=1",
+            ],
+            &[
+                "[MakeClosure(0), RegisterGlobal(\"f\", 0), PrepareCall, GetLocal(0), ValidateCall(0), Call(0), Pop, Return] constants=[] max_locals=1",
+                "[LoadConst(0), LoadConst(1), ListPush, ToIterList, LoadConst(2), LoadConst(3), GetLocal(2), LenLocal(1), Lt, JumpIfFalse(26), Pop, GetLocal(2), IndexLocal(1), MakeClosure(0), PrepareCall, GetLocal(4), ValidateCall(0), Call(0), Pop, PopN(1), GetLocal(2), LoadConst(4), Add, SetLocal(2), Pop, Loop(6), PopN(3), LoadConst(5), ReturnValue] constants=[List([]), Int(1), Int(0), Null, Int(1), Null] max_locals=5",
+                "[GetUpvalue(0), ReturnValue, LoadConst(0), ReturnValue] constants=[Null] max_locals=1",
+            ],
+        ];
+        for (source, expected) in cases.iter().zip(golden) {
+            let chunk = compile(source);
+            let mut actual = Vec::new();
+            dump(&chunk, &mut actual);
+            assert_eq!(actual, expected, "{source}");
+        }
+        // 隠しローカルの名前は識別子として書けない（resolve_local が script の名前と一致させない）。
+        for name in [HIDDEN_FOR_COLLECTION, HIDDEN_FOR_INDEX] {
+            assert!(
+                !name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()),
+                "{name} が識別子として書ける"
+            );
+        }
     }
 }
