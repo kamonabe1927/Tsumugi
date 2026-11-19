@@ -1116,7 +1116,7 @@ order      = 112
 #   fix-value-depth-settle-quadratic と同じ REV-001。見積もり: src/ 40〜100 行、触る仕組みは VM の Dict リテラルの lowering 1 つ、受入基準 4。
 # fix-dict-retrack-key-bytes: retrack_dict（Dict の heap の delta 課金）が挿入のたびに全 key の byte 長を数え直し、VM の Dict リテラルと
 #   index 代入による Dict の構築が entry 数の 2 乗の時間になる件（PR #371 のレビューで出た）。issue #374 が「仕組みが別なので別の fix」と
-#   したもの。未設計（todo）。この設計 PR の判断の候補 Q1 の推奨案（A）では、issue #374 の「重複した key を含むリテラルをループで評価したとき
+#   したもの。未設計（todo）。PR #447 の判断の候補 Q1 の推奨案（A）では、issue #374 の「重複した key を含むリテラルをループで評価したとき
 #   時間が fuel に比例する」受入基準をこのスライスに置く（retrack_dict が残る間は VM の時間が entry 数 × 挿入の回数のままで、
 #   fix-vm-dict-literal-depth-settle だけでは壁時計で確かめられないため）。直し方の見込み: dict_body は 24 + 64 × entry 数 + key の byte 長の
 #   合計なので、新しい key のときだけ 64 + key の byte 長を足す delta にでき、backing に field は要らない。見積もり: src/ 15〜40 行、触る仕組みは
@@ -1132,6 +1132,7 @@ parent     = "REV-001"
 spec       = { doc = "docs/execution-control.md", section = "fix-vm-dict-literal-depth-settle 実装スライス（VM の Dict リテラルの構築で深度を読み直さない）" }
 acceptance = ["VDL-AT-01..04"]
 depends_on = ["fix-value-depth-settle-quadratic"]
+design_pr  = 447
 order      = 113
 
 [[slice]]
