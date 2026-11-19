@@ -1,6 +1,6 @@
 # Tsumugi — 次期意味論・実装決定
 
-最終更新: 2026-11-14
+最終更新: 2026-11-19
 
 設計ステータス: **次期仕様確定（本文）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -25,6 +25,7 @@ Q2=A。当時の[開発ループ手順書](loop-runbook.md) §7.5）。理由: �
 | user call の評価順が目標と違う。目標（§5.1・§17.5.2）は「動的 callee を先に一度だけ評価・分類し、user callable の場合だけ step と深度を検査する」（callee 先行）だが、実装は現行の [言語仕様](language-spec.md)「ユーザー定義関数の呼び出し順序」のとおり「step と深度を検査してから callee を評価する」。tree（`src/eval.rs` の user call の準備で `begin_user_call` が callee の評価より前）と VM で同じで、深度 128 の内側で `[print("x"), g][1](…)` を呼ぶと、両 backend とも `x` を出さずに `overflow` になる。深度の境界値（128 user frame、§5.1）は両 backend で目標どおり。callee 先行への切り替えは `LanguageRevision` を上げる破壊的変更で、まだスライスが無い（ロードマップの REV-012 の `callee-precedence`） | §5.1・§17.5 | —（本ガイド導入前からの実装） |
 | import chain の深度上限が link 時の拒否にならない経路が残る。目標（§3.4 の「import chain深度上限」の行、[組み込みAPI仕様](embedding-api.md) §5、[Capability Model仕様](capability-model.md) §10）は全入口で深度を link 時に検証し 129 段目を catch 不能に拒否することだが、評価器内蔵の `ModuleLoader`（`src/module.rs` の `MAX_IMPORT_DEPTH` の検査）は 129 段目で constructor `import.depth`（`src/stable_error.rs` の `IMPORT_DEPTH`）の kind `import` のランタイムエラー `import 失敗: ネストが深すぎます (上限: 128)` を出す。kind `import` は catch 不能の種別（`src/error.rs` の `is_uncatchable`）に含まれないが、import はトップレベル限定なので script の `try` の内側には置けない。この経路を通るのは REPL（tree・VM）と scheduler の handle 経路（`Engine::compile` / `create_execution` / `start`）の import だけで、ファイル・標準入力は link 時に拒否する（`src/main.rs` の `LinkError::DepthExceeded`、`tests/depth_boundary.rs` の DBT-AT-02）。経路の差の正本は Capability Model仕様の逸脱一覧の REPL の import と scheduler の handle 経路の行 | §3.4 | E7（tree REPL）、E9 の VM file/stdin 統合で据え置いた VM REPL、exec-control Slice 3 PR-a（handle 経路） |
 | process-global の `OnceLock` が残る。目標（§14.3）は process-global な `OnceLock` を廃止し `FilesystemCapability` を実行 request へ注入することだが、`src/sandbox.rs` の `SANDBOX_PATHS`（`TSUMUGI_SANDBOX` を一度だけ読む `OnceLock`）が残り、評価器内蔵の `ModuleLoader`（`src/module.rs`）が import のファイルを読むときに `sandbox::check_path` で検査する。fs builtin は capability handle 経由に移っており（C10）、`OnceLock` を読まない。`ModuleLoader` を使うのは REPL と scheduler の handle 経路の import だけで（file/stdin の run 層は `fix-import-run-from-link-graph` で link の graph から展開するようになり `OnceLock` を読まない）、scheduler の handle 経路の差は [Capability Model仕様](capability-model.md) の逸脱一覧（§10）にある | §14.3 | —（本ガイド導入前からの実装。fs builtin の移行は C10） |
+| VM の Dict リテラルの構築が途中で深度を読み直す。目標（§21.3 の「リテラル」）は作り終えたときに 1 回だけ要約することだが、VM の `OpCode::DictInsert`（`src/vm.rs`）は値を入れるたびに backing の深度の要約を更新し（`Value::index_set_tracked_uncharged_settle`、`src/value.rs`）、重複した key で最も深い値を浅い値に上書きすると全 entry の保存済み深度を読み直す（fuel は課金しない）。リテラルをループで評価すると、読み直しの時間が fuel に比例しない。tree（`src/eval.rs` の `Expr::Dict`）は最後に 1 回だけ要約するので読み直さない。fix スライス fix-vm-dict-literal-depth-settle で直す（issue #374） | §21.3 | fix-value-nesting-depth-limit |
 | 未実装範囲: VM dispatch の分割。`src/vm.rs` の `Vm::dispatch` は今も 1 つの match で、カテゴリ別の private handler に分けていない | §14.1 | —（未着手） |
 | 未実装範囲: tree `exec_stmt` の分割。`src/eval.rs` の `exec_stmt` は今も Stmt の各種を 1 つの関数で扱い、private helper に分けていない | §14.2 | —（未着手） |
 | 未実装範囲: cargo-fuzz。`fuzz/` workspace と fuzz target が無い | §14.4 | —（未着手） |
@@ -2344,7 +2345,7 @@ Tsumugi の時刻は内部表現も出力基準も UTC 固定である。`now()`
 
 ## 21. 値のネスト深度上限（issue #290）
 
-言語仕様の「実行安全性」「値のネスト深度制限」に統合する節である（実装スライスは [実行予算・協調実行仕様](execution-control.md) §14 の fix-value-nesting-depth-limit・fix-value-depth-settle-quadratic）。§21.3 の「課金」は [issue #304](https://github.com/kamonabe/Tsumugi/issues/304) の判断で改訂した（深度の読み直しへの fuel 課金）。
+言語仕様の「実行安全性」「値のネスト深度制限」に統合する節である（実装スライスは [実行予算・協調実行仕様](execution-control.md) §14 の fix-value-nesting-depth-limit・fix-value-depth-settle-quadratic・fix-vm-dict-literal-depth-settle）。§21.3 の「課金」は [issue #304](https://github.com/kamonabe/Tsumugi/issues/304) の判断で改訂した（深度の読み直しへの fuel 課金）。
 
 ### 21.1 背景・課題
 
@@ -2364,6 +2365,8 @@ Tsumugi の時刻は内部表現も出力基準も UTC 固定である。`now()`
 - **設定変更:** 不可（コンパイル時定数）。`BudgetConfig`・環境変数・CLI option の入口を設けない（call / AST / import の深度上限と同じ）。
 - **課金:** 深度の計算と検査は heap に課金しない（[実行予算・協調実行仕様](execution-control.md) §5.1 の論理サイズは変えない）。fuel は、深度の読み直しにだけ課金する。index 代入・`pop` で最大深度の子がいなくなり、残った子の保存済み深度を全部読み直して正確な深度を求めるときに、読み直した子の数（List の要素数・Dict の entry 数）ぶんを [実行予算・協調実行仕様](execution-control.md) §4.1 の「List / Dict の深度の読み直し」として課金する。それ以外の深度の計算と検査（作るときの要約、`push`・index 代入で入れる値の深度の検査、同じ深度の子が残る取り除き）は fuel にも課金しない。読み直しの fuel は値を変える前に課金し、超過は `BudgetExceeded(Fuel)` の catch できない terminal になる。tree-walk 版と VM 版で同じ操作・同じ量・同じ位置で課金する。
   - **決定記録（[issue #304](https://github.com/kamonabe/Tsumugi/issues/304) で kamonabe が選択）:** 読み直しへの fuel 課金にする。理由: 最大深度の子の差し替えや `push` / `pop` の往復で読み直しが繰り返されると、時間が要素数の 2 乗になる（issue #304 の計測で N = 50,000 のとき約 24 秒）。読み直しを課金しないと、この時間が fuel に比例せず、fuel の上限でホストへの負荷の最悪値を抑えられない（[マニフェスト](manifesto.md)原則 3「すべての実行に予算を設ける」・原則 1）。読み直した子の数ぶんを課金すれば、時間が fuel に比例する。採らなかった案: 深度ごとの子の数の histogram を backing に持ち、読み直しをやめる案は、backing ごとに §5.1 の論理サイズに入らない Rust のメモリが増える（原則 3 で heap の上限が実メモリを表さなくなり、原則 8 で値の表現が大きくなる）。
+- **リテラル:** List / Dict リテラルは、作り終えたときに 1 回だけ子の深度を要約する。構築の途中（重複した key で値を上書きする場合を含む）で深度を読み直さない。値を入れるたびの検査（入れる値の深度の検査、上の「対象」）は構築の途中で行う。tree-walk 版と VM 版で同じで、リテラルの構築では読み直しも読み直しの fuel も生じない。
+  - **決定記録（[issue #374](https://github.com/kamonabe1927/Tsumugi/issues/374)、kamonabe が PR #349 の Q2 を C に変えた）:** 理由: PR #349 の Q2=A は VM の Dict リテラルの読み直しを「source の大きさで上限がある」として課金せずに残したが、その上限は 1 回の評価にしか当てはまらない。リテラルはループで何度も評価できるので、合計の時間と fuel の比は source の大きさに比例して開く。issue #304 で読み直しを fuel 課金にしたのと同じ種類の問題が VM にだけ残るので、[マニフェスト](manifesto.md)原則 1・3 に照らして残さない。課金を足すのでなく読み直しを無くすので、tree と VM の fuel の一致（原則 5）も保つ。実装スライスは [実行予算・協調実行仕様](execution-control.md) §14 の fix-vm-dict-literal-depth-settle。
 
 ### 21.4 採用理由（思想・設計との整合）
 
