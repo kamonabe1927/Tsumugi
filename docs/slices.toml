@@ -1160,5 +1160,5 @@ parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-tree-while-condition-once 実装スライス（tree の `while` が初回の条件を 2 回評価しない）" }
 acceptance = ["TWC-AT-01..04"]
 design_pr  = 449
-impl_pr    = 0
+impl_pr    = 450
 order      = 115
