@@ -3083,7 +3083,7 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
 - **範囲外:**
   - VM の `while`、`for`（反復元は 1 回だけ評価し、items を controller が持つ）、`if`（条件は 1 回）。どれもこの不具合を持たない。
   - F-2 の課金表への移行（式・操作の課金点）。現状の fuel は文・反復・呼び出しだけを数える（冒頭の未実装範囲）。
-- **課金の変化:** 条件にユーザー関数の呼び出しがあり初回の条件が真になる `while` で、tree の fuel が初回の条件の呼び出しの課金ぶん（呼び出し 1 つにつき 1）減り、VM と同じになる。VM は変わらない。tree の fuel が変わるが、変更前の値は §4.1 の課金点の定義（条件の評価 1 回につき呼び出しを 1 回課金）に反した二重課金なので、`fuel_accounting_revision` は変えない（実装 PR の「仕様外で判断した点」で扱う。課金点の定義は変わらない）。`language_revision` も変えない（目標の挙動は VM と同じで、tree の挙動を目標へ戻す修正）。
+- **課金の変化:** 条件にユーザー関数の呼び出しがあり初回の条件が真になる `while` で、tree の fuel が初回の条件の呼び出しの課金ぶん（呼び出し 1 つにつき 1）減り、VM と同じになる。VM は変わらない。tree の fuel が変わるが、変更前の値は §14「F-1 実装スライス」の (F2) の課金点の定義（呼び出し 1 回につき 1。条件の評価 1 回につき呼び出しを 1 回課金）に反した二重課金なので、`fuel_accounting_revision` は変えない（実装 PR の「仕様外で判断した点」で扱う。課金点の定義は変わらない）。`language_revision` も変えない（目標の挙動は VM と同じで、tree の挙動を目標へ戻す修正）。
 - **想定の変更規模:** `src/` は 15〜60 行程度（`src/eval.rs` の `Stmt::While`・`CallDest::WhileFirst`・`enter_while` まわり）。テストは `tests/` と unit test で 80〜200 行。docs は言語仕様の逸脱一覧の 1 行の削除。触る仕組みは「tree の `while` の driver（controller frame の初回）」1 つ。受入基準は 4 項目。§14.1（[開発ループ手順書](loop-runbook.md)）に収まる。
 - **受入基準:**
   - **TWC-AT-01（条件は反復ごとに 1 回）:** 条件に副作用（`print` するユーザー関数、`print` の builtin）がある `while` で、本体が n 回実行されるとき条件の副作用がちょうど n + 1 回（`break` で抜けるときは n 回）起き、tree と VM で stdout が一致する。n = 0・1・2 と、初回の反復で `break`・`continue` する場合を含む。確かめ方: 両 backend の paired test（CLI と `Evaluator` / `Vm` の両方）。
