@@ -1698,7 +1698,7 @@ impl Vm {
                 self.stack[idx] = collection;
                 result.map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
             }
-            OpCode::DictInsert => {
+            OpCode::DictInsert(last) => {
                 let value = self.pop(line)?;
                 let key = self.pop(line)?;
                 let stack_index = self.stack.len().saturating_sub(1);
@@ -1731,13 +1731,12 @@ impl Vm {
                 value.check_element_depth(line)?;
                 let idx = self.stack.len().saturating_sub(1);
                 let mut collection = std::mem::replace(&mut self.stack[idx], Value::Null);
-                // リテラルの構築は読み直しに fuel を課金しない（tree のリテラルと揃える、§4.1）。
-                let result = collection.index_set_tracked_uncharged_settle(
-                    crate::value::IndexTarget::DictKey(k),
-                    value,
-                    &mut self.budget,
-                    ExecutionPhase::Run,
-                );
+                // 深度の要約は途中で更新しない（読み直さない）。最後の組のあとで 1 回だけ要約する。
+                let mut result =
+                    collection.dict_literal_insert(k, value, &mut self.budget, ExecutionPhase::Run);
+                if last && result.is_ok() {
+                    result = collection.dict_literal_settle(&mut self.budget, ExecutionPhase::Run);
+                }
                 self.stack[idx] = collection;
                 result.map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
             }
@@ -2647,6 +2646,54 @@ mod tests {
     use crate::chunk::Chunk;
     use crate::opcode::OpCode;
     use std::rc::Rc;
+
+    /// VDL-AT-01（fix-vm-dict-literal-depth-settle）: Dict リテラルの構築で全 entry の深度を読む回数は、
+    /// 重複した key の上書きの回数によらず 1 リテラルにつき 1 回で、tree と同じ。
+    fn dict_summary_reads(source: &str, use_vm: bool) -> u64 {
+        use crate::value::DICT_SUMMARY_READS;
+        let tokens = crate::lexer::Lexer::new(source).tokenize();
+        let program = crate::parser::Parser::new(tokens).parse().expect("parse");
+        DICT_SUMMARY_READS.with(|c| c.set(0));
+        if use_vm {
+            let chunk = crate::compiler::Compiler::new()
+                .compile(&program)
+                .expect("compile");
+            Vm::new(chunk).run().expect("run");
+        } else {
+            let mut evaluator = crate::eval::Evaluator::new();
+            evaluator.run(&program, source.len() as u64).expect("run");
+        }
+        DICT_SUMMARY_READS.with(|c| c.get())
+    }
+
+    #[test]
+    fn vdl_at_01_dict_literal_summarizes_once_per_evaluation() {
+        // 最も深い値 `e`（深度 2）を浅い値で上書きすることを `pairs` 回繰り返す、100 個の key のリテラル。
+        let literal = |pairs: usize| {
+            let mut items: Vec<String> = (0..100).map(|i| format!("\"k{i}\": 0")).collect();
+            for _ in 0..pairs {
+                items.push("\"a\": e".to_string());
+                items.push("\"a\": 1".to_string());
+            }
+            format!("{{{}}}", items.join(", "))
+        };
+        let script = |pairs: usize, loops: usize| {
+            format!(
+                "let e = [[1]]\nlet i = 0\nwhile i < {loops}\n  let d = {}\n  i = i + 1\nend\n",
+                literal(pairs)
+            )
+        };
+        for (pairs, loops) in [(1, 1), (1000, 1), (1000, 7), (2, 25)] {
+            let source = script(pairs, loops);
+            let tree = dict_summary_reads(&source, false);
+            let vm = dict_summary_reads(&source, true);
+            assert_eq!(tree, loops as u64, "tree: pairs={pairs} loops={loops}");
+            assert_eq!(
+                vm, tree,
+                "VM は tree と同じ回数: pairs={pairs} loops={loops}"
+            );
+        }
+    }
 
     #[test]
     fn call_without_prepare_still_enforces_depth_limit() {

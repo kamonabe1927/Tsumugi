@@ -758,10 +758,12 @@ impl Compiler {
                     )),
                     line,
                 );
-                for (key, val) in pairs {
+                for (i, (key, val)) in pairs.iter().enumerate() {
                     self.compile_expr(key, line)?;
                     self.compile_expr(val, line)?;
-                    self.chunk.emit(OpCode::DictInsert, line);
+                    // 最後の組のあとで、深度を 1 回だけ要約する（tree の `Value::new_dict` と同じ）。
+                    self.chunk
+                        .emit(OpCode::DictInsert(i + 1 == pairs.len()), line);
                 }
             }
             Expr::Index { object, index } => {
@@ -1588,7 +1590,7 @@ mod tests {
                 "[LoadConst(0), ToIterList, LoadConst(1), LoadConst(2), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(23), Pop, GetLocal(1), IndexLocal(0), GetLocal(2), LoadConst(3), Eq, JumpIfFalse(16), Jump(17), Jump(23), GetLocal(1), LoadConst(4), Add, SetLocal(1), Pop, Loop(4), PopN(3), Return] constants=[Str(\"ab\"), Int(0), Null, Str(\"a\"), Int(1)] max_locals=3",
             ],
             &[
-                "[LoadConst(0), LoadConst(1), LoadConst(2), DictInsert, ToIterList, LoadConst(3), LoadConst(4), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(44), Pop, GetLocal(1), IndexLocal(0), LoadConst(5), LoadConst(6), ListPush, ToIterList, LoadConst(7), LoadConst(8), GetLocal(4), LenLocal(3), Lt, JumpIfFalse(37), Pop, GetLocal(4), IndexLocal(3), GetLocal(2), Print(1), LoadConst(9), Pop, GetLocal(4), LoadConst(10), Add, SetLocal(4), Pop, Loop(20), PopN(3), GetLocal(1), LoadConst(11), Add, SetLocal(1), Pop, Loop(7), PopN(3), Return] constants=[Dict({}), Str(\"a\"), Int(1), Int(0), Null, List([]), Int(1), Int(0), Null, Null, Int(1), Int(1)] max_locals=6",
+                "[LoadConst(0), LoadConst(1), LoadConst(2), DictInsert(true), ToIterList, LoadConst(3), LoadConst(4), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(44), Pop, GetLocal(1), IndexLocal(0), LoadConst(5), LoadConst(6), ListPush, ToIterList, LoadConst(7), LoadConst(8), GetLocal(4), LenLocal(3), Lt, JumpIfFalse(37), Pop, GetLocal(4), IndexLocal(3), GetLocal(2), Print(1), LoadConst(9), Pop, GetLocal(4), LoadConst(10), Add, SetLocal(4), Pop, Loop(20), PopN(3), GetLocal(1), LoadConst(11), Add, SetLocal(1), Pop, Loop(7), PopN(3), Return] constants=[Dict({}), Str(\"a\"), Int(1), Int(0), Null, List([]), Int(1), Int(0), Null, Null, Int(1), Int(1)] max_locals=6",
             ],
             &[
                 "[LoadConst(0), LoadConst(1), ListPush, ToIterList, LoadConst(2), LoadConst(3), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(26), Pop, GetLocal(1), IndexLocal(0), MakeClosure(0), PrepareCall, GetLocal(3), ValidateCall(0), Call(0), Pop, PopN(1), GetLocal(1), LoadConst(4), Add, SetLocal(1), Pop, Loop(6), PopN(3), Return] constants=[List([]), Int(1), Int(0), Null, Int(1)] max_locals=4",
