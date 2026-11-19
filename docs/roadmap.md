@@ -52,7 +52,7 @@
 | REV-022 | safe profile で denial と OS 失敗を区別（EOF/I-O error を Null/false へ畳まない）。outcome の型の形の差は組み込みAPI仕様の逸脱一覧（§8） | ✅ | [Capability Model仕様](capability-model.md)・[組み込みAPI仕様](embedding-api.md) |
 | REV-024 | MSRV 固定・action pin・release/fuzz/stress gate の段階導入 | 🟡 | [検証・リリース・運用設計](verification-release-operations.md) |
 | REV-025 | parse diagnostic 件数の上限 | ⬜ | [次期意味論・実装決定](semantic-decisions.md) |
-| AUD-018 | CLI script 引数を `ExecutionRequest.arguments` snapshot へ（profile/options は E8b。profile/options 配線は C9/C10/E7/E11 で統合済み、migration warning は descope 済み、EMB-AT-10/11 は profile 経由 subprocess で固定済み——E8b 完了） | ✅ | [次期意味論・実装決定](semantic-decisions.md) §6・[組み込みAPI仕様](embedding-api.md) 第12・14〜16節 |
+| AUD-018 | CLI script 引数を `ExecutionRequest.arguments` snapshot へ（profile/options は E8b。profile/options 配線は C9/C10/E7/E11 で統合済み、migration warning は descope 済み、EMB-AT-10/11 は profile 経由 subprocess で固定済み——E8b 完了）。CLI の REPL の parse 診断の経路は fix-cli-repl-compile-diagnostics（loop:drift #429 D-134、判断役が選択（PR #442）） | 🟡 | [次期意味論・実装決定](semantic-decisions.md) §6・[組み込みAPI仕様](embedding-api.md) 第12・14〜16節 |
 | AUD-020 | sandbox の TOCTOU/oracle/dangling symlink を path-handle で受入試験化 | 🟡 | [脅威モデル](threat-model.md) TM-002〜004・[Capability Model仕様](capability-model.md) §8・CAP-AT-10〜14 |
 | AUD-021 | language-spec / LANG_GUIDE / design の drift 解消 | 🟡 | [言語仕様](language-spec.md)・[設計](design.md) |
 | AUD-022 | REPL/differential/limit/defensive に加え fuzz・stress・failure injection gate | 🟡 | [検証・リリース・運用設計](verification-release-operations.md) §4〜6・17節 |
