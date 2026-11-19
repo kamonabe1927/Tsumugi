@@ -390,7 +390,7 @@ impl EngineBuilder {
     ///
     /// audit drain queue の境界テストで小さい `max_pending_bytes` を注入するためだけに置く。
     /// 外部 embedder 向けの安定した公開契約ではない。その意図を明示するため `#[doc(hidden)]` を
-    /// 付ける（[`Engine::link_for_repl`] と同じ扱い）。公開 setter と `ConfigError` への
+    /// 付ける（[`Engine::run_for_repl`] と同じ扱い）。公開 setter と `ConfigError` への
     /// `AuditConfigError` 接続は sink 必須化（§1.1）のスライスへ延期している。
     ///
     /// # Panics
@@ -915,16 +915,30 @@ impl LinkedScript {
     /// fix-import-run-from-link-graph 実装範囲 4）。
     ///
     /// 展開は [`Engine::run`] と同じ関数（`crate::module::expand_from_graph`）で、展開済みの集合は
-    /// 空から始める（VM の file/stdin 実行は 1 回きり）。root の source を保持していない、または
+    /// 空から始める（VM の file/stdin 実行は 1 回きり）。VM REPL は [`Self::expand_for_repl`]。root の source を保持していない、または
     /// graph と合わないときは内部 error を返す。
     ///
     /// # 可視性（内部 shim であり公開契約ではない）
     ///
-    /// [`Engine::link_for_repl`] と同じく、crate の binary が lib とは別 crate として呼ぶため
+    /// [`Engine::run_for_repl`] と同じく、crate の binary が lib とは別 crate として呼ぶため
     /// `pub` にせざるを得ない CLI 内部専用の shim で、外部 embedder 向けの公開契約ではない。
     #[doc(hidden)]
     pub fn expand_for_cli(
         &self,
+    ) -> Result<(Program, Vec<crate::module::ExpandedModule>), TsumugiError> {
+        self.expand_for_repl(&std::collections::HashMap::new())
+    }
+
+    /// CLI の VM REPL 専用: [`Self::expand_for_cli`] と同じ展開を、session が持つ展開済みの表
+    /// （`ModuleId` → `source_hash`）に対して行う（capability-model §10）。
+    ///
+    /// 同じ `ModuleId`・同じ hash は展開せず、hash が違えば `import.hash_mismatch` の error を返す。
+    /// 戻り値の `ExpandedModule` はこの submission が新しく展開した module で、呼び出し側が
+    /// 課金に成功してから表へ足す。
+    #[doc(hidden)]
+    pub fn expand_for_repl(
+        &self,
+        expanded: &std::collections::HashMap<ModuleId, SourceHash>,
     ) -> Result<(Program, Vec<crate::module::ExpandedModule>), TsumugiError> {
         let Some(source_text) = self.0.root.retained_source() else {
             return Err(TsumugiError::internal(
@@ -945,9 +959,8 @@ impl LinkedScript {
             }),
         )
         .map_err(|detail| TsumugiError::internal(0, detail))?;
-        let (linked, expanded) =
-            crate::module::expand_from_graph(&program, &graph, &std::collections::HashMap::new())?;
-        Ok((linked.unwrap_or(program), expanded))
+        let (linked, newly) = crate::module::expand_from_graph(&program, &graph, expanded)?;
+        Ok((linked.unwrap_or(program), newly))
     }
 }
 
@@ -1182,77 +1195,6 @@ impl Engine {
                 })
             },
         )
-    }
-
-    /// REPL 専用の link 入口（crate 内部、E7 のハイブリッド統合）。
-    ///
-    /// engine ID → revision → backend の整合だけを検証し、**import の有無によらず常に空 graph の
-    /// [`LinkedScript`] を返す**。`link` と違い `module_resolver` capability の gate を通さない。
-    ///
-    /// # なぜ gate を迂回するのか（既知の設計、新規緩和ではない）
-    ///
-    /// REPL は統合前から、`--allow-import-root`（＝`module_resolver` grant）無しでも CWD 相対
-    /// import を解決できていた。これは評価器内蔵の [`ModuleLoader`](crate::module::ModuleLoader)
-    /// が import を解決し、固定のエラー文字列を出す従来からの **observable 挙動**である。
-    /// [`Engine::run`] は link が確かめた graph から import を展開する（capability-model §10）が、
-    /// REPL 用の [`Self::run_for_repl`] は graph を参照せず、`root()` の保持 source を再 parse して
-    /// 評価器の `begin_execution` に渡す（評価器が自前の loader で import を解決する）ため、REPL では
-    /// 空 graph を渡しても import は従来どおり評価器側で解決される。この空 graph を
-    /// [`Engine::run`] に渡すと、import は graph に無いので `InternalFailure` になる。
-    ///
-    /// したがってこの入口が resolver gate を迂回するのは、**REPL の従来 observable 挙動を Engine API
-    /// 上で保全するため**であって、capability model へ新しい緩和を導入するものではない。file/stdin
-    /// 経路（[`Engine::link`]）の resolver gate とは別物で、そちらは従来どおり未 grant + import を
-    /// [`LinkError::Denied`] で弾く。将来この REPL の import 緩さ（flag 無し CWD 相対 import）を
-    /// capability で塞ぐなら、E8b / capability model 側の課題として扱う。
-    ///
-    /// # 可視性（内部 shim であり公開契約ではない）
-    ///
-    /// この crate の binary（`src/main.rs` の REPL）は lib とは別 crate としてこれを呼ぶため、
-    /// Rust の言語制約上 `pub` にせざるを得ない。ただしこれは **CLI 内部専用の shim** であり、
-    /// 外部 embedder 向けの安定した公開契約ではない。その意図を明示するため `#[doc(hidden)]` を
-    /// 付け、rustdoc の公開 API には出さない。外部からは [`Engine::link`] を使うこと。
-    #[doc(hidden)]
-    pub fn link_for_repl(
-        &self,
-        script: &CompiledScript,
-        request: LinkRequest,
-    ) -> Result<LinkedScript, LinkError> {
-        if crate::audit::reject_sink_callback_reentry(self.id) {
-            return Err(sink_reentry_link_error());
-        }
-        catch_host_unwind(AssertUnwindSafe(|| {
-            self.link_for_repl_inner(script, request)
-        }))
-        .unwrap_or_else(|fault_id| {
-            Err(LinkError::InternalFailure {
-                fault_id,
-                safe_message: internal_fault_message(fault_id),
-            })
-        })
-    }
-
-    fn link_for_repl_inner(
-        &self,
-        script: &CompiledScript,
-        request: LinkRequest,
-    ) -> Result<LinkedScript, LinkError> {
-        if script.engine_id() != self.id() {
-            return Err(LinkError::EngineMismatch);
-        }
-        if script.language_revision() != self.config().language_revision {
-            return Err(LinkError::RevisionMismatch);
-        }
-        if script.backend() != self.config().backend {
-            return Err(LinkError::BackendMismatch);
-        }
-        // `link` と同じく engine/revision/backend 検証直後に cancel を観測する（§4.3 step 0）。
-        if request.cancellation.is_cancelled() {
-            return Err(LinkError::Cancelled);
-        }
-        // import の有無によらず空 graph を返す。実際の import 解決は run 側の評価器内蔵 loader が
-        // 行う（上記 doc 参照）。run_for_repl は import_graph を参照しないので観測挙動は不変。
-        Ok(self.empty_linked_script(script, script.source_hash()))
     }
 
     fn link_inner(
@@ -1663,7 +1605,7 @@ impl Engine {
 /// 解決済み import graph の中間結果（root_imports と nodes）。
 /// [`Engine::prepare_program`] の結果（再構築した root `Program`、root source の byte 長、
 /// graph から展開するときの module 群）。
-type PreparedProgram = (Program, u64, Option<crate::module::GraphModules>);
+type PreparedProgram = (Program, u64, crate::module::GraphModules);
 
 struct ResolvedGraph {
     root_imports: Vec<ModuleId>,
@@ -2094,8 +2036,8 @@ impl Engine {
 
     /// REPL 専用の実行入口（crate 内部、E7 のハイブリッド統合）。
     ///
-    /// 挙動は [`Self::run`] と同じ（transaction・poison・再入検査・import は評価器内蔵 loader・
-    /// capability 注入・`exit` 写像）だが、**budget のライフサイクルだけが異なる**:
+    /// 挙動は [`Self::run`] と同じ（transaction・poison・再入検査・import は link が確かめた graph
+    /// から展開・capability 注入・`exit` 写像）だが、**budget のライフサイクルだけが異なる**:
     ///
     /// - REPL は session 全体で 1 本の budget ledger を共有する。同じ [`ExecutionContext`] を
     ///   submission 間で再利用する前提で、初回 submission は通常どおり budget/clock/cancellation を
@@ -2111,7 +2053,7 @@ impl Engine {
     ///
     /// # 可視性（内部 shim であり公開契約ではない）
     ///
-    /// [`Self::link_for_repl`] と同じく、crate の binary（REPL）が lib とは別 crate として呼ぶため
+    /// crate の binary（REPL）が lib とは別 crate として呼ぶため
     /// `pub` にせざるを得ないが、CLI 内部専用の shim であって外部 embedder 向けの公開契約ではない。
     /// その意図を明示するため `#[doc(hidden)]` を付ける。外部からは [`Engine::run`] を使うこと。
     #[doc(hidden)]
@@ -2306,19 +2248,18 @@ impl Engine {
         // no-sink 経路（run_guarded）が prepare_program を catch 内で回すのと対称に、監査経路でも
         // catch_host_unwind で包み、再 parse の panic が Engine::run を貫通せず InternalFailure へ
         // 写る（＝呼び出し元が context を poison する）ようにする。
-        let prepared = match catch_host_unwind(AssertUnwindSafe(|| {
-            self.prepare_program(linked, context, true)
-        })) {
-            Ok(result) => result,
-            Err(fault_id) => {
-                // 再 parse 中の panic。Started 未発行なので監査 execution は無い（§8）。
-                return AuditedOutcome::Outcome(Box::new(ExecutionOutcome::InternalFailure {
-                    fault_id,
-                    safe_message: internal_fault_message(fault_id),
-                    usage: context.evaluator.budget_usage(),
-                }));
-            }
-        };
+        let prepared =
+            match catch_host_unwind(AssertUnwindSafe(|| self.prepare_program(linked, context))) {
+                Ok(result) => result,
+                Err(fault_id) => {
+                    // 再 parse 中の panic。Started 未発行なので監査 execution は無い（§8）。
+                    return AuditedOutcome::Outcome(Box::new(ExecutionOutcome::InternalFailure {
+                        fault_id,
+                        safe_message: internal_fault_message(fault_id),
+                        usage: context.evaluator.budget_usage(),
+                    }));
+                }
+            };
         let (program, root_source_bytes, graph) = match prepared {
             Ok(prepared) => prepared,
             Err(outcome) => return AuditedOutcome::Outcome(outcome),
@@ -2467,7 +2408,7 @@ impl Engine {
                 context,
                 &program,
                 root_source_bytes,
-                graph.as_ref(),
+                &graph,
                 request,
                 &mut journal,
                 &mut delivery,
@@ -2569,7 +2510,7 @@ impl Engine {
         context: &mut ExecutionContext,
         program: &Program,
         root_source_bytes: u64,
-        graph: Option<&crate::module::GraphModules>,
+        graph: &crate::module::GraphModules,
         request: ExecutionRequest,
         journal: &mut crate::audit::AuditJournal,
         delivery: &mut AuditDelivery,
@@ -2683,10 +2624,8 @@ impl Engine {
         repl: bool,
     ) -> ExecutionOutcome {
         // 実行前の整合検証と Program 再構築（案 A）。失敗は precondition 由来の InternalFailure。
-        // file/stdin の run は link が確かめた graph から import を展開する（capability-model §10）。
-        // REPL は従来どおり評価器内蔵の ModuleLoader を使う（`link_for_repl` の空 graph）。
-        let (program, root_source_bytes, graph) = match self.prepare_program(linked, context, !repl)
-        {
+        // file/stdin の run も REPL も、link が確かめた graph から import を展開する（capability-model §10）。
+        let (program, root_source_bytes, graph) = match self.prepare_program(linked, context) {
             Ok(prepared) => prepared,
             Err(outcome) => return *outcome,
         };
@@ -2698,14 +2637,7 @@ impl Engine {
             panic!("injected run-boundary panic (test only)");
         }
 
-        self.execute_program(
-            context,
-            &program,
-            root_source_bytes,
-            graph.as_ref(),
-            request,
-            repl,
-        )
+        self.execute_program(context, &program, root_source_bytes, &graph, request, repl)
     }
 
     /// 実行前の engine/context 整合検証と、保持 source からの Program 再構築（案 A）。
@@ -2714,15 +2646,14 @@ impl Engine {
     /// [`ExecutionOutcome::InternalFailure`]（呼び出し元が context を poison する）。この経路は
     /// 監査上「開始していない execution」であり、Started を発行しない（§8）。
     ///
-    /// `from_graph` なら、`linked` が保持する module source も再 parse し、import の展開に使う
+    /// `linked` が保持する module source も再 parse し、import の展開に使う
     /// [`crate::module::GraphModules`] を返す。graph と合わない import（正規化できない specifier・
     /// graph に無い `ModuleId`）は内部不整合の `InternalFailure` にする（capability-model §10。
-    /// 例: `link_for_repl` の空 graph を [`Engine::run`] に渡したとき）。
+    /// 例: import を含む root に module の無い `LinkedScript` を渡したとき）。
     fn prepare_program(
         &self,
         linked: &LinkedScript,
         context: &ExecutionContext,
-        from_graph: bool,
     ) -> Result<PreparedProgram, Box<ExecutionOutcome>> {
         // engine / context の整合を検証する（別 engine の context は実行しない）。
         if context.engine_id() != self.id() {
@@ -2746,9 +2677,6 @@ impl Engine {
         let root_source_bytes = source_text.len() as u64;
         match Parser::new(Lexer::new(source_text).tokenize()).parse() {
             Ok(program) => {
-                if !from_graph {
-                    return Ok((program, root_source_bytes, None));
-                }
                 let graph = crate::module::GraphModules::prepare(
                     &program,
                     linked.0.import_graph.nodes.iter().filter_map(|node| {
@@ -2760,7 +2688,7 @@ impl Engine {
                     }),
                 )
                 .map_err(|detail| Box::new(internal_failure(detail)))?;
-                Ok((program, root_source_bytes, Some(graph)))
+                Ok((program, root_source_bytes, graph))
             }
             // compile 済みの script を再 parse して失敗するのは内部不整合（決定的なはず）。
             Err(errors) => {
@@ -2782,7 +2710,7 @@ impl Engine {
         context: &mut ExecutionContext,
         program: &Program,
         root_source_bytes: u64,
-        graph: Option<&crate::module::GraphModules>,
+        graph: &crate::module::GraphModules,
         request: ExecutionRequest,
         repl: bool,
     ) -> ExecutionOutcome {
@@ -2884,26 +2812,17 @@ impl Engine {
         Ok(slice_fuel)
     }
 
-    /// 評価器の execution を開始する（transactional=true）。`graph` があれば import を link が
-    /// 確かめた graph から展開し（`Engine::run`・`run_audited`）、無ければ評価器内蔵の
-    /// `ModuleLoader` を使う（REPL、capability-model §10）。
+    /// 評価器の execution を開始する（transactional=true）。import は link が確かめた graph から
+    /// 展開する（`Engine::run`・`run_audited`・REPL、capability-model §10）。
     fn begin_execution_for(
         context: &mut ExecutionContext,
         program: &Program,
         root_source_bytes: u64,
-        graph: Option<&crate::module::GraphModules>,
+        graph: &crate::module::GraphModules,
     ) -> Result<(), (RunPhase, TsumugiError)> {
-        match graph {
-            Some(graph) => context.evaluator.begin_execution_from_graph(
-                program,
-                root_source_bytes,
-                true,
-                graph,
-            ),
-            None => context
-                .evaluator
-                .begin_execution(program, root_source_bytes, true),
-        }
+        context
+            .evaluator
+            .begin_execution_from_graph(program, root_source_bytes, true, graph)
     }
 
     /// begin_execution → run_slice を terminal まで回す（transaction 適用、E4）。
@@ -2914,7 +2833,7 @@ impl Engine {
         context: &mut ExecutionContext,
         program: &Program,
         root_source_bytes: u64,
-        graph: Option<&crate::module::GraphModules>,
+        graph: &crate::module::GraphModules,
         slice_fuel: u64,
     ) -> ExecutionOutcome {
         // begin_execution → run_slice を terminal まで回す（engine.rs の poll と同じ手順）。
@@ -3489,7 +3408,7 @@ fn internal_failure(safe_message: impl Into<String>) -> ExecutionOutcome {
     }
 }
 
-/// sink callback 中の再入を拒否する `link` / `link_for_repl` の値（§10）。
+/// sink callback 中の再入を拒否する `link` の値（§10）。
 fn sink_reentry_link_error() -> LinkError {
     let fault_id = next_fault_id();
     LinkError::InternalFailure {
@@ -6803,6 +6722,41 @@ mod c6c_tests {
         let retry = ilg_link_mem(&engine, "import \"b.tsg\"\n", &b);
         ilg_completed(&engine, &retry, &mut ctx);
         assert_eq!(ilg_int(&ctx, "hits"), Some(11), "失敗後は再び展開する");
+    }
+
+    /// RIG-AT-04: REPL の run（`run_for_repl`）も link の graph だけを読む。on-disk に無い module を返す
+    /// in-memory resolver で link した `LinkedScript` を渡すと、その module が展開されて実行される。
+    /// import を含み graph に module の無い `LinkedScript` は、内部契約違反の `InternalFailure`。
+    #[test]
+    fn rig_at_04_run_for_repl_reads_only_the_link_graph() {
+        let engine = Engine::builder().build().unwrap();
+        let mut ctx = ExecutionContext::new(&engine);
+        let linked = ilg_link_mem(
+            &engine,
+            "import \"a.tsg\"\nlet y = a + 1\n",
+            &[("@default/a.tsg", "let a = 5\n")],
+        );
+        match engine.run_for_repl(&linked, &mut ctx, ilg_request()) {
+            ExecutionOutcome::Completed { .. } => {}
+            other => panic!("期待: Completed, 実際: {other:?}"),
+        }
+        assert_eq!(ilg_int(&ctx, "y"), Some(6));
+
+        // import を含む root に、module を持たない（空 graph の）LinkedScript。
+        let script = engine
+            .compile(
+                Source::new(SourceId::new("repl").expect("id"), "import \"a.tsg\"\n"),
+                &CompileOptions {
+                    retain_source: true,
+                },
+            )
+            .expect("compile");
+        let empty = engine.empty_linked_script(&script, script.source_hash());
+        let mut ctx = ExecutionContext::new(&engine);
+        match engine.run_for_repl(&empty, &mut ctx, ilg_request()) {
+            ExecutionOutcome::InternalFailure { .. } => {}
+            other => panic!("期待: InternalFailure, 実際: {other:?}"),
+        }
     }
 
     const ILG_MISMATCH_PREFIX: &str =

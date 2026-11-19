@@ -14,7 +14,7 @@ use tsumugi::{
     EmbeddingEngine, EmbeddingOutcome, EmbeddingRequest, EmbeddingTraceFrame, ExecutionError,
     ExecutionId, LinkError, LinkRequest, Source as EmbeddingSource, SourceId, SystemMonotonicClock,
     compiler::Compiler, embedding::CompileOptions, error::TsumugiError, lexer::Lexer,
-    module::ModuleLoader, parser::Parser, token::Token, vm::Vm,
+    parser::Parser, token::Token, value::HeapToken, vm::Vm,
 };
 
 fn main() {
@@ -256,8 +256,7 @@ fn read_stdin_source() -> String {
 /// import の有無によらず embedding Engine API（[`EmbeddingEngine`]）を通す。import があれば
 /// `link` が frozen capability の `module_resolver`（CLI が `--allow-import-root` から grant）で
 /// 解決する。resolver 未 grant + import あり は terminal `Denied`（exit 1、actionable 診断）。
-/// tree REPL も E7 で embedding Engine API へ統合済み（[`run_repl`] 参照。ただし REPL は import
-/// 解決を評価器内蔵 loader へ委ねる `link_for_repl` 経路を使う）。
+/// tree REPL も embedding Engine API へ統合済みで、submission ごとに同じ `link` を通す（[`run_repl`] 参照）。
 fn run_source(
     source: &str,
     script_path: &str,
@@ -458,11 +457,9 @@ fn print_link_error(error: &LinkError) {
 /// 注入して全 submission へ持ち越す」観測挙動を再現する（REPL は capability の clear を呼ばない、§1(f)）。
 /// transaction（エラー後の language-state 巻き戻し、AUD-024）と `exit()` 写像は embedding `run` が担う。
 ///
-/// import 解決は、従来どおり評価器内蔵の [`ModuleLoader`](tsumugi::module::ModuleLoader) に委ねる
-/// （`link_for_repl` が resolver gate を通さず空 graph を返し、`run` が評価器側で解決する）。これは
-/// REPL が統合前から持つ observable 挙動（`--allow-import-root` 無しの CWD 相対 import・固定エラー
-/// 文字列）を保全するためで、新規の capability 緩和ではない。詳細は
-/// [`EmbeddingEngine::link_for_repl`] の doc を正本とする。
+/// import は file/stdin と同じく、submission ごとに `link`（frozen set の `module_resolver`）を通し、
+/// `run_for_repl` が link の graph から展開する（capability-model §10、fix-repl-import-gate）。
+/// `--allow-import-root` が無ければ import は `Denied` の診断になり、session は続く。
 fn run_repl(frozen: CapabilitySet, budget_env: &LegacyBudgetEnv) {
     write_stdout(&format!(
         "Tsumugi v{} — 終了するには Ctrl+D\n",
@@ -509,7 +506,7 @@ fn run_repl(frozen: CapabilitySet, budget_env: &LegacyBudgetEnv) {
     }
 }
 
-/// REPL の1入力を embedding Engine API（`compile`→`link_for_repl`→`run_for_repl`）で実行する（E7）。
+/// REPL の1入力を embedding Engine API（`compile`→`link`→`run_for_repl`）で実行する（E7）。
 ///
 /// frozen capability set を各 submission の request へ毎回載せて持ち越す（REPL は clear を呼ばない）。
 /// outcome を統合前と同じ観測挙動へ写す:
@@ -548,15 +545,14 @@ fn execute_repl_submission(
     let cancellation = CancellationToken::new();
     let operation_id = ExecutionId::new(std::num::NonZeroU128::new(1).expect("1 は非ゼロ"));
 
-    // REPL 用 link 入口: resolver gate を通さず空 graph を得る（import 解決は run 側の評価器）。
+    // submission ごとに file/stdin と同じ link（resolver gate）を通す。失敗は診断を出して
+    // language-state を変えずに次入力へ進む（`InternalFailure` だけは session を終える）。
     let link_request = LinkRequest::new(operation_id, frozen.clone(), budget)
         .with_cancellation(cancellation.clone());
-    let linked = match engine.link_for_repl(&script, link_request) {
+    let linked = match engine.link(&script, link_request) {
         Ok(linked) => linked,
         Err(error) => {
-            // REPL の import 解決は run 側で行うため、ここへ到達するのは engine/revision/backend
-            // 不一致や cancel 等の防御的経路のみ。診断を出して次入力へ（session は継続）。
-            eprintln!("  エラー: {}", format_link_error(&error));
+            report_repl_link_error(&error);
             return;
         }
     };
@@ -613,16 +609,16 @@ fn report_repl_compile_errors(errors: &CompileErrors) {
     }
 }
 
-/// REPL 経路で万一 `link_for_repl` が返す防御的 [`LinkError`] を安全な文字列へ整形する。
+/// REPL の link 失敗を stderr へ出す（file/stdin と同じ [`print_link_error`]）。
 ///
-/// `link_for_repl` は import 解決を run 側へ委ねるため通常はここに到達しないが、engine/revision/
-/// backend 不一致・cancel 等の防御的経路のために最小限の写像を持つ。
-fn format_link_error(error: &LinkError) -> String {
-    match error {
-        LinkError::Cancelled => "リンクがキャンセルされました".to_string(),
-        LinkError::DeadlineExceeded => "リンクの deadline を超過しました".to_string(),
-        other => format!("リンクエラー: {:?}", other),
+/// `InternalFailure`（panic 等）は context を信用できないので、診断を出して session を終える
+/// （組み込みAPI仕様 §12 の REPL 列）。それ以外は表示して呼び出し側が次入力へ進む。
+fn report_repl_link_error(error: &LinkError) {
+    if let LinkError::InternalFailure { safe_message, .. } = error {
+        eprintln!("{}", safe_message);
+        std::process::exit(70);
     }
+    print_link_error(error);
 }
 
 /// 入力が未完結か判定（if/fn/while/for が end で閉じられていない）
@@ -700,25 +696,38 @@ fn run_source_vm(
     }
 }
 
+/// VM REPL が session で持つ、展開済みの module の表（capability-model §10）。
+///
+/// `ModuleId → source_hash`（展開の照合用）と、imported module record の live heap token を
+/// 同じ寿命で持つ。`Compiler` と同じ transaction に入れ、完了しなかった submission が足した行は
+/// checkpoint へ戻して巻き戻す（token も drop され heap が release される）。
+#[derive(Clone, Default)]
+struct VmReplImports {
+    expanded: std::collections::HashMap<tsumugi::ModuleId, tsumugi::SourceHash>,
+    tokens: std::collections::HashMap<tsumugi::ModuleId, std::rc::Rc<HeapToken>>,
+}
+
 /// VMモードのREPL。
 ///
-/// VM file/stdin（[`execute_vm_with_path`]）は link 層の Engine resolver gate へ統合済みだが、
-/// VM REPL は**現状維持**である。tree REPL（[`run_repl`]）は E7 で `link_for_repl`/`run_for_repl`
-/// の gate 迂回保全（CWD 相対 import・固定エラー文字列）で統合されており、link 層の Denied gate を
-/// 意図的に適用しない。VM REPL はこの tree REPL と**対称**に、import 解決を評価器内蔵
-/// [`ModuleLoader`] に委ねる従来実装（`Compiler` + `Vm::new_repl()` + `ModuleLoader` を 1 つの
-/// transaction として管理）のまま残す。VM backend adapter 本体（run 経路の Engine 統合）は E9 残。
+/// tree REPL（[`run_repl`]）と同じく、submission ごとに `compile`→`link`（frozen set の
+/// `module_resolver`）を通す。gate 専用に `Backend::TreeWalk` の [`EmbeddingEngine`] を使い、
+/// link が確かめた graph から import を展開した program を `Compiler` + `Vm::new_repl()` で実行する
+/// （capability-model §10、fix-repl-import-gate）。展開済みの表は `Compiler` と同じ transaction で
+/// 巻き戻す。VM backend adapter 本体（run 経路の Engine 統合）は E9 残。
 fn run_repl_vm(frozen: CapabilitySet, budget_env: &LegacyBudgetEnv) {
     write_stdout(&format!(
         "Tsumugi v{} [VM mode] — 終了するには Ctrl+D\n",
         env!("CARGO_PKG_VERSION")
     ));
+    let engine = EmbeddingEngine::builder()
+        .build()
+        .expect("既定 backend の Engine build は失敗しない");
     let mut input = String::new();
     let mut compiler = Compiler::new();
     let mut vm = Vm::new_repl_with_budget(budget_env.vm_budget());
     // C9/C10: session 開始時に frozen set を 1 回注入する（§1(f)）。
-    vm.set_capabilities(frozen);
-    let mut loader = ModuleLoader::new();
+    vm.set_capabilities(frozen.clone());
+    let mut imports = VmReplImports::default();
 
     loop {
         write_stdout(if input.is_empty() {
@@ -740,78 +749,103 @@ fn run_repl_vm(frozen: CapabilitySet, budget_env: &LegacyBudgetEnv) {
             continue;
         }
 
-        // パース
-        let mut lexer = Lexer::new(&input);
-        let tokens = lexer.tokenize();
-        let mut parser = Parser::new(tokens);
-        match parser.parse() {
-            Ok(program) => {
-                // Compiler・VM・ModuleLoaderを1つのREPL transactionとして扱う。
-                // compile成功後でもruntime errorなら、未実行のbinding/import情報を残さない。
-                let compiler_checkpoint = compiler.clone();
-                let loader_checkpoint = loader.clone();
-                // import は実行前に解決する（AUD-030）
-                match loader.link(&program) {
-                    Ok((linked, loaded)) => {
-                        let linked_program = linked.as_ref().unwrap_or(&program);
-                        // source/import 予算を Link フェーズで課金する（REV-015 Slice 2）。
-                        // 超過なら compile も実行もせず、loader を巻き戻す。
-                        match vm.charge_link(input.len() as u64, &loaded) {
-                            Ok(record_tokens) => {
-                                // imported module record token を loader へ登録し、
-                                // `loaded` set と寿命を揃える（REV-015 PR-d）。runtime error
-                                // 時の `loader = loader_checkpoint` で checkpoint 以降の
-                                // token が drop され live heap が release される。
-                                for (path, token) in record_tokens {
-                                    loader.register_record_token(path, token);
-                                }
-                            }
-                            Err(e) => {
-                                loader = loader_checkpoint;
-                                eprintln!("  エラー: {}", e);
-                                input.clear();
-                                continue;
-                            }
-                        }
-                        match compiler.compile_repl_line(linked_program) {
-                            Ok(chunk) => {
-                                if let Err(e) = vm.run_repl_chunk(chunk) {
-                                    // C7（REV-023）: exit() は REPL を終了コード付きで終える。
-                                    if matches!(
-                                        e.kind(),
-                                        Some(tsumugi::error::ErrorKind::ProcessExit)
-                                    ) {
-                                        let code = vm.take_pending_exit().unwrap_or(0);
-                                        std::process::exit(code as i32);
-                                    }
-                                    compiler = compiler_checkpoint;
-                                    loader = loader_checkpoint;
-                                    eprintln!("  エラー: {}", e);
-                                }
-                            }
-                            // compile_repl_line自身もrollbackするが、ここでも入力開始時の
-                            // checkpointを保持することでtransaction境界を明示する。
-                            Err(e) => {
-                                compiler = compiler_checkpoint;
-                                loader = loader_checkpoint;
-                                eprintln!("  エラー: {}", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        loader = loader_checkpoint;
-                        eprintln!("  エラー: {}", e);
-                    }
-                }
-            }
-            Err(errors) => {
-                for e in &errors {
-                    eprintln!("  エラー: {}", e);
-                }
-            }
-        }
+        execute_repl_submission_vm(
+            &engine,
+            &input,
+            &frozen,
+            budget_env,
+            &mut compiler,
+            &mut vm,
+            &mut imports,
+        );
 
         input.clear();
+    }
+}
+
+/// VM REPL の1入力を `compile`→`link`→展開→課金→`Compiler`/`Vm` で実行する。
+///
+/// Compiler・展開済みの表・VM の実行を 1 つの REPL transaction として扱う。link・展開・課金・
+/// compile・runtime のどこで終わっても、完了しなかった submission が足した binding/import は残さない。
+fn execute_repl_submission_vm(
+    engine: &EmbeddingEngine,
+    source: &str,
+    frozen: &CapabilitySet,
+    budget_env: &LegacyBudgetEnv,
+    compiler: &mut Compiler,
+    vm: &mut Vm,
+    imports: &mut VmReplImports,
+) {
+    let source_id = SourceId::new("<repl>")
+        .unwrap_or_else(|_| SourceId::new("<script>").expect("固定 fallback"));
+    let options = CompileOptions {
+        retain_source: true,
+    };
+    let script = match engine.compile(EmbeddingSource::new(source_id, source), &options) {
+        Ok(script) => script,
+        Err(errors) => {
+            report_repl_compile_errors(&errors);
+            return;
+        }
+    };
+
+    // link 用の budget は gate の器（tree REPL と同じ）。実行の budget は session の Vm が持つ。
+    let clock: Arc<dyn tsumugi::MonotonicClock> = Arc::new(SystemMonotonicClock::new());
+    let budget = budget_env.budget(clock.as_ref());
+    let operation_id = ExecutionId::new(std::num::NonZeroU128::new(1).expect("1 は非ゼロ"));
+    let link_request = LinkRequest::new(operation_id, frozen.clone(), budget)
+        .with_cancellation(CancellationToken::new());
+    let linked = match engine.link(&script, link_request) {
+        Ok(linked) => linked,
+        Err(error) => {
+            report_repl_link_error(&error);
+            return;
+        }
+    };
+    let (program, newly) = match linked.expand_for_repl(&imports.expanded) {
+        Ok(expanded) => expanded,
+        Err(e) => {
+            eprintln!("  エラー: {}", e);
+            return;
+        }
+    };
+
+    let compiler_checkpoint = compiler.clone();
+    let imports_checkpoint = imports.clone();
+    // source/import 予算を Link フェーズで課金する。超過なら compile も実行もしない。
+    match vm.charge_link_graph(source.len() as u64, &newly) {
+        Ok(tokens) => {
+            for (module, token) in newly.iter().zip(tokens) {
+                imports
+                    .expanded
+                    .insert(module.id.clone(), module.source_hash);
+                imports.tokens.insert(module.id.clone(), token);
+            }
+        }
+        Err(e) => {
+            eprintln!("  エラー: {}", e);
+            return;
+        }
+    }
+    match compiler.compile_repl_line(&program) {
+        Ok(chunk) => {
+            if let Err(e) = vm.run_repl_chunk(chunk) {
+                // C7（REV-023）: exit() は REPL を終了コード付きで終える。
+                if matches!(e.kind(), Some(tsumugi::error::ErrorKind::ProcessExit)) {
+                    let code = vm.take_pending_exit().unwrap_or(0);
+                    std::process::exit(code as i32);
+                }
+                *compiler = compiler_checkpoint;
+                *imports = imports_checkpoint;
+                eprintln!("  エラー: {}", e);
+            }
+        }
+        // compile_repl_line自身もrollbackするが、入力開始時のcheckpointでtransaction境界を明示する。
+        Err(e) => {
+            *compiler = compiler_checkpoint;
+            *imports = imports_checkpoint;
+            eprintln!("  エラー: {}", e);
+        }
     }
 }
 
