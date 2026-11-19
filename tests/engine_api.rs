@@ -1972,7 +1972,7 @@ print(d)
         ));
     }
 
-    /// TEC-AT-05（e1 分、REPL transaction）: REPL 経路（`link_for_repl` → `run_for_repl`）の
+    /// TEC-AT-05（e1 分、REPL transaction）: REPL 経路（`link` → `run_for_repl`）の
     /// submission でも、関数本体の途中の yield を跨いで journal が保持され、成功した submission は
     /// commit、未捕捉エラーで終わった submission は submission 開始時点へ rollback される。
     #[test]
@@ -1995,7 +1995,7 @@ print(d)
                 CapabilitySet::empty(),
                 budget,
             );
-            let linked = engine.link_for_repl(&script, link_request).expect("link");
+            let linked = engine.link(&script, link_request).expect("link");
             engine.run_for_repl(&linked, ctx, request(CapabilitySet::empty()))
         };
         let body = "fn work()\n  let i = 0\n  while i < 5\n    i = i + 1\n  end\n  return i\nend\n";
@@ -2320,7 +2320,7 @@ print(skip)
                 CapabilitySet::empty(),
                 budget,
             );
-            let linked = engine.link_for_repl(&script, link_request).expect("link");
+            let linked = engine.link(&script, link_request).expect("link");
             engine.run_for_repl(&linked, ctx, request(CapabilitySet::empty()))
         };
         let mut repl = EmbeddingContext::new(&engine);

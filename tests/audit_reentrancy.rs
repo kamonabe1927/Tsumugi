@@ -219,10 +219,6 @@ fn probe_all_entries(target: &Target) -> Vec<String> {
         Err(LinkError::InternalFailure { .. }) => {}
         other => bad.push(format!("link: {other:?}")),
     }
-    match engine.link_for_repl(&target.compiled, link_request()) {
-        Err(LinkError::InternalFailure { .. }) => {}
-        other => bad.push(format!("link_for_repl: {other:?}")),
-    }
 
     let mut ctx = EmbeddingContext::new(engine);
     match engine.run(

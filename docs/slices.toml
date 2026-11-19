@@ -649,11 +649,12 @@ blocked_reason = "E10 統合後（roadmap.md「Phase 6 残」の記載どおり�
 [[slice]]
 id         = "fix-repl-import-gate"
 title      = "tree REPL と VM REPL の import を同じ PR で submission ごとに link 時の resolver gate に通し、link の graph から展開する（capability-model §10、issue #327・#366）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-repl-import-gate 実装スライス（tree REPL と VM REPL の import を同じ PR で resolver gate に通す）" }
 acceptance = ["RIG-AT-01..05"]
 design_pr  = 444
+impl_pr    = 446
 order      = 90
 
 [[slice]]

@@ -1617,7 +1617,8 @@ fn vm_repl_rolls_back_runtime_global_registry_after_error() {
         "let failed_global = \"recovered\"\n",
         "print(failed_global)\n",
     );
-    let output = run_repl_process(source, true, &[]);
+    let output =
+        run_repl_process_with_args(source, true, &[], &["--allow-import-root", "default=."]);
     let (stdout, stderr) = output_text(&output);
 
     assert!(output.status.success(), "VM REPLが異常終了: {stderr}");
@@ -1845,12 +1846,37 @@ fn repl_control_flow_block_locals_do_not_leak() {
 // =============================================================
 
 fn run_repl_process(source: &str, use_vm: bool, envs: &[(&str, &str)]) -> std::process::Output {
+    run_repl_process_with_args(source, use_vm, envs, &[])
+}
+
+/// [`run_repl_process`] に追加の CLI 引数（例: `--allow-import-root default=.`）を渡す版。
+fn run_repl_process_with_args(
+    source: &str,
+    use_vm: bool,
+    envs: &[(&str, &str)],
+    args: &[&str],
+) -> std::process::Output {
+    run_repl_process_in(None, source, use_vm, envs, args)
+}
+
+/// [`run_repl_process_with_args`] に作業ディレクトリ（`Some(dir)`）も指定できる版。
+fn run_repl_process_in(
+    cwd: Option<&str>,
+    source: &str,
+    use_vm: bool,
+    envs: &[(&str, &str)],
+    args: &[&str],
+) -> std::process::Output {
     use std::io::Write as _;
 
     let mut command = Command::new(tsumugi_bin());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     if use_vm {
         command.arg("--vm");
     }
+    command.args(args);
     command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2074,38 +2100,45 @@ fn tree_repl_resets_step_budget_per_submission() {
 }
 
 #[test]
-fn tree_repl_retries_failed_import() {
-    let output = run_repl_process(
-        "import \"tests/fixtures/import_bad_syntax.tsg\"\n\
-         import \"tests/fixtures/import_bad_syntax.tsg\"\n\
-         import \"tests/fixtures/import_lib.tsg\"\n\
-         print(add(3, 4))\n",
-        false,
-        &[],
-    );
-    let (stdout, stderr) = output_text(&output);
+fn repl_retries_failed_import_in_both_engines() {
+    // 構文の不正な module の import は file/stdin と同じ診断（`print_link_error`）で表示され、
+    // session は続く。同じ import を再試行でき、後続の import と実行も成功する。
+    for use_vm in [false, true] {
+        let mode = if use_vm { "VM" } else { "tree" };
+        let output = run_repl_process_with_args(
+            "import \"tests/fixtures/import_bad_syntax.tsg\"\n\
+             import \"tests/fixtures/import_bad_syntax.tsg\"\n\
+             import \"tests/fixtures/import_lib.tsg\"\n\
+             print(add(3, 4))\n",
+            use_vm,
+            &[],
+            &["--allow-import-root", "default=."],
+        );
+        let (stdout, stderr) = output_text(&output);
 
-    assert!(output.status.success(), "tree REPLが異常終了: {stderr}");
-    assert_eq!(
-        stderr
-            .matches(
-                "import に失敗しました: モジュールの構文が不正です: tests/fixtures/import_bad_syntax.tsg (2行目: 想定外の文字: '@')"
-            )
-            .count(),
-        2,
-        "失敗したimportがloaded扱いになったか、base_dirが復元されていない: {stderr}"
-    );
-    assert!(
-        stdout.contains("7\n"),
-        "失敗後の相対importまたは後続実行に失敗: {stdout}\n--- stderr ---\n{stderr}"
-    );
+        assert!(output.status.success(), "{mode} REPLが異常終了: {stderr}");
+        assert_eq!(
+            stderr.matches("import モジュールが不正です:").count(),
+            2,
+            "{mode}: 失敗したimportの診断が2回出ていません: {stderr}"
+        );
+        assert_eq!(
+            stderr.matches("2行目: 想定外の文字: '@'").count(),
+            2,
+            "{mode}: 構文エラーの位置が不正: {stderr}"
+        );
+        assert!(
+            stdout.contains("7\n"),
+            "{mode}: 失敗後の import または後続実行に失敗: {stdout}\n--- stderr ---\n{stderr}"
+        );
+    }
 }
 
 // =============================================================
 // E7: REPL の Engine embedding API 統合（観測挙動不変の担保）
 // =============================================================
 //
-// tree REPL は E7 で Engine embedding API（compile→link_for_repl→run_for_repl、EmbeddingContext
+// tree REPL は E7 で Engine embedding API（compile→link→run_for_repl、EmbeddingContext
 // 再利用）へ載せ替えた。VM REPL は E9 まで現状維持。下記は統合前と同じ観測挙動を tree/VM 両方で
 // 固定する（既存 REPL テストと重複しない観点を 1 テスト 1 観点で）。
 
@@ -2139,7 +2172,8 @@ fn repl_imported_names_resolve_across_submissions_in_both_engines() {
                   print(greet(\"tsumugi\"))\n";
 
     for use_vm in [false, true] {
-        let output = run_repl_process(source, use_vm, &[]);
+        let output =
+            run_repl_process_with_args(source, use_vm, &[], &["--allow-import-root", "default=."]);
         let (stdout, stderr) = output_text(&output);
         let mode = if use_vm { "VM" } else { "tree" };
         let visible = repl_visible_lines(&stdout, use_vm);
@@ -2909,19 +2943,20 @@ fn repl_resolves_imports_before_execution_in_both_engines() {
     let module = std::path::Path::new(dir.as_str()).join("boom.tsg");
     std::fs::write(&module, "print(\"MOD-TOP\")\nlet boom = 1 / 0\n")
         .unwrap_or_else(|error| panic!("モジュールを書けません: {error}"));
-    let module_path = module
-        .to_str()
-        .unwrap_or_else(|| panic!("パスがUTF-8ではありません"))
-        .replace('\\', "/");
+    let import_root = format!("default={}", dir.as_str());
 
-    let source = format!(
-        "print(\"BEFORE\")\nimport \"{module_path}\"\nimport \"{module_path}\"\nprint(\"AFTER\")\n"
-    );
+    let source = "print(\"BEFORE\")\nimport \"boom.tsg\"\nimport \"boom.tsg\"\nprint(\"AFTER\")\n"
+        .to_string();
 
     let mut outputs = Vec::new();
     for use_vm in [false, true] {
         let mode = if use_vm { "VM" } else { "tree" };
-        let output = run_repl_process(&source, use_vm, &[]);
+        let output = run_repl_process_with_args(
+            &source,
+            use_vm,
+            &[],
+            &["--allow-import-root", &import_root],
+        );
         let (stdout, stderr) = output_text(&output);
         let visible = repl_visible_lines(&stdout, use_vm);
 
@@ -2947,6 +2982,192 @@ fn repl_resolves_imports_before_execution_in_both_engines() {
         outputs[0], outputs[1],
         "treeとVMでimportの観測結果が異なります"
     );
+}
+
+// =============================================================
+// fix-repl-import-gate（capability-model §10）: REPL の import は submission ごとに link の
+// resolver gate を通り、link の graph から展開する。tree と --vm は同じ入力で同じ結果になる。
+// =============================================================
+
+/// tree と --vm に同じ REPL 入力を与え、(プロンプトを除いた stdout 行, stderr, exit code) を返す。
+/// 2 つの結果が一致することはこの関数が確かめる。
+fn run_repl_both_engines(
+    cwd: &str,
+    source: &str,
+    envs: &[(&str, &str)],
+    args: &[&str],
+) -> (Vec<String>, String, Option<i32>) {
+    run_repl_both_engines_with(cwd, source, envs, args, || {})
+}
+
+/// [`run_repl_both_engines`] に、各 engine の実行の前に呼ぶ準備（fixture の作り直し）を足した版。
+fn run_repl_both_engines_with(
+    cwd: &str,
+    source: &str,
+    envs: &[(&str, &str)],
+    args: &[&str],
+    prepare: impl Fn(),
+) -> (Vec<String>, String, Option<i32>) {
+    let mut results = Vec::new();
+    for use_vm in [false, true] {
+        prepare();
+        let output = run_repl_process_in(Some(cwd), source, use_vm, envs, args);
+        let (stdout, stderr) = output_text(&output);
+        let visible = repl_visible_lines(&stdout, use_vm)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert!(
+            !stderr.contains("panicked at"),
+            "[vm={use_vm}] host panic: {stderr}"
+        );
+        results.push((visible, stderr, output.status.code()));
+    }
+    assert_eq!(results[0], results[1], "tree と --vm の結果が異なります");
+    results.remove(0)
+}
+
+/// RIG-AT-01: `--allow-import-root` なしの REPL の import は `Denied`（file/stdin と同じ診断）。
+/// module の top-level の効果は出ず、続く submission は実行され、EOF で exit 0。
+#[test]
+fn rig_at_01_repl_import_without_grant_is_denied_in_both_engines() {
+    let dir = TestDir::new("rig01");
+    std::fs::write(dir.path.join("m.tsg"), "print(\"MOD-TOP\")\n").unwrap();
+    let (visible, stderr, code) =
+        run_repl_both_engines(dir.as_str(), "import \"m.tsg\"\nprint(1)\n", &[], &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        stderr.contains("module resolver が許可されていません"),
+        "Denied の診断が出ていません: {stderr}"
+    );
+    assert!(
+        stderr.contains("--allow-import-root"),
+        "対処の案内がありません: {stderr}"
+    );
+    assert!(!visible.iter().any(|l| l == "MOD-TOP"), "{visible:?}");
+    assert!(visible.iter().any(|l| l == "1"), "{visible:?}");
+}
+
+/// RIG-AT-02: grant あり。import した名前が後の submission から使え、同じ import を再度書いても
+/// top-level の効果は 1 回だけ。
+#[test]
+fn rig_at_02_repl_import_with_grant_spans_submissions_in_both_engines() {
+    let dir = TestDir::new("rig02");
+    std::fs::write(dir.path.join("m.tsg"), "print(\"MOD-TOP\")\nlet v = 5\n").unwrap();
+    let root = format!("default={}", dir.as_str());
+    let (visible, stderr, code) = run_repl_both_engines(
+        dir.as_str(),
+        "import \"m.tsg\"\nprint(v)\nimport \"m.tsg\"\nprint(v + 1)\n",
+        &[],
+        &["--allow-import-root", &root],
+    );
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stderr.is_empty(), "予期しない診断: {stderr}");
+    assert_eq!(visible, ["MOD-TOP", "5", "6"]);
+}
+
+/// RIG-AT-03: (a) runtime error で終わった module は巻き戻され再展開される、(b) 展開の途中で
+/// 失敗した（compile/実行前に失敗した）module も同様、(c) 展開済みの module の内容が変わると
+/// 1 文も実行せずに hash の食い違いで失敗し、session は続く。
+#[test]
+fn rig_at_03_repl_rolls_back_failed_imports_and_checks_hash_in_both_engines() {
+    let dir = TestDir::new("rig03");
+    let write_fixtures = || {
+        std::fs::write(
+            dir.path.join("boom.tsg"),
+            "print(\"MOD-TOP\")\nlet boom = 1 / 0\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path.join("brk.tsg"), "let q = 1\nbreak\n").unwrap();
+        std::fs::write(dir.path.join("m.tsg"), "print(\"OLD\")\n").unwrap();
+    };
+    let root = format!("default={}", dir.as_str());
+    let data = format!("data={}", dir.as_str());
+    let source = concat!(
+        // (a) runtime error → 巻き戻し → 再展開で MOD-TOP がもう一度出る
+        "import \"boom.tsg\"\n",
+        "import \"boom.tsg\"\n",
+        // (b) 実行に入る前に失敗する module（VM は compile error、tree は実行の最初で失敗）
+        "import \"brk.tsg\"\n",
+        "import \"brk.tsg\"\n",
+        // (c) 展開済みの m.tsg を書き換えてから再度 import する
+        "import \"m.tsg\"\n",
+        "write_file(\"@data/m.tsg\", \"print(\\\"NEW\\\")\\n\")\n",
+        "import \"m.tsg\"\n",
+        "print(\"AFTER\")\n",
+    );
+    let (visible, stderr, code) = run_repl_both_engines_with(
+        dir.as_str(),
+        source,
+        &[],
+        &[
+            "--allow-import-root",
+            &root,
+            "--fs-root",
+            &data,
+            "--fs-op",
+            "data=write,create",
+        ],
+        write_fixtures,
+    );
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        visible.iter().filter(|l| *l == "MOD-TOP").count(),
+        2,
+        "(a): {visible:?}"
+    );
+    assert_eq!(stderr.matches("ゼロ除算").count(), 2, "(a): {stderr}");
+    assert_eq!(
+        stderr
+            .matches("break はループの中でのみ使用できます")
+            .count(),
+        2,
+        "(b): {stderr}"
+    );
+    assert_eq!(
+        visible.iter().filter(|l| *l == "OLD").count(),
+        1,
+        "(c): {visible:?}"
+    );
+    assert!(!visible.iter().any(|l| l == "NEW"), "(c): {visible:?}");
+    assert!(
+        stderr.contains("別の内容で既に展開されています"),
+        "(c) hash の食い違いの失敗が出ていません: {stderr}"
+    );
+    assert!(visible.iter().any(|l| l == "AFTER"), "{visible:?}");
+}
+
+/// RIG-AT-05（subprocess 部分）: `TSUMUGI_SANDBOX` を import root と関係の無いディレクトリにしても、
+/// REPL の import の成否は `--allow-import-root` だけで決まる（tree と --vm で一致）。
+#[test]
+fn rig_at_05_repl_import_ignores_tsumugi_sandbox_in_both_engines() {
+    let dir = TestDir::new("rig05");
+    std::fs::write(dir.path.join("m.tsg"), "let v = 42\n").unwrap();
+    let unrelated = TestDir::new("rig05-unrelated");
+    let root = format!("default={}", dir.as_str());
+    let envs = [("TSUMUGI_SANDBOX", unrelated.as_str())];
+    // grant あり: sandbox が無関係なディレクトリでも import は成功する。
+    let (visible, stderr, code) = run_repl_both_engines(
+        dir.as_str(),
+        "import \"m.tsg\"\nprint(v)\n",
+        &envs,
+        &["--allow-import-root", &root],
+    );
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        !stderr.contains("sandbox") && !stderr.contains("サンドボックス"),
+        "{stderr}"
+    );
+    assert_eq!(visible, ["42"]);
+    // grant なし: sandbox が CWD を含んでいても import は Denied。
+    let envs = [("TSUMUGI_SANDBOX", dir.as_str())];
+    let (visible, stderr, _) =
+        run_repl_both_engines(dir.as_str(), "import \"m.tsg\"\nprint(1)\n", &envs, &[]);
+    assert!(
+        stderr.contains("module resolver が許可されていません"),
+        "{stderr}"
+    );
+    assert_eq!(visible, ["1"]);
 }
 
 // =============================================================

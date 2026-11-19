@@ -8,18 +8,12 @@
 //! Engine resolver（`ModuleResolver` capability）経由で、run 層は link が resolver で読んだ source
 //! だけを展開する（capability-model §10）。この経路は `ModuleLoader` も本モジュールも通らず、
 //! `TSUMUGI_SANDBOX` を読まない。本モジュールの `check_path` / `check_entry_path` を呼ぶのは次だけ:
-//! - tree REPL / VM REPL の import（REPL は link 層 gate を意図的に迂回し、import 解決を評価器内蔵
-//!   `ModuleLoader` へ委ねる。tree REPL は E7 で `compile`→`link_for_repl`→`run_for_repl` へ統合済み
-//!   だが import 解決だけは従来どおり `ModuleLoader`——resolver gate を迂回して CWD 相対 import・
-//!   固定エラー文字列という統合前の観測挙動を保全するため。詳細は
-//!   `embedding.rs::Engine::link_for_repl` の doc。VM REPL は tree REPL と対称に現状維持）。
-//!
 //! - scheduler の handle 経路（`Engine::create_execution` / `start`）の import（link を経ないため
 //!   展開できる graph が無く、評価器内蔵 `ModuleLoader` を使う）。
 //!
-//! これらが `ModuleLoader` を手放し Engine resolver へ統合されるまで、本モジュールは import 用に
-//! 残す（設計 §3.5 の「撤去」は `ModuleLoader` の唯一の呼び出し元が消える前提に立っていたが、
-//! `ModuleLoader` は REPL・scheduler の handle 経路の import 用に温存されるため、撤去はその統合まで保留する）。
+//! tree REPL / VM REPL の import も、submission ごとの link（Engine resolver）と link の graph からの展開に
+//! 移した（fix-repl-import-gate）ため、本モジュールを呼ばない。handle 経路が Engine resolver へ統合されるまで、
+//! 本モジュールは import 用に残す（撤去は fix-handle-import-from-link）。
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
