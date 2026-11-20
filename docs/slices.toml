@@ -316,7 +316,7 @@ parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 spec       = { doc = "docs/determinism-and-audit.md", section = "fix-heap-charge-audit-notify 実装スライス（heap の課金を `BudgetCharged` の accumulator へ通知する）" }
 acceptance = ["HCN-AT-01..05"]
-design_pr  = 347
+design_pr  = 456
 depends_on = ["A-1"]
 order      = 38
 
