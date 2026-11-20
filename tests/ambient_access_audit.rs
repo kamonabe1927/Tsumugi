@@ -536,8 +536,15 @@ fn scan_source(rel: &str, content: &str) -> Vec<Violation> {
                 let stmt = body.split(';').next().unwrap_or("").to_string();
                 for path in expand_use(&stmt) {
                     for pat in PATTERNS {
+                        // グロブ（`X::*`）は X の下の item をすべて持ち込む。X がパターンの path か module か、
+                        // その親なら違反。
+                        let glob = path.strip_suffix("::*");
                         let hit = pat.use_paths.iter().any(|b| path_is_or_under(&path, b))
-                            || pat.use_modules.contains(&path.as_str());
+                            || pat.use_modules.contains(&path.as_str())
+                            || glob.is_some_and(|g| {
+                                pat.use_modules.contains(&g)
+                                    || pat.use_paths.iter().any(|b| path_is_or_under(b, g))
+                            });
                         if hit {
                             push(pat.key, start, &format!("use {}", stmt.trim()));
                         }
@@ -755,10 +762,26 @@ fn scan_detects_each_pattern_and_use_imports() {
         ("use std::{fs, io};", "fs"),
         ("use std::time::UNIX_EPOCH;", "UNIX_EPOCH"),
         ("pub use std::fs::File;", "fs"),
+        // グロブの取り込み。
+        ("use std::process::*;", "process"),
+        ("use std::io::*;", "stdio"),
+        ("use std::{process::*};", "process"),
+        ("use std::env::*;", "env"),
     ];
     for (src, key) in cases {
         assert_eq!(keys("a.rs", src), vec![*key], "src={src}");
     }
+    // `std::thread::*` は thread の item をすべて持ち込むので、thread 系の key がすべて当たる。
+    assert_eq!(
+        keys("a.rs", "use std::thread::*;"),
+        vec![
+            "thread",
+            "thread::Builder",
+            "thread::park",
+            "thread::sleep",
+            "thread::spawn"
+        ]
+    );
     // 修飾無しの呼び。
     assert_eq!(
         keys("a.rs", "fn f() { SystemTime::now(); }"),
@@ -790,6 +813,8 @@ fn scan_detects_each_pattern_and_use_imports() {
         "fn f() { MyInstant::now(); }",
         "fn f() { let _ = std::fsx::a(); }",
         "use std::process::ExitCode;",
+        "use std::io::prelude::*;",
+        "use super::*;",
     ] {
         assert!(keys("a.rs", src).is_empty(), "src={src}");
     }
