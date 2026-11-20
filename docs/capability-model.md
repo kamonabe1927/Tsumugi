@@ -1377,6 +1377,11 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
     `std::thread::park_timeout`）、`src/budget.rs`（`SystemMonotonicClock` の `std::time::Instant::now`）、`src/bin/gen_builtins_doc.rs`（`use std::fs`）、`src/builtin_core.rs`（`resolve_now` の `use std::time::UNIX_EPOCH` と `duration_since(UNIX_EPOCH)`。
     Clock capability の `now_utc()` から受け取った値を秒へ写すだけで、system clock は読まない）である。`UNIX_EPOCH` はほかに `src/embedding.rs`（5013 行）・`src/vm.rs`（2810 行）・
     `src/capability.rs`（2548 行）にもあるが、いずれも `#[cfg(test)] mod tests` の中（それぞれ 3647・2643・2533 行から）なので検査の対象外である。
+  - 今の許可ファイルの production コード（各ファイルの `#[cfg(test)] mod tests` より前）で、広げたパターンに当たるものは次のとおりで、組の単位の許可（Q2=A）にするときはすべてを組として載せる。
+    `src/main.rs`: `std::process::exit`・`use std::fs`・`use std::env as std_env`・`std::thread::Builder`（24 行。CLI の実行スレッドのスタック確保）。
+    `src/cli_capability.rs`: `std::env::var`・`vars`・`current_dir`。`src/capability.rs`: `std::fs`（`use std::fs` を含む）・`std::env::current_dir`・`std::io::stdin`・`stdout`・
+    `use std::time::SystemTime`・`SystemTime::now`。`src/module.rs`: `std::fs`・`std::env::current_dir`。`src/sandbox.rs`: `std::env::var`・`current_dir`。
+    許可リスト外のファイルの該当は上の項目のものだけで、ほかの production の `std::process`・`std::net`・`std::io::std*`・`use std::{...}` の取り込みは無い（main 968b64f の木で確かめた）。
     いずれもホスト側の adapter・待機・開発用ツール、または capability 経由の値の変換で、script が ambient に権限を得る経路ではないため、理由付きで許可リストに載せる見込みである（`src/` の変更 0 行）。
 - **実装範囲**:
   1. 検査は既存の `tests/ambient_access_audit.rs` を拡張して 1 本に保つ（Q1=A）。ファイル冒頭に、検査項目ごとに守る原則（OS・network・process・clock の項目は原則 2・8、`std::thread` の項目は原則 1・3）と CAP-AT-27 の対応表を置く。
@@ -1386,7 +1391,7 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
      `std::net`、`std::thread`（`spawn`・`Builder`・`park*`・`sleep`）、`std::time::SystemTime`・`UNIX_EPOCH`、および修飾無しの `SystemTime::now`・`Instant::now`（既存の `SystemTime::now` の照合を残す）。`std::thread::current` は検出しない（`available_parallelism` と同じ扱い）。`use` 文でこれらの module・item を取り込む行も検出する
      （取り込み自体を違反として数え、以降の短縮名の呼びは追わない）。
   5. 許可リストを「ファイル・パターン」の組の単位にし（Q2=A）、各組に理由と原則を書く。許可リストにある組が実際には 1 度も一致しなければ検査を失敗させる（古い許可を残さない）。
-  6. 試算で見つかった `std::thread` の該当（`host_pending.rs` の `spawn`、`embedding.rs` の `park_timeout`。許可は `host_pending.rs`×`spawn` と `embedding.rs`×`park*` の 2 組）は、ホスト側の adapter executor・同期 wrapper の待機として、原則 1・3（と 8）を理由に許可リストに載せる（Q3=A）。
+  6. 試算で見つかった `std::thread` の該当（`host_pending.rs` の `spawn`、`embedding.rs` の `park_timeout`、`main.rs` の `Builder`。許可は `host_pending.rs`×`spawn`・`embedding.rs`×`park*`・`main.rs`×`Builder` の 3 組）は、ホスト側の adapter executor・同期 wrapper の待機・CLI adapter の実行スレッドのスタック確保として、原則 1・3（と 8）を理由に許可リストに載せる（Q3=A）。
      `UNIX_EPOCH` は検出パターンに残し、`builtin_core.rs`×`UNIX_EPOCH` を「Clock capability から受け取った値の変換で、system clock を読まない」という理由（ambient な呼びの例外ではなく capability 経由の値の変換であること）と原則 2 で許可リストに載せる（Q4=B）。載せられない該当が見つかったら、本スライスで
      `src/` を直さず、`fix-` スライスとして PM に返す。
   7. 動的検査 `safe_default_denies_all_ambient_operations` は変えない。
