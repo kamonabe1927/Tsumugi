@@ -705,7 +705,7 @@ manifesto-check-ambient-surface（[Capability Model仕様](capability-model.md) 
   2. 走査対象は `src/` 配下の全 `*.rs` から `src/main.rs`（CLI adapter）と `src/bin/`（開発用ツール）を除いたもの。lib の中で script から届く経路は静的に絞れないので、lib の production コード全体を
      上位集合として検査する。
   3. test コードの除外は、`#[cfg(test)]` の直後の item が `mod` のもの（その module の終わりまで）に加え、`#[cfg(test)]` の直後の文・式・関数・impl（その item の終わり。brace のある item は brace が閉じるまで、
-     無いものは `;` まで）とする。production の build に入らないコードだからである。フィールドに付いた `#[cfg(test)]` では、そのフィールドの 1 行だけを除く。
+     無いものは `;` まで）とする。production の build に入らないコードだからである。ただし、`#[cfg(test)]` の直後の行が `,` で終わるもの（構造体のフィールド・struct literal のフィールド・関数呼びの引数。例: `src/embedding.rs` 1842・2026・2133・2391 行）は、その 1 行だけを除く（次の `;` まで除かない）。
   4. 検出パターン: `panic!`・`todo!`・`unimplemented!`・`unreachable!`（Q2）、`std::panic::panic_any`・`resume_unwind`、`process::exit`・`process::abort`（Q3。修飾無しの `process::` を含む）と、
      `use` 文でこれらを取り込む行（`use std::process;` の module の取り込みを含む）。`std::panic!` のような修飾つきの呼びも照合する。`assert!` 系・`debug_assert!` 系・`.unwrap()`・`.expect(` は検出しない（Q4）。
   5. 許可リストは「ファイル・パターン・件数」の組の単位にし、各組に理由と原則を書く（Q5）。組の件数と実際の一致数が違えば検査を失敗させる（増えたら新しい箇所に、減ったら古い許可に気付ける）。
@@ -721,7 +721,7 @@ manifesto-check-ambient-surface（[Capability Model仕様](capability-model.md) 
   （§12 の exit code の写像で、`tests/ambient_access_audit.rs` が `main.rs`×`process` として扱う）。`.github/`（凍結）の変更。§11 の目標の文の変更。
 - **受入基準**:
   - **NHA-AT-01**（走査の範囲）: `src/main.rs` と `src/bin/` を除く `src/` 配下（サブディレクトリを含む）の `*.rs` が走査され、`#[cfg(test)] mod` と `#[cfg(test)]` の付いた文・関数の中は除かれ、
-    それ以外は除かれない。確かめ方: 検査関数を文字列の入力で呼ぶ unit を同じテストファイルに置き、`#[cfg(test)]` の付いた `if` 文の中の `panic!` が検出されず、その直後の文の `panic!` が検出されることと、
+    それ以外は除かれない。確かめ方: 検査関数を文字列の入力で呼ぶ unit を同じテストファイルに置き、`#[cfg(test)]` の付いた `if` 文の中の `panic!` が検出されず、その直後の文の `panic!` が検出されることと、`#[cfg(test)]` の付いた構造体フィールドと関数呼びの引数（行が `,` で終わるもの）の直後の行の `panic!` が検出されることと、
     除外するパスの判定を確かめる。
   - **NHA-AT-02**（検出パターン）: 実装範囲 4 のパターンと `use` 経由の取り込みが、それぞれ違反として検出され、`assert!`・`debug_assert!`・`.unwrap()`・`.expect(` と文字列・コメントの中の `panic!` は検出されない。
     確かめ方: パターンごとの文字列入力の unit（`use std::process;` のあとの `process::exit(1)`、`std::panic!(...)` を含む）。
