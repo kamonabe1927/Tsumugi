@@ -1364,7 +1364,7 @@ fix-handle-import-from-link の `depends_on` は、この 1 本に付け替え�
 
 loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェスト](manifesto.md) 原則 2（ambient authority を既定で公開しない）と原則 8（外部効果はホスト境界の後ろ）を、
 `cargo test` で走る静的検査として固定する（週次計画 #355・#417 の P-1、親 AUD-022）。CAP-AT-27（本書 §19）の静的検査の対象と精度を広げるスライスで、§19 の目標の文は変えない。
-本小節の Q1〜Q3 は設計 PR に「判断の候補」として出したもので、判断役の選択を反映するまでは推奨案（A）で書いている。
+検査の置き場所・許可リストの単位・`std::thread` の扱いは、判断役が選択（PR #460）の Q1=A・Q2=A・Q3=A による（下の「決定記録」）。
 
 - **前提（設計時点の main 968b64f で確かめたこと）**:
   - `tests/ambient_access_audit.rs::core_has_no_direct_ambient_os_access` は `src/` 直下の `*.rs` だけを走査し、`src/bin/` などのサブディレクトリを見ない。
@@ -1377,14 +1377,14 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
     `std::thread::park_timeout`・`std::thread::current`）、`src/budget.rs`（`SystemMonotonicClock` の `std::time::Instant::now`）、`src/bin/gen_builtins_doc.rs`（`use std::fs`）である。
     いずれもホスト側の adapter・待機・開発用ツールで、script が ambient に権限を得る経路ではないため、理由付きで許可リストに載せる見込みである（`src/` の変更 0 行）。
 - **実装範囲**:
-  1. 検査は既存の `tests/ambient_access_audit.rs` を拡張して 1 本に保つ（Q1=A）。ファイル冒頭に、検査項目ごとに守る原則（原則 2・8、必要なら 5）と CAP-AT-27 の対応表を置く。
+  1. 検査は既存の `tests/ambient_access_audit.rs` を拡張して 1 本に保つ（Q1=A）。ファイル冒頭に、検査項目ごとに守る原則（OS・network・process・clock の項目は原則 2・8、`std::thread` の項目は原則 1・3）と CAP-AT-27 の対応表を置く。
   2. 走査対象を `src/` 配下の全 `*.rs`（サブディレクトリを含む）にする。
   3. test コードの除外を、`#[cfg(test)]` の直後の item が `mod` であるもの（その module の終わりまで）に限る。フィールド・文・関数に付いた `#[cfg(test)]` では走査を打ち切らない。
   4. 検出パターンを広げる: `std::env::` のすべて（`args`・`set_var` を含む）、`std::fs`、`std::io::stdin`・`stdout`・`stderr`、`std::process`（`exit`・`Command`・`abort`・`id`）、
      `std::net`、`std::thread`（`spawn`・`Builder`・`park*`・`sleep`）、`std::time::SystemTime`・`UNIX_EPOCH`・`Instant::now`。`use` 文でこれらの module・item を取り込む行も検出する
      （取り込み自体を違反として数え、以降の短縮名の呼びは追わない）。
   5. 許可リストを「ファイル・パターン」の組の単位にし（Q2=A）、各組に理由と原則を書く。許可リストにある組が実際には 1 度も一致しなければ検査を失敗させる（古い許可を残さない）。
-  6. 試算で見つかった `std::thread` の該当は、ホスト側の adapter executor・同期 wrapper の待機として許可リストに載せる（Q3=A）。載せられない該当が見つかったら、本スライスで
+  6. 試算で見つかった `std::thread` の該当（`host_pending.rs` の `spawn`、`embedding.rs` の `current`・`park_timeout`）は、ホスト側の adapter executor・同期 wrapper の待機として、原則 1・3（と 8）を理由に許可リストに載せる（Q3=A）。載せられない該当が見つかったら、本スライスで
      `src/` を直さず、`fix-` スライスとして PM に返す。
   7. 動的検査 `safe_default_denies_all_ambient_operations` は変えない。
 - **範囲外**: lib の script 到達経路の `process::exit`・`abort`・`panic!` の検査（manifesto-check-no-host-abort）。構文木による厳密な解析（文字列照合のまま）。
@@ -1398,6 +1398,19 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
 - **想定の変更規模**: `tests/ambient_access_audit.rs` が +150〜250 行（既存の静的検査の置き換えを含む）。`src/` は 0 行の見込み（実装範囲 6 のとおり、直す必要が出たら fix スライスへ）。
   §14.1 の行数と受入基準（5 項目以内）に収まり、触る仕組みは「src/ の静的検査（tests/ の 1 本）」1 つ。逸脱一覧の変更は見込まない。
 - **依存**: なし。
+- **決定記録**（判断役が選択（PR #460））:
+  - **Q1=A**（検査は既存の `tests/ambient_access_audit.rs` を拡張して 1 本に保つ）。理由: 同じ性質（原則 2・8）を 2 つの検査・2 つの許可リストで持つと、食い違ったときにどちらが正しいか説明できなくなる（原則 9、優先順位の表「再現可能な検証」）。
+    別ファイルにしても既存の取りこぼし（前提）は残り、CAP-AT-27 の裏付けが弱いままになる。広げたパターンは既存の 9 パターンを含むので、置き換えで CAP-AT-27 の検出は狭まらない。
+    採らなかった案 B（新しいファイルを置き、既存の検査を残す）は、名前で見つけやすい利点が冒頭の対応表（MAS-AT-04）で足り、許可リストの二重持ちが原則 8・9 に対して劣るため採らない。
+  - **Q2=A**（許可リストは「ファイル・パターン」の組の単位、各組に理由と原則、一致しない組で失敗）。理由: 走査を広げると `embedding.rs`・`host_pending.rs`・`budget.rs` を許可に載せる必要があり、
+    ファイル単位ではその中の新しい `std::fs`・`std::env`・`std::net` などの呼びが素通りする。script 実行の入口である embedding が検査の外になると、原則 2 の 1 段目が中核で効かない
+    （優先順位の表「明示的な capability」「再現可能な検証 ＞ 根拠のない安全性の主張」）。一致しない組で失敗させるのは、古い許可を残さず許可リストを小さく保つため（原則 8・9）。
+    採らなかった案 B（ファイル単位のまま理由と原則を書き足す）は、許可したファイルの中の新しい ambient な呼びを機械チェックで弾けず、検査が通ることを「許可リスト外に無い」の裏付けとして扱えなくなるため、原則 2 に反しうるとして採らない。
+  - **Q3=A**（`std::thread` の `spawn`・`Builder`・`park*`・`sleep` を検出し、adapter executor と同期 wrapper の待機を理由付きで許可する）。理由: thread は原則 2 が挙げる外部効果には入らないので、
+    根拠は原則 1（ホストの安定性、負荷の最悪値を制御できる）と原則 3（同時実行数と総資源消費も制御対象）に置く。core がホストの知らない thread を作る・ホストの thread を `sleep`／`park` で塞ぐ経路は
+    実行予算と scheduler の外で資源を使うので、新しく入ったら機械で気付けるようにする（優先順位の表「制御可能な最悪時負荷」「再現可能な検証」）。production の該当は 2 ファイルだけで、Q2=A の組の単位なら許可は 2〜3 組で済む。
+    採らなかった案 B（含めない）は、原則 2 の読みとしては正しいが原則 1・3 の側の機械チェックが無いままになり、検査が単純になる利点も該当が少ないので小さいため採らない。
+    `std::thread::available_parallelism`（`scheduler.rs`）は検出パターンに入らない。
 
 ## 19. 受入基準
 
