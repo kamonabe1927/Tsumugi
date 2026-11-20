@@ -1360,6 +1360,45 @@ fix-handle-import-from-link の `depends_on` は、この 1 本に付け替え�
   done にする実装 PR で、逸脱一覧の REPL（tree・VM）の行を削除し、[脅威モデル](threat-model.md) の逸脱一覧の REPL・handle 経路の行から REPL の部分を除く。
 - **依存**: なし（fix-import-run-from-link-graph は done）。
 
+### manifesto-check-ambient-surface 実装スライス（src/ の production コードの ambient な OS・network・process の直接呼びを許可リストで固定する）
+
+loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェスト](manifesto.md) 原則 2（ambient authority を既定で公開しない）と原則 8（外部効果はホスト境界の後ろ）を、
+`cargo test` で走る静的検査として固定する（週次計画 #355・#417 の P-1、親 AUD-022）。CAP-AT-27（本書 §19）の静的検査の対象と精度を広げるスライスで、§19 の目標の文は変えない。
+本小節の Q1〜Q3 は設計 PR に「判断の候補」として出したもので、判断役の選択を反映するまでは推奨案（A）で書いている。
+
+- **前提（設計時点の main 968b64f で確かめたこと）**:
+  - `tests/ambient_access_audit.rs::core_has_no_direct_ambient_os_access` は `src/` 直下の `*.rs` だけを走査し、`src/bin/` などのサブディレクトリを見ない。
+  - 同テストは行頭の空白を除いて `#[cfg(test)]` で始まる最初の行で走査を打ち切る。`src/embedding.rs` では 1842 行目の構造体フィールドの `#[cfg(test)]` で打ち切られ、
+    `mod tests`（3647 行目）までの production コード（`std::thread::park_timeout` を使う同期 wrapper の待機など）が検査されていない。
+  - 許可リストはファイル単位（`main.rs`・`cli_capability.rs`・`capability.rs`・`module.rs`・`sandbox.rs`）で、許可したファイルの中ではすべてのパターンが素通りする。各行に原則の記載は無い。
+  - 検出パターンは `std::env::var` など 9 個の完全修飾の文字列で、`use std::fs;` のあとの `fs::write` のような `use` 経由の呼びを拾わない。`std::net`・`std::process::Command`・
+    `std::thread` の生成・`std::time::Instant::now` は対象外である。
+  - 上の範囲を広げた試算では、許可リスト外の production コードの該当は `src/host_pending.rs`（adapter executor の `std::thread::spawn`）、`src/embedding.rs`（同期 wrapper の
+    `std::thread::park_timeout`・`std::thread::current`）、`src/budget.rs`（`SystemMonotonicClock` の `std::time::Instant::now`）、`src/bin/gen_builtins_doc.rs`（`use std::fs`）である。
+    いずれもホスト側の adapter・待機・開発用ツールで、script が ambient に権限を得る経路ではないため、理由付きで許可リストに載せる見込みである（`src/` の変更 0 行）。
+- **実装範囲**:
+  1. 検査は既存の `tests/ambient_access_audit.rs` を拡張して 1 本に保つ（Q1=A）。ファイル冒頭に、検査項目ごとに守る原則（原則 2・8、必要なら 5）と CAP-AT-27 の対応表を置く。
+  2. 走査対象を `src/` 配下の全 `*.rs`（サブディレクトリを含む）にする。
+  3. test コードの除外を、`#[cfg(test)]` の直後の item が `mod` であるもの（その module の終わりまで）に限る。フィールド・文・関数に付いた `#[cfg(test)]` では走査を打ち切らない。
+  4. 検出パターンを広げる: `std::env::` のすべて（`args`・`set_var` を含む）、`std::fs`、`std::io::stdin`・`stdout`・`stderr`、`std::process`（`exit`・`Command`・`abort`・`id`）、
+     `std::net`、`std::thread`（`spawn`・`Builder`・`park*`・`sleep`）、`std::time::SystemTime`・`UNIX_EPOCH`・`Instant::now`。`use` 文でこれらの module・item を取り込む行も検出する
+     （取り込み自体を違反として数え、以降の短縮名の呼びは追わない）。
+  5. 許可リストを「ファイル・パターン」の組の単位にし（Q2=A）、各組に理由と原則を書く。許可リストにある組が実際には 1 度も一致しなければ検査を失敗させる（古い許可を残さない）。
+  6. 試算で見つかった `std::thread` の該当は、ホスト側の adapter executor・同期 wrapper の待機として許可リストに載せる（Q3=A）。載せられない該当が見つかったら、本スライスで
+     `src/` を直さず、`fix-` スライスとして PM に返す。
+  7. 動的検査 `safe_default_denies_all_ambient_operations` は変えない。
+- **範囲外**: lib の script 到達経路の `process::exit`・`abort`・`panic!` の検査（manifesto-check-no-host-abort）。構文木による厳密な解析（文字列照合のまま）。
+  `.github/`（凍結）の変更。§19 の CAP-AT-27 の目標の文の変更。
+- **受入基準**:
+  - **MAS-AT-01**（走査の範囲）: `src/` 配下のサブディレクトリの `*.rs` も走査され、`#[cfg(test)] mod` より前でもフィールド等の `#[cfg(test)]` で打ち切られない。
+    確かめ方: 検査関数を小さい入力（文字列）で呼ぶ unit を同じテストファイルに置き、サブディレクトリ相当のパスとフィールドの `#[cfg(test)]` の後ろの違反が検出されることを確かめる。
+  - **MAS-AT-02**（検出パターン）: 実装範囲 4 のパターンと `use` 経由の取り込みが、それぞれ違反として検出される。確かめ方: パターンごとの文字列入力の unit。
+  - **MAS-AT-03**（許可リスト）: 許可リストの各組に理由と原則があり、一致しない組があると検査が失敗する。確かめ方: unit と、`cargo test --test ambient_access_audit` が main で通ること。
+  - **MAS-AT-04**（対応表）: テストファイル冒頭に、検査項目・守る原則・CAP-AT-27 の対応表がある。確かめ方: レビューで読む。
+- **想定の変更規模**: `tests/ambient_access_audit.rs` が +150〜250 行（既存の静的検査の置き換えを含む）。`src/` は 0 行の見込み（実装範囲 6 のとおり、直す必要が出たら fix スライスへ）。
+  §14.1 の行数と受入基準（5 項目以内）に収まり、触る仕組みは「src/ の静的検査（tests/ の 1 本）」1 つ。逸脱一覧の変更は見込まない。
+- **依存**: なし。
+
 ## 19. 受入基準
 
 | ID | Phase | 基準 |
