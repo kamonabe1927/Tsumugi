@@ -1155,9 +1155,10 @@ order      = 114
 [[slice]]
 id         = "fix-tree-while-condition-once"
 title      = "tree の while が初回の条件を 2 回評価するのを直し、条件の副作用・fuel・ステップ上限の行を VM と一致させる（language-spec「while」、issue #393・#400）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-tree-while-condition-once 実装スライス（tree の `while` が初回の条件を 2 回評価しない）" }
 acceptance = ["TWC-AT-01..04"]
 design_pr  = 449
+impl_pr    = 450
 order      = 115

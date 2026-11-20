@@ -2509,6 +2509,55 @@ print(n)
         );
     }
 
+    /// TWC-AT-04（fix-tree-while-condition-once）: `while` の条件の呼び出しの途中・本体の途中で slice
+    /// yield しても、条件の副作用の回数・stdout・fuel が同期の実行と同じになる（初回の条件も 1 回）。
+    #[test]
+    fn twc_at_04_while_condition_once_across_yields() {
+        // 条件（`say`）は本体にループを持つので呼び出しの途中で yield できる。本体にもループがある。
+        let text = "\
+fn say(tag, v)
+  print(tag)
+  let i = 0
+  while i < 1
+    i = i + 1
+  end
+  return v
+end
+let n = 0
+while say(\"c\", n < 2)
+  let j = 0
+  while j < 1
+    j = j + 1
+  end
+  n = n + 1
+end
+print(n)
+";
+        // 強制 yield（全境界）と同期の実行で stdout・fuel・terminal が一致する。
+        let yields = assert_matches_sync(text);
+        assert!(yields > 10, "条件・本体の途中で yield している: {yields}");
+        // 条件の評価は本体の回数 + 1 = 3 回（初回も 1 回）。
+        let (observed, _) = run_audited(text, true);
+        assert_eq!(observed.stdout, "c\nc\nc\n2\n");
+        // 初回の反復での break（条件は 1 回）。
+        let text = "\
+fn say_once()
+  print(\"b\")
+  let i = 0
+  while i < 1
+    i = i + 1
+  end
+  return true
+end
+while say_once()
+  break
+end
+";
+        assert_matches_sync(text);
+        let (observed, _) = run_audited(text, true);
+        assert_eq!(observed.stdout, "b\n");
+    }
+
     /// TEC-AT-06（e2a・e2b 分）: 式種と式スロットの中で呼んだ関数の本体にループを持つ script を
     /// 最小 slice（16）で実行したとき、1 poll の実行 fuel が上限以内で、Yielded / Resumed が対になり
     /// 順序が単調。
@@ -2525,7 +2574,7 @@ print(n)
             "let s = f\"{work(200)}\"\n",
             "let xs = [1, 2]\nlet y = xs[work(200) - 200]\n",
             "let c = 0\nif work(200) > 0\n  c = 1\nend\n",
-            "let c = 0\nwhile work(50) > c\n  c = c + 25\nend\n",
+            "let c = 0\nwhile work(50) > c\n  c = c + 20\nend\n",
             "for v in [work(200)]\n  let q = v\nend\n",
             "let xs = [0]\nxs[work(200) - 200] = work(200)\n",
         ];
