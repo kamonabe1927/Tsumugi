@@ -35,7 +35,7 @@
 | Identifier class の mode を `HmacSha256` にしたとき digest を出さず `Omitted` に畳む（`src/audit.rs` の `fold_audit_field`）。§9.1 の表は Identifier を host が hash/omit へ変更可とするが、hash は実現しない（omit は実現する）。mode を変える公開 setter は無く（未実装範囲の監査設定の公開 setter の行）、今はテスト用 shim からだけ届く。loop:drift #429 D-127 | §9.1 | R-1a |
 | 公開 `ExecutionOutcome`（`src/embedding.rs`、crate root では `EmbeddingOutcome`）は `Completed` / `Exited` / `RuntimeError` / `BudgetExceeded` / `DeadlineExceeded` / `Cancelled` / `InternalFailure` の 7 variant だけで、§7.2 の `TerminalOutcome` と 1 対 1 に対応しない。link 時の拒否と resolver の host 失敗は `Engine::link` の `Result<_, LinkError>`（`LinkError::Denied` / `LinkError::Resolve(HostError)` ほか）で返し、run 中の capability 拒否と host function の失敗は `RuntimeError`（`ErrorKind::Capability` / `ErrorKind::Host`）に含める。監査失敗は監査付き経路だけの別型 `AuditedOutcome::AuditFailed` で返す。`RecordFailure` / `ReplayMismatch` は record/replay が未実装のため無い | §7.2 | A-1（7 variant の構成は [組み込みAPI仕様](embedding-api.md) の E 系スライス由来） |
 | fs 以外の host call（stdout の `print`、stdin の `input`、clock の `now`、`env`、`exit`、登録 host function、import resolver）は host-call triple を出さない。§5 の `HostBoundary` の各 request と §8 規則3（import resolver を含む host request）に対し、triple を出すのは上の行の fs 4 builtin だけ（audit-host-boundary-scope スライスへ延期） | §5/§8 | A-1 |
-| `Budget::charge_heap`（`src/budget.rs`）が `BudgetCharged` の accumulator へ通知しない（通知は `release_heap` と cumulative の commit だけ）。heap の `Allocation` の `BudgetCharged` が出ず、Terminal の live heap と `BudgetCharged` の delta を突合できない（fix-heap-charge-audit-notify スライスで解消予定） | §7.3/§15.3 | A-1 |
+| heap の増減の一部が `BudgetCharged` の accumulator へ通知されない。通知するのは `BudgetLedger::release_heap`（retrack の縮小と frame・try の戻し）だけで、`BudgetLedger::charge_heap` の確保、`Tracked` の `Drop` の release（`src/value.rs`）、`Tracked::new_via_handle` の確保（変数 cell・関数 header・heap token）は通知しない。heap の `Allocation` の確保の `BudgetCharged` が出ず、寿命終了の release も `released_delta` に入らないため、Terminal の live heap と `BudgetCharged` の delta を突合できない（fix-heap-charge-audit-notify スライスで解消予定。issue #369） | §7.3/§15.3 | A-1 |
 | cancel・deadline・drop で待ちを終えた pending host call を `Cancelled` / `Detached` の `HostCallFinished` で閉じない。§7.2 は `HostCallOutcome` に `Cancelled` / `Detached` を定め、§10.1 は監査失敗の fail-closed のとき pending host call をそれらの `HostCallFinished` で論理的に閉じると定める。cancel・drop のときに閉じる規定は [実行予算・協調実行仕様](execution-control.md) の §6.2（cancel 時は監査上の host call を `Cancelled` または `Detached` で閉じる）と §9.1（非 terminal handle の drop は pending host call を `Detached` で閉じる）にある。これらに対し、同期 `Engine::run` の待ち（`src/embedding.rs` の `wait_for_host_call`）も、scheduler の handle の cancel・drop の経路も、その event を出さない（[実行予算・協調実行仕様](execution-control.md) の fix-sync-run-host-call-resume 小節の範囲外の項）。loop:drift #420 D-113 | §7.2・§10.1 | — |
 
 上の表の `ExecutionOutcome` が 7 variant だけである行（D-8）は、loop:drift #263 を受けて載せた。本文（§7.2 の 1 対 1 対応）を実装に合わせて後退させず、逸脱として記録する案を選んだ（issue #263 Q1=A。返信なしのため推奨案で確定、[開発ループ手順書](loop-runbook.md) §7.5）。理由: spec が実装の正本であり、現在の逸脱は事実を確かめて逸脱一覧に置く（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。D-8 の `ExecutionOutcome` は `#[non_exhaustive]` で、後続 Phase で variant を足す前提になっている。[組み込みAPI仕様](embedding-api.md) の `ExecutionOutcome`（13 variant）との差は、同 spec の逸脱一覧に載っている（loop:drift #429 D-128）。
@@ -2035,26 +2035,46 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
 #### fix-heap-charge-audit-notify 実装スライス（heap の課金を `BudgetCharged` の accumulator へ通知する）
 
 > 状態: **未実装**（設計のみ）。loop:drift #342 の D-53（機械的）で足した `fix` スライス。§7.3 の「Terminalのusageと全BudgetChargedのdeltaをcumulative/live resourceで突合」と §15.3 を、heap（live resource）で満たす。
+>
+> **改訂（needs-design [issue #369](https://github.com/kamonabe1927/Tsumugi/issues/369) の反映）**: 初版の設計（`charge_heap` だけに通知を足す、`src/budget.rs` 約 10〜20 行）では HCN-AT-01 の突合が成り立たないことを、実装役が main `92c338c` で試作して確かめた（`print(len([1, 2, 3] + [4]))` で committed − released = 176 に対し Terminal の live heap = 840）。判断役が Q1=A（heap の確保・解放を全経路（`charge_heap`、`Tracked` の `Drop` の release、`new_via_handle` の課金）で heap 台帳側に集め、flush の時点で accumulator へ移す）を選んだ（判断役が選択（issue #369））。このうち届け方の「flush の時点で移す」の部分は、設計 PR #456 の Q1=A（accumulator を共有し、通知のたびに直接書く）で置き換えた（実装範囲の「通知の届け先」の決定）。理由: §7.3 の「`committed_delta` は合計」「heap releaseは`released_delta`へ記録」「Terminalのusageと全BudgetChargedのdeltaを…live resourceで突合」と §15.3 の「BudgetChargedの合計とTerminal usageが…live resourceで一致」を文字どおり満たすのは A だけである（[マニフェスト](manifesto.md) 原則 7、優先順位の表「再現可能な検証」）。採らなかった案: B（突合を `charge_heap`・`release_heap` を通る分だけに弱める）は、Terminal の live heap と delta が一致しないまま §7.3・§15.3 の目標を受入基準の側で後退させ、原則 7 に反しうる。C（flush 時に live heap の差分から `committed_delta`/`released_delta` を合成する）は、突合が Terminal と同じ値から作った数どうしの比較になって通知漏れを検出できず（原則 9）、§7.3 の `committed_delta`・`charge_count`・`released_delta` の意味を変える。この改訂で、実装範囲・範囲外・受入基準・想定の変更規模を下のとおり書き直した（初版の受入基準 HCN-AT-01..03 を HCN-AT-01..05 に置き換えた）。
 
-設計時点（main `d665a98`）の事実:
+設計時点（初版 main `d665a98`、改訂 main `84643e2`）の事実:
 
-- `src/budget.rs` の `charge_heap` は heap へ課金するだけで accumulator へ通知しない。通知は `release_heap`（`note_release`）と cumulative の commit（`note_charge`）だけである。
-- このため、heap を確保する script で Terminal の `live_heap_bytes` が 0 でなくても、HeapBytes の `BudgetCharged` が 0 件になる（loop:drift #342 で確かめた例: `live_heap_bytes=1489`）。
+- live heap の増減はすべて `AllocationLedger`（`src/budget.rs`、`HeapLedger = Rc<RefCell<AllocationLedger>>`）の `charge` / `release` を通る。accumulator（`BudgetChargeAccumulator`）は `BudgetLedger` が値で持ち、通知しているのは次の 2 つだけである。
+  - `BudgetLedger::release_heap`（`note_release`）。呼び出し元は `Value::retrack_list` / `retrack_dict` の縮小（`src/value.rs`）と、評価器の frame・try の heap 課金の戻し（`src/eval.rs`）。
+  - cumulative の `BudgetLedger::commit`（`note_charge`）。
+- 通知しない heap の増減は次の 4 つである。
+  1. `BudgetLedger::charge_heap`（`Tracked::new`・retrack の増加・frame の課金）。
+  2. `Tracked<T>` の `Drop`（`src/value.rs`）。`HeapLedgerWeak` を `upgrade` して `AllocationLedger::release` を直接呼ぶ。collection・String・変数 cell・関数 header の寿命終了の release はこれで、`released_delta` に入らない。
+  3. `Tracked::new_via_handle`（`src/value.rs`）。`HeapLedgerWeak` だけを持ち `AllocationLedger::charge` を直接呼ぶ。変数 cell（`Value::new_cell`）、関数 instance header（`new_tree_fn_header` / `new_vm_fn_header`）、heap token（`new_heap_token`、Link・Compile の確保を含む）がこれを通る。
+  4. `BudgetLedger::heap_charge_raw`（`charge_context_baseline` が使う。実行経路では未使用）。
+- `Tracked` の `Drop` と `new_via_handle` からは `&mut BudgetLedger` に届かないため、`BudgetLedger` の中だけで通知を足しても 2・3 は拾えない。
+- `AllocationLedger::restore_live_bytes`（`BudgetLedger::restore_live_heap_bytes`）は crate 内に呼び出し元が無い。
 
 - **実装範囲**:
-  - `charge_heap` の課金が成功したとき（`bytes > 0`）、課金後の live・peak を付けて accumulator へ `HeapBytes`・`Allocation` の charge として通知する。`BudgetCharged` の `committed_delta` は確保の合計、`usage_after` は flush 時の live heap、`peak_after` は peak heap（§7.3）。release 側（`released_delta`）の既存の通知は変えない。
-  - 課金が上限超過で失敗したときは通知しない（課金されていないため）。
+  - heap の通知の口を `AllocationLedger` の側に置く。`AllocationLedger::charge` が成功したとき（`bytes > 0`）と `AllocationLedger::release` で live が減ったとき（`bytes > 0`）に、課金・解放後の live・peak を付けて HeapBytes・`Allocation` の charge / release として通知する。これで上の 1〜4 と既存の `release_heap` がすべて 1 か所を通る。
+  - 通知の届け先: accumulator を `BudgetLedger` と `AllocationLedger` が共有する（`Rc<RefCell<BudgetChargeAccumulator>>` などの共有ハンドルにし、`AllocationLedger` が通知のたびに `note_charge` 相当・`note_release` を呼ぶ）。`charge_count`・256 charge ごとの確定・B-2 の確定済み byte 数（`audit_finalized_charge_bytes`）の意味は今と変わらない。
+    - **決定（PR #456 の Q1=A。判断役が選択（PR #456））**: 理由: §7.3 の「256 chargeごとにflush」「`charge_count`は集約した論理charge回数」を、heap でも今の `note_charge` / `note_release`（`CHARGE_FLUSH_THRESHOLD = 256`、`src/audit.rs`）の意味のまま満たし、目標の章も逸脱一覧も足さずに済む。既定の slice fuel では script 全体が 1 slice で走り Terminal まで flush が来ないが（B-2 小節）、A なら 256 charge ごとに確定 event が切られ、heap の live・peak の途中経過が event 列に残る（[マニフェスト](manifesto.md) 原則 7）。通知漏れ・二重計上を 1 確保・1 解放の単位で数えられ、受入基準の突合がそのまま検証になる（原則 9）。共有ハンドルは既存の `HeapLedger = Rc<RefCell<AllocationLedger>>` と同じ形で、新しい仕組みを増やさない（原則 8）。採らなかった案 B（`AllocationLedger` に集計値だけを溜め、flush の時点でまとめて移す）は、マニフェストには反しないが、flush と flush の間は heap が何回動いても 256 charge の確定が起きず §7.3 の本文と食い違い（目標の章の変更か新しい逸脱の行が要る）、`charge_count` が 256 を超える 1 件になって heap の途中経過が event に残らない。
+    - **B-2 の queue 会計への影響**: A では、heap の 256 charge ごとに確定した `BudgetCharged` が `audit_finalized_charge_bytes` を通って B-2 の audit drain queue の byte 数（`audit_queue_bytes`）に入る。このため、同じ `max_pending_bytes` でも、`AuditBackpressure` の yield の回数・位置が今と変わりうる（heap の確定済み event の分だけ早く上限に届く）。これは §10.2 の queue 会計を heap にも同じ規則で当てた結果で、目標仕様と食い違わない。
+    - **A の条件**: `Tracked` の `Drop` は任意の時点で走るので、accumulator の `RefCell` の borrow は 1 回の通知・1 回の drain の中で閉じ、borrow を持ったまま `Value` を drop しない（二重 borrow の panic は原則 6 に触れる）。これを HCN-AT-02・03 のテストで裏付ける。
+  - `BudgetLedger::release_heap` の `note_release` の直接の呼び出しは消す（`AllocationLedger::release` の通知と二重にしない）。
+  - heap の確保の通知は、`committed_delta` に確保 byte を足し、`usage_after` を live heap、`peak_after` を peak heap にする（§7.3）。今の `note_charge` は `peak_after` を設定しないので、heap 用に live と peak を受け取る入口を accumulator に足す。
+  - 上限超過・overflow で `charge` が失敗したときは通知しない（課金されていない）。
+  - `restore_live_bytes` は通知しない（呼び出し元が無い。使う経路を作るスライスで扱う）。
 - **範囲外**:
-  - 256 charge ごとの flush（このスライスでは変えない）。
+  - 256 charge ごとの flush の規則と、flush の時点（host call 開始前・Terminal 前など）の変更。
   - per-item resource の `BudgetPeaks` の突合。
   - heap 以外の resource の通知。
-  - VM。
+  - Link で context に残る値を新 execution の heap の baseline として課金すること（`fix-link-context-baseline-charge`）。その課金が `AllocationLedger::charge` を通れば、このスライスの口で通知される。
+  - VM（監査 sink と VM の同時設定は build で拒否される）。
 - **受入基準**:
-  - **HCN-AT-01（確保の通知）**: sink ありで List と String を作る script の envelope 列に、HeapBytes・`Allocation` の `BudgetCharged` が 1 件以上あり、`committed_delta` の合計から `released_delta` の合計を引いた値が Terminal の live heap と一致する。最後の HeapBytes の `BudgetCharged` の `peak_after` が Terminal の peak heap と一致する。確かめ方: `tests/audit_core.rs` に足すテスト。
-  - **HCN-AT-02（上限超過）**: heap 上限を超える確保で BudgetExceeded になる script で、超過した確保の分は `BudgetCharged` に含まれない（delta の突合が HCN-AT-01 と同じく成り立つ）。
-  - **HCN-AT-03（非破壊）**: 既存の `tests/audit_*.rs` は、`BudgetCharged` の件数・中身を固定している主張が HeapBytes の確保の行の追加に当たる場合だけ直し（PR 本文に挙げる）、それ以外は無改変で緑。sink 無しの経路の出力 byte・exit code・fuel・heap の課金は変わらない。
-- **done PR で行う逸脱一覧の更新**: 逸脱一覧の「`Budget::charge_heap` が `BudgetCharged` の accumulator へ通知しない」の行を削除する。
-- **想定の変更規模**: `src/budget.rs` に約 10〜20 行。テストは約 60〜120 行。触る仕組みは budget の accumulator への通知 1 つ、受入基準は 3 項目。
+  - **HCN-AT-01（突合）**: sink ありで、List・String・Dict を作り、`let` の変数と closure の capture を持つ script の envelope 列に HeapBytes・`Allocation` の `BudgetCharged` が 1 件以上あり、`committed_delta` の合計から `released_delta` の合計を引いた値が Terminal の `live_heap_bytes` と一致する。最後の HeapBytes の `BudgetCharged` の `peak_after` が Terminal の `peak_heap_bytes` と一致する。`print(len([1, 2, 3] + [4]))` 単体でも同じく一致する。確かめ方: `tests/audit_core.rs` に足すテスト。
+  - **HCN-AT-02（寿命終了の解放）**: 関数の中で List と String を作り、関数から戻ると参照が消える script で、HeapBytes の `released_delta` の合計が 0 より大きく、HCN-AT-01 と同じ突合が成り立つ（`Tracked` の `Drop` の release が `released_delta` に入る）。
+  - **HCN-AT-03（二重計上なし）**: List の `pop` など retrack の縮小（`release_heap`）を含む script と、frame・try の heap 課金を戻す script で、HCN-AT-01 の突合が成り立つ（同じ解放が 2 回数えられない）。
+  - **HCN-AT-04（上限超過）**: heap 上限を超える確保（`Tracked::new` 経由と、変数 cell の `new_via_handle` 経由の 2 通り）で BudgetExceeded になる script で、超過した確保の分は `BudgetCharged` に含まれず、HCN-AT-01 と同じ突合が成り立つ。
+  - **HCN-AT-05（非破壊）**: 既存の `tests/audit_*.rs` は、`BudgetCharged` の件数・中身を固定している主張が HeapBytes の行の追加・変化に当たる場合と、`tests/audit_queue_bytes.rs` の `AuditBackpressure` の yield の回数・位置の主張が heap の確定済み event の追加に当たる場合だけ直し（どちらも PR 本文に挙げる）、それ以外は無改変で緑。sink 無しの経路の出力 byte・exit code・fuel・heap の課金（live・peak・BudgetExceeded の値）は変わらない。`src/budget.rs` の `AllocationLedger` の単体テストは無改変で緑。
+- **done PR で行う逸脱一覧の更新**: 逸脱一覧の「heap の増減の一部が `BudgetCharged` の accumulator へ通知されない」の行を削除する。B-2 の「audit drain queue byte 上限の判定がトップレベル境界だけの soft limit」の行の「超過量は host-call 回数 budget で有界」を、heap の通知分を含む書き方（host-call 回数 budget と、heap の確保・解放の回数（256 回ごとに確定 1 件）で有界）に直す。
+- **想定の変更規模**: `src/budget.rs`（accumulator の共有、`AllocationLedger` の通知、`release_heap` の整理）と `src/audit.rs`（heap の確保を live・peak 付きで受ける入口）に約 60〜100 行。`src/value.rs` は `Drop`・`new_via_handle` が `AllocationLedger` の口を通るため変えないか数行。テストは約 120〜200 行。触る仕組みは budget の accumulator への通知 1 つ、受入基準は 5 項目。
 
 ### Slice 6: VM conformance
 
