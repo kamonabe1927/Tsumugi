@@ -125,7 +125,7 @@ kamonabe の issue #424 による 2 週間の試行である。§6.2 の 3・6�
 - **期間**: 開始はこの小節を足した設計 PR のマージ日。2 週間の試行とし、続けるかどうかは kamonabe が決める。kamonabe の返事が無いあいだは、2 週間を過ぎても試行の規則を続ける。
 - **書き換えない**: ループはこの小節を自分で書き換えず、試行をやめる・変える PR も自分で出さない（§9.2 と同じ）。kamonabe が issue（#424 か新しい issue）に書いたら、それに従う。
 - **交互の数え方**（§6.2 の 3）: 直前にマージされた `loop:design` の PR は、`gh api "repos/kamonabe1927/Tsumugi/pulls?state=closed&sort=updated&direction=desc&per_page=50"` のうち `loop:design` のラベルが付き `merged_at` があるものから、`merged_at` が最も新しい 1 本とする。その `head.ref` が `docs/drift-*`（ずれの修正）か `docs/plan-*`（分割）なら、交互の番はロードマップ側にある（分割もロードマップ側の番に数える）。それ以外（スライスの設計・issue の受け入れ・判断の反映・マニフェストの改訂など）なら、ずれの修正側にある。例外の `D-N` だけを直したずれの修正も、ずれの修正として数える。
-- **ロードマップ由来と fix の区別**: `id` の接頭辞で決める。ずれ・不具合から作るスライスの `id` は `fix-` で始める（§8・§12.3）。`id` で由来が決まらない今あるスライスは改名せず、接頭辞のとおりロードマップ由来として扱う: `manifesto-check-ambient-surface`・`manifesto-check-no-host-abort`（週次計画 #355 の P-1 から）、`audit-host-boundary-scope`（loop:drift #342 の D-52 から）。kamonabe が立てた不具合の issue から作った fix（fix-handle-import-from-link #327・fix-handle-execution-cancel-token #363・fix-host-function-call-charge #364・fix-dict-retrack-key-bytes #374）も、接頭辞のとおり fix として §6.2 の 6 の後回しの対象にする（下の表で「該当」のものだけ外す）。issue #424 の「今の既定のまま」は、§8 の `order` の既定にだけ掛かる。理由: 規則 2 と追記 B は区別を `id` の接頭辞で行うと定めており、由来という第 2 の区別を足さないほうが、PM が `id` だけで選べる。kamonabe が先にしたいものは、issue に「優先」と書けば §8 の既定で前に出る（判断役が選択（PR #454）の Q1）。
+- **ロードマップ由来と fix の区別**: `id` の接頭辞で決める。ずれ・不具合から作るスライスの `id` は `fix-` で始める（§8・§12.3）。`id` で由来が決まらない今あるスライスは改名せず、接頭辞のとおりロードマップ由来として扱う: `manifesto-check-ambient-surface`・`manifesto-check-no-host-abort`（週次計画 #355 の P-1 から）、`audit-host-boundary-scope`（loop:drift #342 の D-52 から）、`budget-reservation-settle`（loop:drift #373 の D-70 から）。kamonabe が立てた不具合の issue から作った fix（fix-handle-import-from-link #327・fix-handle-execution-cancel-token #363・fix-host-function-call-charge #364・fix-dict-retrack-key-bytes #374）も、接頭辞のとおり fix として §6.2 の 6 の後回しの対象にする（下の表で「該当」のものだけ外す）。issue #424 の「今の既定のまま」は、§8 の `order` の既定にだけ掛かる。理由: 規則 2 と追記 B は区別を `id` の接頭辞で行うと定めており、由来という第 2 の区別を足さないほうが、PM が `id` だけで選べる。kamonabe が先にしたいものは、issue に「優先」と書けば §8 の既定で前に出る（判断役が選択（PR #454）の Q1）。
 - **すり抜け・課金されない fix の基準**: spec が拒否する、または課金すると定める操作が main で実際に通る（課金されない）もので、再現テストが書けるもの。新しく見つかるものは、朝の点検が `loop:drift` の `D-N` の行に `すり抜け` の印を根拠と一緒に付ける（§12.2）。進行の回の PM はその場で判定しない。
 
 **今ある fix のスライスの分類**（この設計 PR の時点の `todo`・`ready` の 21 本。基準で一度だけ分類した。「該当」は §6.2 の 6 の後回しから外すだけで、`order` は変えず、ロードマップ由来の `todo` と `order` どおりに並ぶ）
@@ -455,7 +455,7 @@ blocked にしたもの: <スライス — 原則>
 判断: N 件（一覧は #tsumugi-loop）
 代替した審査・判断: <PR>（3 回続いたものは要確認へ）
 開いている PR: #N（N 時間、待ち: <理由>）
-整合点検: 新しいずれ N 件 ／ 未対応 N 件（<issue のリンク>）／ 輪番: <spec> → 次は <spec>
+整合点検: 新しいずれ N 件 ／ 未対応 N 件（<issue のリンク>）／ 輪番: <spec> → 次は <spec>（§6.3 の試行で精読しない朝は「輪番: 今週は 2 本済み → 次は <spec>」）
 今週の計画: P-1 ✅ / P-2 🟡 / P-3 ⬜ …（開いている `loop:plan` issue の項目ごと。前日までの状態）
 進行の回: N/12 回（欠け: <時刻>）
 要確認: <kamonabe に見てほしいこと>（無ければ省略）
