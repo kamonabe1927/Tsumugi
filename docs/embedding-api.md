@@ -678,6 +678,61 @@ loop:drift #318 の D-29 と D-31 を直す。2 件とも CLI の利用者に見
   [Capability Model仕様](capability-model.md) の逸脱一覧の `--allow-import-root` の文言の行と、[脅威モデル](threat-model.md) の逸脱一覧の
   「CLI の `--vm` は experimental VM を選んだことを stderr にも `--help` にも示さない」行を削除する。
 
+### manifesto-check-no-host-abort 実装スライス（lib の production コードに process::exit・abort・無条件の panic が許可リスト外に無いことを固定する）
+
+loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェスト](manifesto.md) 原則 6（スクリプトの失敗によってホストプロセスが panic、abort、
+または意図せず exit しない）を、`cargo test` で走る静的検査として固定する（週次計画 #355・#417 の P-1、親 AUD-022）。本書 §11 規則 5
+（公式 host function/adapter は panic、abort、process exit を行ってはならない）と規則 1（unwind panic は各 host boundary で
+`catch_unwind` する）を、`catch_unwind` に頼る前の段で裏付けるスライスで、§11 の目標の文は変えない。同じ P-1 の先行スライス
+manifesto-check-ambient-surface（[Capability Model仕様](capability-model.md) §18 の同名小節）の静的検査の作りを参考にする。
+
+小節は判断の候補（設計 PR に記載）の推奨案で書いている。判断役の選択が推奨案と違えば、追加の commit でこの小節を直す。
+
+- **前提（設計時点の main c5e5e84 で確かめたこと）**:
+  - `std::process::exit`・`abort` は `tests/ambient_access_audit.rs` の `process` の key が `src/` 全体で検出し、許可は `main.rs`×`process` の 1 組だけである（原則 2・8 の検査）。
+    原則 6 の側の検査は無く、`panic!` などのマクロを検出する検査も無い。
+  - lib の production コード（`src/main.rs` と `src/bin/` を除く `src/` の `*.rs` から、`#[cfg(test)] mod` を除いた部分。`tests/ambient_access_audit.rs` の `production_lines` と同じ切り出し）に、
+    `todo!`・`unimplemented!`・`process::exit`・`process::abort` は無い。
+  - 同じ範囲の `panic!` は 4 か所: `src/embedding.rs` 403 行（`#[doc(hidden)] pub fn audit_budget_for_test`。ホストが不正な `AuditBudget` を渡したとき。`tests/audit_queue_bytes.rs` が使う）、
+    2405・2637 行（`#[cfg(test)]` の付いた `if` 文の中で、production の build には入らない）、`src/stable_error.rs` 125 行（`message_ids!` マクロの `const` の初期化式の中で、build 時に評価される）。
+  - 同じ範囲の `unreachable!` は 29 か所: `src/eval.rs` 18・`src/parser.rs` 8・`src/builtin.rs` 2・`src/compiler.rs` 1。どれも直前の match・検査で除いた分岐に置かれた内部不変条件で、
+    script の入力から届くかは各箇所で確かめていない。
+  - `.unwrap()` は 7 か所（`src/compiler.rs` 6・`src/eval.rs` 1）、`.expect(` は lib で 120 か所余り（`src/parser.rs` の `self.expect(...)` のような自前のメソッドを含む粗い数え）ある。
+  - `Cargo.toml` に `panic = "abort"` の profile 設定は無い（unwind panic は §11 規則 1 の `catch_host_unwind` で捕まえられる）。
+- **実装範囲**:
+  1. 検査は新しい `tests/no_host_abort_audit.rs` に置く。行の切り出し（文字列・コメントの除去、`#[cfg(test)] mod` の除外）と `use` の展開は、`tests/ambient_access_audit.rs` から
+     共通の helper module（例: `tests/support/source_scan.rs`。両方のテストが `#[path]` か `mod` で取り込む）へ移して共有する。`tests/ambient_access_audit.rs` の検出結果は変えない（Q1）。
+  2. 走査対象は `src/` 配下の全 `*.rs` から `src/main.rs`（CLI adapter）と `src/bin/`（開発用ツール）を除いたもの。lib の中で script から届く経路は静的に絞れないので、lib の production コード全体を
+     上位集合として検査する。
+  3. test コードの除外は、`#[cfg(test)]` の直後の item が `mod` のもの（その module の終わりまで）に加え、`#[cfg(test)]` の直後の文・式・関数・impl（その item の終わり。brace のある item は brace が閉じるまで、
+     無いものは `;` まで）とする。production の build に入らないコードだからである。フィールドに付いた `#[cfg(test)]` では、そのフィールドの 1 行だけを除く。
+  4. 検出パターン: `panic!`・`todo!`・`unimplemented!`・`unreachable!`（Q2）、`std::panic::panic_any`・`resume_unwind`、`process::exit`・`process::abort`（Q3。修飾無しの `process::` を含む）と、
+     `use` 文でこれらを取り込む行（`use std::process;` の module の取り込みを含む）。`std::panic!` のような修飾つきの呼びも照合する。`assert!` 系・`debug_assert!` 系・`.unwrap()`・`.expect(` は検出しない（Q4）。
+  5. 許可リストは「ファイル・パターン・件数」の組の単位にし、各組に理由と原則を書く（Q5）。組の件数と実際の一致数が違えば検査を失敗させる（増えたら新しい箇所に、減ったら古い許可に気付ける）。
+  6. 前提の `panic!` の該当のうち、`stable_error.rs`×`panic`（const の初期化式で build 時に評価され、実行時には起きない）と `embedding.rs`×`panic`（ホスト専用の `#[doc(hidden)]` builder で、script から届かない）を
+     理由付きで載せる。`unreachable!` の 29 か所は、実装役が各箇所の到達条件を読み、script の入力から届かない内部不変条件であることを確かめてからファイルごとの組（件数つき）で載せる。
+     script の入力（source・host から渡る値）から届く箇所が見つかったら、本スライスで `src/` を直さず、`fix-` スライスとして PM に返す（その箇所は組の件数に含めず、テストを `#[ignore]` にせず、
+     実装 PR を止めて返す）。
+  7. ファイル冒頭に、検査項目・守る原則・本書 §11 の規則の対応表を置く。
+- **検査の限界**: 行単位の文字列照合なので、許可した組のファイルの中で箇所が入れ替わっても件数が同じなら区別しない。`assert!`・`debug_assert!` の条件つき panic、`.unwrap()`・`.expect()`、
+  slice の添字・`RefCell::borrow_mut` の panic、整数の overflow、OOM・stack overflow の abort、依存 crate の中の panic、`macro_rules!` の展開先・別名を通した呼びは検出しない。
+  unwind panic は §11 規則 1 の `catch_host_unwind` が最後の受け皿で、本検査はその前の段である。これらはレビューで見る。
+- **範囲外**: `.unwrap()`・`.expect()` の検査（Q4。sub-slice の manifesto-check-no-host-unwrap〔`slices.toml`、todo〕へ分けた）。`src/` の panic 箇所の書き換え（見つかれば fix スライスへ）。構文木による解析。CLI adapter（`src/main.rs`）の `process::exit`
+  （§12 の exit code の写像で、`tests/ambient_access_audit.rs` が `main.rs`×`process` として扱う）。`.github/`（凍結）の変更。§11 の目標の文の変更。
+- **受入基準**:
+  - **NHA-AT-01**（走査の範囲）: `src/main.rs` と `src/bin/` を除く `src/` 配下（サブディレクトリを含む）の `*.rs` が走査され、`#[cfg(test)] mod` と `#[cfg(test)]` の付いた文・関数の中は除かれ、
+    それ以外は除かれない。確かめ方: 検査関数を文字列の入力で呼ぶ unit を同じテストファイルに置き、`#[cfg(test)]` の付いた `if` 文の中の `panic!` が検出されず、その直後の文の `panic!` が検出されることと、
+    除外するパスの判定を確かめる。
+  - **NHA-AT-02**（検出パターン）: 実装範囲 4 のパターンと `use` 経由の取り込みが、それぞれ違反として検出され、`assert!`・`debug_assert!`・`.unwrap()`・`.expect(` と文字列・コメントの中の `panic!` は検出されない。
+    確かめ方: パターンごとの文字列入力の unit（`use std::process;` のあとの `process::exit(1)`、`std::panic!(...)` を含む）。
+  - **NHA-AT-03**（許可リスト）: 許可リストの各組に理由と原則があり、組の件数と一致数が違うと検査が失敗する。確かめ方: 件数の多い・少ない入力の unit と、`cargo test --test no_host_abort_audit` が main で通ること。
+  - **NHA-AT-04**（対応表と共有）: テストファイル冒頭に検査項目・守る原則・§11 の規則の対応表があり、`tests/ambient_access_audit.rs` が共有の helper に移したあとも同じ違反を検出する。
+    確かめ方: 対応表はレビューで読む。`cargo test --test ambient_access_audit` が通り、同テストの既存の unit（MAS-AT-01〜03）が変更なしか、helper の呼び先の書き換えだけで通ること。
+- **想定の変更規模**: `tests/no_host_abort_audit.rs` が +150〜250 行（許可リストと unit を含む）、共有の helper が +200〜250 行で、その分 `tests/ambient_access_audit.rs` が −200〜250 行。
+  `src/` は 0 行の見込み（実装範囲 6 のとおり、直す必要が出たら fix スライスへ）。[開発ループ手順書](loop-runbook.md) §14.1 の行数と受入基準（5 項目以内）に収まり、
+  触る仕組みは「lib の production コードの静的検査（tests/）」1 つ。逸脱一覧の変更は見込まない。
+- **依存**: なし（manifesto-check-ambient-surface は done）。
+
 ## 15. 受入基準
 
 | ID | Phase | 基準 |
