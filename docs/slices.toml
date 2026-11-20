@@ -311,7 +311,7 @@ order      = 23
 [[slice]]
 id         = "fix-heap-charge-audit-notify"
 title      = "heap の確保・解放を全経路（charge_heap・Tracked の Drop・new_via_handle）で heap 台帳から BudgetCharged の accumulator へ通知し、Terminal の live heap と突合できるようにする（determinism-and-audit §7.3・§15.3、loop:drift #342 D-53、issue #369 Q1=A）"
-status     = "ready"
+status     = "blocked"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 spec       = { doc = "docs/determinism-and-audit.md", section = "fix-heap-charge-audit-notify 実装スライス（heap の課金を `BudgetCharged` の accumulator へ通知する）" }
@@ -319,6 +319,8 @@ acceptance = ["HCN-AT-01..05"]
 design_pr  = 456
 depends_on = ["A-1"]
 order      = 38
+blocked_reason = "manifesto: 原則5（予測可能性）— Tracked の Drop の release を通知すると、scope の drop 順（src/env.rs の HashMap、既定の hasher）が 256 charge ごとに確定する HeapBytes の BudgetCharged の released_delta・usage_after に出て、同じ script・同じ入力で process ごとに event 列が変わる（実装 PR #457 の審査、issue #458）"
+issues     = [458]
 
 # issue #290（kamonabe、「優先」）から作った不具合の fix 2 本と、その設計で見つかった関連の 1 本。
 # order は loop-runbook §8.1 の「優先」の既定（今ある ready・todo のすべてより前の空いている値）。
