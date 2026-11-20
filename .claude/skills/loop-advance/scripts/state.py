@@ -33,7 +33,7 @@ CANDIDATES_HEAD = "🤖 Claude Code 判断の候補"
 DECISION_HEAD = "🤖 Claude Code 判断:"
 JST = timezone(timedelta(hours=9))
 RUNNING_STALE = timedelta(hours=2)
-MERGE_WAIT = timedelta(hours=3)  # loop-guard §6 の 6
+MERGE_WAIT = timedelta(minutes=90)  # loop-guard §6 の 6
 DAILY_MERGES = 9  # loop-guard §7
 
 
@@ -202,7 +202,7 @@ def changed_names(files: list[dict]) -> set[str]:
 
 def clean_main_merge(parents: list[str], vs_pr: list[dict] | None, vs_main: list[dict] | None,
                      main_parent_in_base: bool) -> bool:
-    """3 時間待ちの時計を戻さない、競合なしの main の取り込みか（loop-guard §6 の 6）。
+    """1.5 時間待ちの時計を戻さない、競合なしの main の取り込みか（loop-guard §6 の 6）。
 
     親が 2 つで、2 つ目の親が main に含まれ、merge commit のどのファイルも、1 つ目の親（それまでの PR の head）か
     2 つ目の親（main）のどちらかとまったく同じ中身であるときだけ真。両方の親と違うファイルが 1 つでもあれば
@@ -217,7 +217,7 @@ def clean_main_merge(parents: list[str], vs_pr: list[dict] | None, vs_main: list
 
 
 def wait_from(commits: list[dict], head_sha: str | None, is_clean) -> str | None:
-    """3 時間待ちを数え始める commit（loop-guard §6 の 6）。
+    """1.5 時間待ちを数え始める commit（loop-guard §6 の 6）。
 
     最新 commit から 1 つ目の親をたどり、競合なしの main の取り込み（is_clean が真）を飛ばした最初の commit。
     たどれない（PR の commit 一覧に無い）ときは最新 commit にする。

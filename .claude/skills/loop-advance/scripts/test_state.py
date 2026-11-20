@@ -40,9 +40,10 @@ class MergeCandidate(unittest.TestCase):
     def test_all_conditions(self):
         self.assertTrue(self.one(pr(comments=ok_comments()))["merge_candidate"])
 
-    def test_waits_three_hours(self):
-        self.assertFalse(self.one(pr(head="2026-11-01T10:00:00Z", comments=[
-            c(LOOP, REVIEW_OK, "2026-11-01T10:30:00Z"), c(LOOP, GATE_OK, "2026-11-01T10:40:00Z")]))["merge_candidate"])
+    def test_waits_ninety_minutes(self):
+        com = [c(LOOP, REVIEW_OK, "2026-11-01T10:40:00Z"), c(LOOP, GATE_OK, "2026-11-01T10:45:00Z")]
+        self.assertFalse(self.one(pr(head="2026-11-01T10:31:00Z", comments=com))["merge_candidate"])
+        self.assertTrue(self.one(pr(head="2026-11-01T10:30:00Z", comments=com))["merge_candidate"])
 
     def test_revert_skips_wait_and_limit(self):
         merged = [{"merged_at": "2026-11-01T0%d:00:00Z" % i, "labels": [{"name": "loop:impl"}]} for i in range(s.DAILY_MERGES)]
@@ -217,7 +218,7 @@ class MergedToday(unittest.TestCase):
 
 
 class WaitFrom(unittest.TestCase):
-    """3 時間待ちの時計を戻さない、競合なしの main の取り込み（loop-guard §6 の 6）。"""
+    """1.5 時間待ちの時計を戻さない、競合なしの main の取り込み（loop-guard §6 の 6）。"""
 
     F = staticmethod(lambda *names: [{"filename": n} for n in names])
 
