@@ -761,11 +761,12 @@ order      = 14
 [[slice]]
 id         = "manifesto-check-no-host-abort"
 title      = "lib の script から届く経路に process::exit・abort・無条件の panic! が無いことを cargo test で固定する（loop-guard §4.1 の 1 段目、原則 6、週次計画 #355 P-1）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-022"
 spec       = { doc = "docs/embedding-api.md", section = "manifesto-check-no-host-abort 実装スライス（lib の production コードに process::exit・abort・無条件の panic が許可リスト外に無いことを固定する）" }
 acceptance = ["NHA-AT-01..04"]
 design_pr  = 462
+impl_pr    = 463
 order      = 16
 
 # manifesto-check-no-host-abort の設計（判断役が選択（PR #462）の Q4=A）で、`.unwrap()`・`.expect()` の検査を分けた sub-slice。未設計（todo）。
