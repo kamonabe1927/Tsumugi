@@ -754,6 +754,7 @@ status     = "ready"
 parent     = "AUD-022"
 spec       = { doc = "docs/capability-model.md", section = "manifesto-check-ambient-surface 実装スライス（src/ の production コードの ambient な OS・network・process の直接呼びを許可リストで固定する）" }
 acceptance = ["MAS-AT-01..04"]
+design_pr  = 460
 order      = 14
 
 [[slice]]
