@@ -316,7 +316,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "fix-heap-charge
 acceptance = ["HCN-AT-01..03"]
 design_pr  = 347
 depends_on = ["A-1"]
-order      = 35
+order      = 38
 
 # issue #290（kamonabe、「優先」）から作った不具合の fix 2 本と、その設計で見つかった関連の 1 本。
 # order は loop-runbook §8.1 の「優先」の既定（今ある ready・todo のすべてより前の空いている値）。
@@ -518,7 +518,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["F-2"]
-order      = 36
+order      = 39
 
 # audit-strict-cbor（strict deterministic CBOR、§9.2）は 1 PR の大きさの目安に収まらないため、
 # c1〜c4 の 4 スライスへ分割した（spec「audit-strict-cbor の sub-slice 分割」）。元の id は置き換えて残さない。
@@ -546,7 +546,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-06..10"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 37
+order      = 40
 
 [[slice]]
 id         = "audit-strict-cbor-c3"
@@ -558,7 +558,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-11..15"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 38
+order      = 41
 
 [[slice]]
 id         = "audit-strict-cbor-c4"
@@ -570,7 +570,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-16..20"]
 depends_on = ["audit-strict-cbor-c2", "audit-strict-cbor-c3"]
 design_pr  = 256
-order      = 39
+order      = 42
 
 [[slice]]
 id         = "audit-sink-required"
@@ -579,7 +579,7 @@ status     = "todo"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 depends_on = ["A-1"]
-order      = 40
+order      = 43
 
 [[slice]]
 id         = "audit-fs-builtin-scope"
@@ -1110,6 +1110,39 @@ title      = "CLI の REPL の EOF の parse 診断を Engine::compile の Compi
 status     = "todo"
 parent     = "AUD-018"
 order      = 112
+
+# loop:drift #429 の D-136・D-137・D-139 で execution-control の逸脱一覧に足した行の fix（loop-runbook §12.3、ずれの修正の PR #451 で追加。
+# 判断役が選択した PR #451 の Q1=A。D-138 は未実装範囲の行のままで fix スライスは足さない）。実装の範囲・受入基準は設計 PR で spec の小節に書く（todo）。
+# order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）。ready の最小は 35（fix-heap-charge-audit-notify）で 0〜34 に空きが
+# 無かったため、§8 末尾のとおりこの PR の中で付け直した（kamonabe の決定、PR #451 のコメント）。既存の 35〜40 の 6 本を相対順を変えずに 38〜43 へ
+# 移し、空いた 35〜37 にこの 3 本を置いた。
+#
+# fix-execution-budget-usage-fresh（D-136）: scheduler の handle 経路と VM REPL が execution ごとに使用量を新しく数えない（同じ context の前の
+#   execution の使用量を含む）件の fix。execution ごとの台帳の作り直しと、tree REPL を含む REPL の累積の扱いは設計で決める。
+# fix-link-context-baseline-charge（D-137）: facade の Engine::run の Link が context に残る値を baseline として課金しない件の fix。
+#   baseline の課金の置き場所（charge_context_baseline の本番での呼び出し）と二重計上の回避は設計で決める。
+# fix-cancel-token-waker-recheck（D-139）: CancellationToken::register_waker が waker の保存のあと cancel 済みかを確かめ直さない件の fix。
+#   §9.1 の「waker保存→ready flag再確認→readyなら即wake」の順にする。逸脱の行はコードを読んで確かめたもので、実行での再現は設計で確かめる。
+[[slice]]
+id         = "fix-execution-budget-usage-fresh"
+title      = "scheduler の handle 経路と VM REPL で budget の使用量を execution ごとに新しく数え、前の execution の使用量を上限の判定と usage に含めない（execution-control §2・§9.1・§13、loop:drift #429 D-136）"
+status     = "todo"
+parent     = "REV-015"
+order      = 35
+
+[[slice]]
+id         = "fix-link-context-baseline-charge"
+title      = "facade の Engine::run の Link で context に残る変数・closure・collection を新 execution の heap の baseline として課金する（execution-control §5.2・§9.2、loop:drift #429 D-137）"
+status     = "todo"
+parent     = "REV-015"
+order      = 36
+
+[[slice]]
+id         = "fix-cancel-token-waker-recheck"
+title      = "CancellationToken::register_waker で waker を保存したあと cancel 済みかを確かめ直し、cancel 済みなら即 wake する（execution-control §8・§9.1、loop:drift #429 D-139）"
+status     = "todo"
+parent     = "REV-015"
+order      = 37
 
 # issue #374（kamonabe、PR #349 の判断 Q2 を A から C へ変えた `判断:`。§8 の仕分けで「受け入れ」）から作った fix 2 本。
 # fix-vm-dict-literal-depth-settle: VM の Dict リテラルの構築（OpCode::DictInsert）で途中の深度の読み直しを無くし、tree と同じく
