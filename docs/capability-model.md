@@ -1364,7 +1364,7 @@ fix-handle-import-from-link の `depends_on` は、この 1 本に付け替え�
 
 loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェスト](manifesto.md) 原則 2（ambient authority を既定で公開しない）と原則 8（外部効果はホスト境界の後ろ）を、
 `cargo test` で走る静的検査として固定する（週次計画 #355・#417 の P-1、親 AUD-022）。CAP-AT-27（本書 §19）の静的検査の対象と精度を広げるスライスで、§19 の目標の文は変えない。
-検査の置き場所・許可リストの単位・`std::thread` の扱いは、判断役が選択（PR #460）の Q1=A・Q2=A・Q3=A による（下の「決定記録」）。
+検査の置き場所・許可リストの単位・`std::thread` と `UNIX_EPOCH` の扱いは、判断役が選択（PR #460）の Q1=A・Q2=A・Q3=A・Q4=B による（下の「決定記録」）。
 
 - **前提（設計時点の main 968b64f で確かめたこと）**:
   - `tests/ambient_access_audit.rs::core_has_no_direct_ambient_os_access` は `src/` 直下の `*.rs` だけを走査し、`src/bin/` などのサブディレクトリを見ない。
@@ -1374,8 +1374,10 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
   - 検出パターンは `std::env::var` など 9 個の完全修飾の文字列で、`use std::fs;` のあとの `fs::write` のような `use` 経由の呼びを拾わない。`std::net`・`std::process::Command`・
     `std::thread` の生成・`std::time::Instant::now` は対象外である。
   - 上の範囲を広げた試算では、許可リスト外の production コードの該当は `src/host_pending.rs`（adapter executor の `std::thread::spawn`）、`src/embedding.rs`（同期 wrapper の
-    `std::thread::park_timeout`）、`src/budget.rs`（`SystemMonotonicClock` の `std::time::Instant::now`）、`src/bin/gen_builtins_doc.rs`（`use std::fs`）である。
-    いずれもホスト側の adapter・待機・開発用ツールで、script が ambient に権限を得る経路ではないため、理由付きで許可リストに載せる見込みである（`src/` の変更 0 行）。
+    `std::thread::park_timeout`）、`src/budget.rs`（`SystemMonotonicClock` の `std::time::Instant::now`）、`src/bin/gen_builtins_doc.rs`（`use std::fs`）、`src/builtin_core.rs`（`resolve_now` の `use std::time::UNIX_EPOCH` と `duration_since(UNIX_EPOCH)`。
+    Clock capability の `now_utc()` から受け取った値を秒へ写すだけで、system clock は読まない）である。`UNIX_EPOCH` はほかに `src/embedding.rs`（5013 行）・`src/vm.rs`（2810 行）・
+    `src/capability.rs`（2548 行）にもあるが、いずれも `#[cfg(test)] mod tests` の中（それぞれ 3647・2643・2533 行から）なので検査の対象外である。
+    いずれもホスト側の adapter・待機・開発用ツール、または capability 経由の値の変換で、script が ambient に権限を得る経路ではないため、理由付きで許可リストに載せる見込みである（`src/` の変更 0 行）。
 - **実装範囲**:
   1. 検査は既存の `tests/ambient_access_audit.rs` を拡張して 1 本に保つ（Q1=A）。ファイル冒頭に、検査項目ごとに守る原則（OS・network・process・clock の項目は原則 2・8、`std::thread` の項目は原則 1・3）と CAP-AT-27 の対応表を置く。
   2. 走査対象を `src/` 配下の全 `*.rs`（サブディレクトリを含む）にする。
@@ -1384,9 +1386,13 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
      `std::net`、`std::thread`（`spawn`・`Builder`・`park*`・`sleep`）、`std::time::SystemTime`・`UNIX_EPOCH`、および修飾無しの `SystemTime::now`・`Instant::now`（既存の `SystemTime::now` の照合を残す）。`std::thread::current` は検出しない（`available_parallelism` と同じ扱い）。`use` 文でこれらの module・item を取り込む行も検出する
      （取り込み自体を違反として数え、以降の短縮名の呼びは追わない）。
   5. 許可リストを「ファイル・パターン」の組の単位にし（Q2=A）、各組に理由と原則を書く。許可リストにある組が実際には 1 度も一致しなければ検査を失敗させる（古い許可を残さない）。
-  6. 試算で見つかった `std::thread` の該当（`host_pending.rs` の `spawn`、`embedding.rs` の `park_timeout`。許可は `host_pending.rs`×`spawn` と `embedding.rs`×`park*` の 2 組）は、ホスト側の adapter executor・同期 wrapper の待機として、原則 1・3（と 8）を理由に許可リストに載せる（Q3=A）。載せられない該当が見つかったら、本スライスで
+  6. 試算で見つかった `std::thread` の該当（`host_pending.rs` の `spawn`、`embedding.rs` の `park_timeout`。許可は `host_pending.rs`×`spawn` と `embedding.rs`×`park*` の 2 組）は、ホスト側の adapter executor・同期 wrapper の待機として、原則 1・3（と 8）を理由に許可リストに載せる（Q3=A）。
+     `UNIX_EPOCH` は検出パターンに残し、`builtin_core.rs`×`UNIX_EPOCH` を「Clock capability から受け取った値の変換で、system clock を読まない」という理由（ambient な呼びの例外ではなく capability 経由の値の変換であること）と原則 2 で許可リストに載せる（Q4=B）。載せられない該当が見つかったら、本スライスで
      `src/` を直さず、`fix-` スライスとして PM に返す。
   7. 動的検査 `safe_default_denies_all_ambient_operations` は変えない。
+- **検査の限界**: 行単位の文字列照合なので、許可した組のファイルの中の同じパターンの別の使い方は区別しない。たとえば `builtin_core.rs` の中で `UNIX_EPOCH.elapsed()`
+  （`SystemTime::elapsed` は内部で現在の system clock を読む）を書いても、`builtin_core.rs`×`UNIX_EPOCH` の許可で素通りする。capability から受け取った `SystemTime` に対する
+  `.elapsed()` も、`now` も `std::time` も現れないので、どのファイルでも検出されない。これらはレビューで見る。
 - **範囲外**: lib の script 到達経路の `process::exit`・`abort`・`panic!` の検査（manifesto-check-no-host-abort）。構文木による厳密な解析（文字列照合のまま）。
   `.github/`（凍結）の変更。§19 の CAP-AT-27 の目標の文の変更。
 - **受入基準**:
@@ -1411,6 +1417,13 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
     実行予算と scheduler の外で資源を使うので、新しく入ったら機械で気付けるようにする（優先順位の表「制御可能な最悪時負荷」「再現可能な検証」）。production の該当は 2 ファイルだけで、Q2=A の組の単位なら許可は 2〜3 組で済む。
     採らなかった案 B（含めない）は、原則 2 の読みとしては正しいが原則 1・3 の側の機械チェックが無いままになり、検査が単純になる利点も該当が少ないので小さいため採らない。
     `std::thread::available_parallelism`（`scheduler.rs`）は検出パターンに入らない。
+  - **Q4=B**（`UNIX_EPOCH` を検出パターンに残し、`builtin_core.rs`×`UNIX_EPOCH` を理由付きで許可する）。理由: `UNIX_EPOCH` は `SystemTime` の値なので、`std::time::UNIX_EPOCH.elapsed()` と書けば
+    `now` も `std::time::SystemTime` の文字列も現れないまま ambient な時刻が読める。パターンから外すと、この経路が許可リスト外のどのファイルでも検査を素通りする。production の該当は
+    `builtin_core.rs`（`resolve_now`）の 1 ファイルだけで、費用は理由付きの 1 組であり、Q2=A の組の単位・一致しない組で失敗にそのまま収まる（`src/` の変更 0 行）。許可の理由に
+    「capability 経由の値の変換」であることを書けば許可の意味は区別でき、検査が通ることを CAP-AT-27 の裏付けとして扱える範囲は狭まらない（原則 2・9、優先順位の表「明示的な capability ＞ ambient authority
+    による利便性」「再現可能な検証 ＞ 根拠のない安全性の主張」、本書 §19 CAP-AT-27）。B でも残る検出漏れは上の「検査の限界」に書いた。
+    採らなかった案 A（`UNIX_EPOCH` を検出パターンから外す）は、`UNIX_EPOCH.elapsed()` の経路を検出から外し「許可リスト外に ambient な時刻の読み取りが無い」という裏付けを弱めるため、
+    原則 2 に反しうるとして採らない（設計 PR の候補では「反しうる選択肢: なし」としていたが、判断役の見立てで改めた）。許可リストを 1 組小さくできる利点は優先順位の表で劣る。
 
 ## 19. 受入基準
 
