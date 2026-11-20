@@ -1184,13 +1184,13 @@ order      = 37
 [[slice]]
 id         = "fix-vm-dict-literal-depth-settle"
 title      = "VM の Dict リテラルの構築で途中の深度の読み直しを無くし、tree と同じく作り終えたときに 1 回だけ要約する（semantic-decisions §21.3、issue #374）"
-status     = "done"
+status     = "blocked"
+blocked_reason = "manifesto: 原則1（ホストの安定性）— 実装 PR #448 の DictInsert(false) は深度の要約を更新せず、verifier も DictInsert の operand とスタックの形を検査しないため、from_trusted で渡したホスト構築の chunk で MAX_VALUE_DEPTH を超える入れ子を作れ、drop の再帰でホストが落ちうる（design.md の AUD-023 の保証。朝の点検 11/21 の事後点検で取り消し）"
 parent     = "REV-001"
 spec       = { doc = "docs/execution-control.md", section = "fix-vm-dict-literal-depth-settle 実装スライス（VM の Dict リテラルの構築で深度を読み直さない）" }
 acceptance = ["VDL-AT-01..04"]
 depends_on = ["fix-value-depth-settle-quadratic"]
 design_pr  = 447
-impl_pr    = 448
 order      = 113
 
 [[slice]]

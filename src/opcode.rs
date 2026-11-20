@@ -176,11 +176,8 @@ pub enum OpCode {
     /// リストビルド用: スタックの [list, value] → list に value を push → list を残す
     ListPush,
 
-    /// 辞書ビルド用: スタックの [dict, key, value] → dict に key:value を挿入 → dict を残す。
-    /// 途中では深度の要約を更新しない（読み直さない）。operand が `true`（リテラルの最後の組）のときだけ、
-    /// 挿入のあと全 entry の深度を 1 回だけ要約する（tree の `Value::new_dict` と同じ量の仕事）。
-    /// fuel は課金しない。
-    DictInsert(bool),
+    /// 辞書ビルド用: スタックの [dict, key, value] → dict に key:value を挿入 → dict を残す
+    DictInsert,
 
     /// インデックス代入: スタックの [index, value] を pop し、
     /// 対象 binding が保持するコレクションを in-place で更新する（値は積まない）。
