@@ -21,7 +21,7 @@ description: Tsumugi 開発ループの「朝の点検」（毎朝 1 回の定�
 1. 前日にマージされた PR を集める: `gh api "repos/kamonabe1927/Tsumugi/pulls?state=closed&sort=updated&direction=desc&per_page=100"` から `merged_at` が前日（手順書 §11 の範囲）のもの
 2. PR ごとに、事後点検役を Agent ツールで起動する（`model: "opus"`、前景）。渡すのは PR 番号・マージ commit・clone したパス・「`.claude/skills/manifesto-gate/SKILL.md` の §1（事後点検の読み方）と §2 の表で、マージされた差分を判定する。審査コメントは先に読まない。PR にはコメントを書かず、表と疑いだけを返す」という依頼だけ。
    審査が代替（`（代替: Opus）`）だった PR は、全差分を必ず読ませる。判断が代替だった PR・issue は、判断の結論が手順書 §7.3 と loop-decide の比べ方に合っているかも読ませる。数が多ければ代替のものを先にし、45 分に収まらない分は次の朝に回して要確認に書く
-3. あわせて PM（このセッション）が、マージの根拠が PR に残っているかを確かめる（loop-guard §6: レビュー・審査のコメント、3 時間待ち、1 日の上限、`保留:`、凍結ファイルの許可）。PR を経ずに main に入った commit が無いかも見る（見つけたら取り消さず、要確認に書く）
+3. あわせて PM（このセッション）が、マージの根拠が PR に残っているかを確かめる（loop-guard §6: レビュー・審査のコメント、1.5 時間待ち、1 日の上限、`保留:`、凍結ファイルの許可）。PR を経ずに main に入った commit が無いかも見る（見つけたら取り消さず、要確認に書く）
 4. 見逃しが見つかったら、取り消しの PR を出す
    - ブランチ `revert/<PR番号>` で `git revert -m 1 <merge commit>` と `slices.toml` の変更を 1 commit にまとめ（loop-guard §4.4 の形）、`loop:revert` と `loop:running` を付ける
    - 取り消す差分が凍結ファイルを含むときは、PR を出したうえで要確認に書く（kamonabe の `frozen-ok` が要る）
