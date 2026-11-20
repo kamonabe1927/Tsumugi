@@ -125,7 +125,7 @@ kamonabe の issue #424 による 2 週間の試行である。§6.2 の 3・6�
 - **期間**: 開始はこの小節を足した設計 PR のマージ日。2 週間の試行とし、続けるかどうかは kamonabe が決める。kamonabe の返事が無いあいだは、2 週間を過ぎても試行の規則を続ける。
 - **書き換えない**: ループはこの小節を自分で書き換えず、試行をやめる・変える PR も自分で出さない（§9.2 と同じ）。kamonabe が issue（#424 か新しい issue）に書いたら、それに従う。
 - **交互の数え方**（§6.2 の 3）: 直前にマージされた `loop:design` の PR は、`gh api "repos/kamonabe1927/Tsumugi/pulls?state=closed&sort=updated&direction=desc&per_page=50"` のうち `loop:design` のラベルが付き `merged_at` があるものから、`merged_at` が最も新しい 1 本とする。その `head.ref` が `docs/drift-*`（ずれの修正）か `docs/plan-*`（分割）なら、交互の番はロードマップ側にある（分割もロードマップ側の番に数える）。それ以外（スライスの設計・issue の受け入れ・判断の反映・マニフェストの改訂など）なら、ずれの修正側にある。例外の `D-N` だけを直したずれの修正も、ずれの修正として数える。
-- **ロードマップ由来と fix の区別**: `id` の接頭辞で決める。ずれ・不具合から作るスライスの `id` は `fix-` で始める（§8・§12.3）。`id` で由来が決まらない今あるスライスは改名せず、接頭辞のとおりロードマップ由来として扱う: `manifesto-check-ambient-surface`・`manifesto-check-no-host-abort`（週次計画 #355 の P-1 から）、`audit-host-boundary-scope`（loop:drift #342 の D-52 から）。
+- **ロードマップ由来と fix の区別**: `id` の接頭辞で決める。ずれ・不具合から作るスライスの `id` は `fix-` で始める（§8・§12.3）。`id` で由来が決まらない今あるスライスは改名せず、接頭辞のとおりロードマップ由来として扱う: `manifesto-check-ambient-surface`・`manifesto-check-no-host-abort`（週次計画 #355 の P-1 から）、`audit-host-boundary-scope`（loop:drift #342 の D-52 から）。kamonabe が立てた不具合の issue から作った fix（fix-handle-import-from-link #327・fix-handle-execution-cancel-token #363・fix-host-function-call-charge #364・fix-dict-retrack-key-bytes #374）も、接頭辞のとおり fix として §6.2 の 6 の後回しの対象にする（下の表で「該当」のものだけ外す）。issue #424 の「今の既定のまま」は、§8 の `order` の既定にだけ掛かる。理由: 規則 2 と追記 B は区別を `id` の接頭辞で行うと定めており、由来という第 2 の区別を足さないほうが、PM が `id` だけで選べる。kamonabe が先にしたいものは、issue に「優先」と書けば §8 の既定で前に出る（判断役が選択（PR #454）の Q1）。
 - **すり抜け・課金されない fix の基準**: spec が拒否する、または課金すると定める操作が main で実際に通る（課金されない）もので、再現テストが書けるもの。新しく見つかるものは、朝の点検が `loop:drift` の `D-N` の行に `すり抜け` の印を根拠と一緒に付ける（§12.2）。進行の回の PM はその場で判定しない。
 
 **今ある fix のスライスの分類**（この設計 PR の時点の `todo`・`ready` の 21 本。基準で一度だけ分類した。「該当」は §6.2 の 6 の後回しから外すだけで、`order` は変えず、ロードマップ由来の `todo` と `order` どおりに並ぶ）
@@ -144,7 +144,7 @@ kamonabe の issue #424 による 2 週間の試行である。§6.2 の 3・6�
 | fix-execution-request-send-sync | 非該当 | 型の bound の欠け |
 | fix-host-error-code-invalid-descriptor | 非該当 | 拒否はされる。返す `ConfigError` が違う |
 | fix-sync-run-concurrent-handle | 非該当 | 拒否されずに戻らない（通るのでなく止まる） |
-| fix-scheduler-context-reset-step-budget | 非該当 | §13 に無い公開メソッドが残る API の差。呼べるのは host で、script から届く操作が通るわけではない |
+| fix-scheduler-context-reset-step-budget | 非該当 | §13 に無い公開メソッドが残る API の差。呼べるのは host の Rust コードだけで、script から届く経路が無い。予算を与える・戻すのは host の権限の内側で、追記 C の基準（script の操作が検査・課金をすり抜ける）に当たらない（判断役が選択（PR #454）の Q3） |
 | fix-execution-budget-usage-fresh | 非該当 | 前の execution の使用量を数えに含める（課金が多い側の差） |
 | fix-cancel-token-waker-recheck | 非該当 | waker の確かめ直しの欠け（取りこぼした wake） |
 | fix-handle-import-from-link | 非該当 | import の経路の作り（kamonabe の issue #327） |
@@ -171,6 +171,8 @@ kamonabe の issue #424 による 2 週間の試行である。§6.2 の 3・6�
 - 試行前は精読が 1 日 1 本で、試行中は週 2 本（§12.1 の 4）。新しいずれの大半は精読で見つかっているため、試行中は「新しく見つかったずれ」と「fix の積み残し」が少なく見えやすい。比べるときは精読した spec の本数を並べる
 
 **見直し**: 11/30 の週の週次計画の振り返り（§9.1。対象は 11/23〜11/29）では、閾値によらず、試行前（上の基準値）と試行中の各週の数を並べた比較を書く。精読した spec の本数も並べる。
+
+基準値の期間は 11/19 までで確定させ、マージ後に直さない。開始（この小節のマージ日）が 11/21 以降になったときは、11/20〜開始前日を同じ数え方で数え、11/30 の週の比較に「試行前（基準値の後）」の行として足す。理由: ループはこの小節を書き換えないのでマージ後に直す手段が無く、マージの直前に数え直す commit を足すと 1.5 時間待ち（loop-guard §6）とレビュー・審査がやり直しになる（判断役が選択（PR #454）の Q2）。
 
 ## 7. 判断の扱い
 
