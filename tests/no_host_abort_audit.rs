@@ -264,6 +264,7 @@ struct S {
     probe: u32,
     a: u32,
 }
+fn g() { panic!(\"after field\"); }
 fn f() {
     g(
         #[cfg(test)]
@@ -271,8 +272,15 @@ fn f() {
         panic!(\"arg\"),
     );
 }
+const S0: S = S {
+    #[cfg(test)]
+    probe: 0,
+    a: panic!(\"lit\"),
+};
 ";
-    assert_eq!(lines_of("a.rs", src, "panic"), vec![10]);
+    // フィールドの後ろの `fn g`（6 行目）、関数呼びの引数（11 行目）、struct literal のフィールド `a:`（17 行目）。
+    // フィールドの規則が壊れて brace まで除く読み方になれば 6 行目を取りこぼす。
+    assert_eq!(lines_of("a.rs", src, "panic"), vec![6, 11, 17]);
 
     // `#[cfg(test)] x: T,` のように attribute と item が同じ行にある引数は、その行だけが除かれ、
     // 直後の行（`) -> T {`）と関数本体は検出される。
