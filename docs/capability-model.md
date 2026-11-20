@@ -1374,17 +1374,17 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
   - 検出パターンは `std::env::var` など 9 個の完全修飾の文字列で、`use std::fs;` のあとの `fs::write` のような `use` 経由の呼びを拾わない。`std::net`・`std::process::Command`・
     `std::thread` の生成・`std::time::Instant::now` は対象外である。
   - 上の範囲を広げた試算では、許可リスト外の production コードの該当は `src/host_pending.rs`（adapter executor の `std::thread::spawn`）、`src/embedding.rs`（同期 wrapper の
-    `std::thread::park_timeout`・`std::thread::current`）、`src/budget.rs`（`SystemMonotonicClock` の `std::time::Instant::now`）、`src/bin/gen_builtins_doc.rs`（`use std::fs`）である。
+    `std::thread::park_timeout`）、`src/budget.rs`（`SystemMonotonicClock` の `std::time::Instant::now`）、`src/bin/gen_builtins_doc.rs`（`use std::fs`）である。
     いずれもホスト側の adapter・待機・開発用ツールで、script が ambient に権限を得る経路ではないため、理由付きで許可リストに載せる見込みである（`src/` の変更 0 行）。
 - **実装範囲**:
   1. 検査は既存の `tests/ambient_access_audit.rs` を拡張して 1 本に保つ（Q1=A）。ファイル冒頭に、検査項目ごとに守る原則（OS・network・process・clock の項目は原則 2・8、`std::thread` の項目は原則 1・3）と CAP-AT-27 の対応表を置く。
   2. 走査対象を `src/` 配下の全 `*.rs`（サブディレクトリを含む）にする。
   3. test コードの除外を、`#[cfg(test)]` の直後の item が `mod` であるもの（その module の終わりまで）に限る。フィールド・文・関数に付いた `#[cfg(test)]` では走査を打ち切らない。
   4. 検出パターンを広げる: `std::env::` のすべて（`args`・`set_var` を含む）、`std::fs`、`std::io::stdin`・`stdout`・`stderr`、`std::process`（`exit`・`Command`・`abort`・`id`）、
-     `std::net`、`std::thread`（`spawn`・`Builder`・`park*`・`sleep`）、`std::time::SystemTime`・`UNIX_EPOCH`・`Instant::now`。`use` 文でこれらの module・item を取り込む行も検出する
+     `std::net`、`std::thread`（`spawn`・`Builder`・`park*`・`sleep`）、`std::time::SystemTime`・`UNIX_EPOCH`、および修飾無しの `SystemTime::now`・`Instant::now`（既存の `SystemTime::now` の照合を残す）。`std::thread::current` は検出しない（`available_parallelism` と同じ扱い）。`use` 文でこれらの module・item を取り込む行も検出する
      （取り込み自体を違反として数え、以降の短縮名の呼びは追わない）。
   5. 許可リストを「ファイル・パターン」の組の単位にし（Q2=A）、各組に理由と原則を書く。許可リストにある組が実際には 1 度も一致しなければ検査を失敗させる（古い許可を残さない）。
-  6. 試算で見つかった `std::thread` の該当（`host_pending.rs` の `spawn`、`embedding.rs` の `current`・`park_timeout`）は、ホスト側の adapter executor・同期 wrapper の待機として、原則 1・3（と 8）を理由に許可リストに載せる（Q3=A）。載せられない該当が見つかったら、本スライスで
+  6. 試算で見つかった `std::thread` の該当（`host_pending.rs` の `spawn`、`embedding.rs` の `park_timeout`。許可は `host_pending.rs`×`spawn` と `embedding.rs`×`park*` の 2 組）は、ホスト側の adapter executor・同期 wrapper の待機として、原則 1・3（と 8）を理由に許可リストに載せる（Q3=A）。載せられない該当が見つかったら、本スライスで
      `src/` を直さず、`fix-` スライスとして PM に返す。
   7. 動的検査 `safe_default_denies_all_ambient_operations` は変えない。
 - **範囲外**: lib の script 到達経路の `process::exit`・`abort`・`panic!` の検査（manifesto-check-no-host-abort）。構文木による厳密な解析（文字列照合のまま）。
@@ -1392,7 +1392,7 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
 - **受入基準**:
   - **MAS-AT-01**（走査の範囲）: `src/` 配下のサブディレクトリの `*.rs` も走査され、`#[cfg(test)] mod` より前でもフィールド等の `#[cfg(test)]` で打ち切られない。
     確かめ方: 検査関数を小さい入力（文字列）で呼ぶ unit を同じテストファイルに置き、サブディレクトリ相当のパスとフィールドの `#[cfg(test)]` の後ろの違反が検出されることを確かめる。
-  - **MAS-AT-02**（検出パターン）: 実装範囲 4 のパターンと `use` 経由の取り込みが、それぞれ違反として検出される。確かめ方: パターンごとの文字列入力の unit。
+  - **MAS-AT-02**（検出パターン）: 実装範囲 4 のパターンと `use` 経由の取り込みが、それぞれ違反として検出される。確かめ方: パターンごとの文字列入力の unit（修飾無しの `SystemTime::now` と、複数行の `use std::time::{ SystemTime }` のあとの `SystemTime::now()` を含む）。
   - **MAS-AT-03**（許可リスト）: 許可リストの各組に理由と原則があり、一致しない組があると検査が失敗する。確かめ方: unit と、`cargo test --test ambient_access_audit` が main で通ること。
   - **MAS-AT-04**（対応表）: テストファイル冒頭に、検査項目・守る原則・CAP-AT-27 の対応表がある。確かめ方: レビューで読む。
 - **想定の変更規模**: `tests/ambient_access_audit.rs` が +150〜250 行（既存の静的検査の置き換えを含む）。`src/` は 0 行の見込み（実装範囲 6 のとおり、直す必要が出たら fix スライスへ）。
