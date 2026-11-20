@@ -987,9 +987,10 @@ pub struct BudgetLedger {
     heap: HeapLedger,
     /// `BudgetCharged` 監査 event の集約器（Phase 6 REV-015、§7.3）。
     ///
-    /// charge/release funnel（[`Self::commit`] / [`Self::release_heap`]）から
-    /// [`crate::audit::BudgetChargeAccumulator::note_charge`] /
-    /// [`crate::audit::BudgetChargeAccumulator::note_release`] を呼んで集約する。加算は常に走る
+    /// cumulative charge は [`Self::commit`] から
+    /// [`crate::audit::BudgetChargeAccumulator::note_charge`] を呼んで集約する。heap の確保・解放は
+    /// [`AllocationLedger`] が共有ハンドル経由で `note_heap_charge` / `note_release` を呼ぶ
+    /// （[`Self::release_heap`] を含め、経路を問わず 1 か所。fix-heap-charge-audit-notify）。加算は常に走る
     /// 軽量操作で観測挙動を変えない。emission は embedding facade の監査経路だけが
     /// [`Self::drain_budget_charges`]（＝ accumulator.flush）で drain して行う（§7.3 / §8 規則 7）。
     /// heap 台帳（`AllocationLedger`）と共有する（fix-heap-charge-audit-notify）。

@@ -3,6 +3,10 @@
 //! 設計正本は `docs/determinism-and-audit.md` §7/§8/§10/§11。tree engine のみ。
 //! crate root から re-export される公開型だけを使い、監査の opt-in・emission 順序・
 //! outcome 写像・fail-closed を固定する。
+//!
+//! HCN-AT-05（fix-heap-charge-audit-notify の非破壊）は、既存の `tests/audit_*.rs`
+//! （`audit_queue_bytes.rs` を含む）と `src/budget.rs` の `AllocationLedger` の単体テストを
+//! 無改変で緑のまま保つことで確かめる（専用のテストは足さない）。
 
 use std::sync::Arc;
 
@@ -781,7 +785,7 @@ fn hcn_at_04_failed_charge_is_not_notified() {
 }
 
 #[test]
-fn hcn_at_05_heap_notifications_cut_every_256_charges() {
+fn heap_notifications_cut_every_256_charges() {
     // 確保・解放が 256 回を超える script では、確定済みの HeapBytes event が複数件に分かれ、
     // どの 1 件の charge_count も 256 を超えない。
     let envelopes = run_heap_audit(
