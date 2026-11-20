@@ -765,6 +765,7 @@ status     = "ready"
 parent     = "AUD-022"
 spec       = { doc = "docs/embedding-api.md", section = "manifesto-check-no-host-abort 実装スライス（lib の production コードに process::exit・abort・無条件の panic が許可リスト外に無いことを固定する）" }
 acceptance = ["NHA-AT-01..04"]
+design_pr  = 462
 order      = 16
 
 # manifesto-check-no-host-abort の設計（判断の候補 Q4 の推奨案）で、`.unwrap()`・`.expect()` の検査を分けた sub-slice。未設計（todo）。
