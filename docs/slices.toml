@@ -306,14 +306,16 @@ depends_on = ["A-1"]
 impl_pr    = 350
 order      = 23
 
+# needs-design issue #369（実装役が止まった件）の Q1=A を反映した設計 PR で、実装範囲・受入基準（HCN-AT-01..03 → 01..05）・
+# 想定の変更規模を直し、design_pr をその PR にした（初版の設計 PR は #347）。status・order は変えない。
 [[slice]]
 id         = "fix-heap-charge-audit-notify"
-title      = "charge_heap の課金を BudgetCharged の accumulator へ通知し、heap の Allocation を突合できるようにする（determinism-and-audit §7.3・§15.3、loop:drift #342 D-53）"
+title      = "heap の確保・解放を全経路（charge_heap・Tracked の Drop・new_via_handle）で heap 台帳から BudgetCharged の accumulator へ通知し、Terminal の live heap と突合できるようにする（determinism-and-audit §7.3・§15.3、loop:drift #342 D-53、issue #369 Q1=A）"
 status     = "ready"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 spec       = { doc = "docs/determinism-and-audit.md", section = "fix-heap-charge-audit-notify 実装スライス（heap の課金を `BudgetCharged` の accumulator へ通知する）" }
-acceptance = ["HCN-AT-01..03"]
+acceptance = ["HCN-AT-01..05"]
 design_pr  = 347
 depends_on = ["A-1"]
 order      = 38
