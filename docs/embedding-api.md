@@ -678,6 +678,93 @@ loop:drift #318 の D-29 と D-31 を直す。2 件とも CLI の利用者に見
   [Capability Model仕様](capability-model.md) の逸脱一覧の `--allow-import-root` の文言の行と、[脅威モデル](threat-model.md) の逸脱一覧の
   「CLI の `--vm` は experimental VM を選んだことを stderr にも `--help` にも示さない」行を削除する。
 
+### manifesto-check-no-host-abort 実装スライス（lib の production コードに process::exit・abort・無条件の panic が許可リスト外に無いことを固定する）
+
+loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェスト](manifesto.md) 原則 6（スクリプトの失敗によってホストプロセスが panic、abort、
+または意図せず exit しない）を、`cargo test` で走る静的検査として固定する（週次計画 #355・#417 の P-1、親 AUD-022）。本書 §11 規則 5
+（公式 host function/adapter は panic、abort、process exit を行ってはならない）と規則 1（unwind panic は各 host boundary で
+`catch_unwind` する）を、`catch_unwind` に頼る前の段で裏付けるスライスで、§11 の目標の文は変えない。同じ P-1 の先行スライス
+manifesto-check-ambient-surface（[Capability Model仕様](capability-model.md) §18 の同名小節）の静的検査の作りを参考にする。
+
+検査の置き場所・`unreachable!` の扱い・`process::exit`／`abort` の扱い・`.unwrap()`／`.expect()` の扱い・許可リストの単位は、判断役が選択（PR #462）の Q1=A・Q2=A・Q3=A・Q4=A・Q5=A・Q6=A による（下の「決定記録」）。
+
+- **前提（設計時点の main c5e5e84 で確かめたこと）**:
+  - `std::process::exit`・`abort` は `tests/ambient_access_audit.rs` の `process` の key が `src/` 全体で検出し、許可は `main.rs`×`process` の 1 組だけである（原則 2・8 の検査）。
+    原則 6 の側の検査は無く、`panic!` などのマクロを検出する検査も無い。
+  - lib の production コード（`src/main.rs` と `src/bin/` を除く `src/` の `*.rs` から、`#[cfg(test)] mod` を除いた部分。`tests/ambient_access_audit.rs` の `production_lines` と同じ切り出し）に、
+    `todo!`・`unimplemented!`・`process::exit`・`process::abort` は無い。
+  - 同じ範囲の `panic!` は 4 か所: `src/embedding.rs` 403 行（`#[doc(hidden)] pub fn audit_budget_for_test`。ホストが不正な `AuditBudget` を渡したとき。`tests/audit_queue_bytes.rs` が使う）、
+    2405・2637 行（`#[cfg(test)]` の付いた `if` 文の中で、production の build には入らない）、`src/stable_error.rs` 125 行（`message_ids!` マクロの `const` の初期化式の中で、build 時に評価される）。
+  - 同じ範囲の `unreachable!` は 29 か所: `src/eval.rs` 18・`src/parser.rs` 8・`src/builtin.rs` 2・`src/compiler.rs` 1。どれも直前の match・検査で除いた分岐に置かれた内部不変条件で、
+    script の入力から届くかは各箇所で確かめていない。
+  - `.unwrap()` は 7 か所（`src/compiler.rs` 6・`src/eval.rs` 1）、`.expect(` は lib で 120 か所余り（`src/parser.rs` の `self.expect(...)` のような自前のメソッドを含む粗い数え）ある。
+  - `Cargo.toml` に `panic = "abort"` の profile 設定は無い（unwind panic は §11 規則 1 の `catch_host_unwind` で捕まえられる）。
+- **実装範囲**:
+  1. 検査は新しい `tests/no_host_abort_audit.rs` に置く。行の切り出し（文字列・コメントの除去、`#[cfg(test)] mod` の除外）と `use` の展開は、`tests/ambient_access_audit.rs` から
+     共通の helper module（例: `tests/support/source_scan.rs`。両方のテストが `#[path]` か `mod` で取り込む）へ移して共有する（Q1）。共有する切り出しは実装範囲 3 の規則とし、`tests/ambient_access_audit.rs` もこの規則で production コードを切り出す（Q6）。
+     `tests/ambient_access_audit.rs` の main での検出結果は変えない（除くのは production の build に入らないコードだけである）。同ファイル冒頭の doc コメントの範囲の説明は、この規則に合わせて直す。
+  2. 走査対象は `src/` 配下の全 `*.rs` から `src/main.rs`（CLI adapter）と `src/bin/`（開発用ツール）を除いたもの。lib の中で script から届く経路は静的に絞れないので、lib の production コード全体を
+     上位集合として検査する。
+  3. test コードの除外は、`#[cfg(test)]` の直後の item が `mod` のもの（その module の終わりまで）に加え、`#[cfg(test)]` の直後の文・式・関数・impl（その item の終わり。brace のある item は brace が閉じるまで、
+     無いものは `;` まで）とする。production の build に入らないコードだからである。ただし、`#[cfg(test)]` の直後の行が `,` で終わるもの（構造体のフィールド・struct literal のフィールド・関数呼びの引数。例: `src/embedding.rs` 1842・2026・2133・2391 行）は、その 1 行だけを除く（次の `;` まで除かない）。`#[cfg(test)]` と item が同じ行にあるもの（例: `src/embedding.rs` 2229 行の `#[cfg(test)] poll_trace: …,`）は、attribute の後ろをその item の頭として読み、上の規則（`,` で終わればその 1 行だけ、`mod` や brace のある item は brace が閉じるまで）を当てる。次の行を item の頭として読まない。
+     この規則は共有 helper の切り出しとして 2 つの検査に共通に使う（Q6）。
+  4. 検出パターン: `panic!`・`todo!`・`unimplemented!`・`unreachable!`（Q2）、`std::panic::panic_any`・`resume_unwind`、`process::exit`・`process::abort`（Q3。修飾無しの `process::` を含む）と、
+     `use` 文でこれらを取り込む行（`use std::process;` の module の取り込みを含む）。`std::panic!` のような修飾つきの呼びも照合する。`assert!` 系・`debug_assert!` 系・`.unwrap()`・`.expect(` は検出しない（Q4）。
+  5. 許可リストは「ファイル・パターン・件数」の組の単位にし、各組に理由と原則を書く（Q5）。組の件数と実際の一致数が違えば検査を失敗させる（増えたら新しい箇所に、減ったら古い許可に気付ける）。
+  6. 前提の `panic!` の該当のうち、`stable_error.rs`×`panic`（const の初期化式で build 時に評価され、実行時には起きない）と `embedding.rs`×`panic`（ホスト専用の `#[doc(hidden)]` builder で、script から届かない）を
+     理由付きで載せる。`unreachable!` の 29 か所は、実装役が各箇所の到達条件を読み、script の入力から届かない内部不変条件であることを確かめてからファイルごとの組（件数つき）で載せる。
+     script の入力（source・host から渡る値）から届く箇所が見つかったら、本スライスで `src/` を直さず、`fix-` スライスとして PM に返す（その箇所は組の件数に含めず、テストを `#[ignore]` にせず、
+     実装 PR を止めて返す）。
+  7. ファイル冒頭に、検査項目・守る原則・本書 §11 の規則の対応表を置く。
+- **検査の限界**: 行単位の文字列照合なので、許可した組のファイルの中で箇所が入れ替わっても件数が同じなら区別しない。`assert!`・`debug_assert!` の条件つき panic、`.unwrap()`・`.expect()`、
+  slice の添字・`RefCell::borrow_mut` の panic、整数の overflow、OOM・stack overflow の abort、依存 crate の中の panic、`macro_rules!` の展開先・別名を通した呼びは検出しない。
+  unwind panic は §11 規則 1 の `catch_host_unwind` が最後の受け皿で、本検査はその前の段である。これらはレビューで見る。
+- **範囲外**: `.unwrap()`・`.expect()` の検査（Q4。sub-slice の manifesto-check-no-host-unwrap〔`slices.toml`、todo〕へ分けた）。`src/` の panic 箇所の書き換え（見つかれば fix スライスへ）。構文木による解析。CLI adapter（`src/main.rs`）の `process::exit`
+  （§12 の exit code の写像で、`tests/ambient_access_audit.rs` が `main.rs`×`process` として扱う）。`.github/`（凍結）の変更。§11 の目標の文の変更。
+- **受入基準**:
+  - **NHA-AT-01**（走査の範囲）: `src/main.rs` と `src/bin/` を除く `src/` 配下（サブディレクトリを含む）の `*.rs` が走査され、`#[cfg(test)] mod` と `#[cfg(test)]` の付いた文・関数の中は除かれ、
+    それ以外は除かれない。確かめ方: 検査関数を文字列の入力で呼ぶ unit を同じテストファイルに置き、`#[cfg(test)]` の付いた `if` 文の中の `panic!` が検出されず、その直後の文の `panic!` が検出されることと、`#[cfg(test)]` の付いた構造体フィールドと関数呼びの引数（行が `,` で終わるもの）の直後の行の `panic!` が検出されることと、`#[cfg(test)] x: T,` のように attribute と item が同じ行にある引数の直後の行（`) -> T {` と関数本体）の `panic!` が検出されることと、
+    除外するパスの判定を確かめる。
+  - **NHA-AT-02**（検出パターン）: 実装範囲 4 のパターンと `use` 経由の取り込みが、それぞれ違反として検出され、`assert!`・`debug_assert!`・`.unwrap()`・`.expect(` と文字列・コメントの中の `panic!` は検出されない。
+    確かめ方: パターンごとの文字列入力の unit（`use std::process;` のあとの `process::exit(1)`、`std::panic!(...)` を含む）。
+  - **NHA-AT-03**（許可リスト）: 許可リストの各組に理由と原則があり、組の件数と一致数が違うと検査が失敗する。確かめ方: 件数の多い・少ない入力の unit と、`cargo test --test no_host_abort_audit` が main で通ること。
+  - **NHA-AT-04**（対応表と共有）: テストファイル冒頭に検査項目・守る原則・§11 の規則の対応表があり、`tests/ambient_access_audit.rs` が共有の helper に移したあとも同じ違反を検出する。
+    確かめ方: 対応表はレビューで読む。`cargo test --test ambient_access_audit` が通り（実装範囲 3 の規則の共有で ambient の検出結果が main で変わらない。Q6）、同テストの既存の unit（MAS-AT-01〜03）が変更なしか、helper の呼び先の書き換えだけで通ること。
+- **想定の変更規模**: `tests/no_host_abort_audit.rs` が +150〜250 行（許可リストと unit を含む）、共有の helper が +200〜250 行で、その分 `tests/ambient_access_audit.rs` が −200〜250 行。
+  `src/` は 0 行の見込み（実装範囲 6 のとおり、直す必要が出たら fix スライスへ）。[開発ループ手順書](loop-runbook.md) §14.1 の行数と受入基準（5 項目以内）に収まり、
+  触る仕組みは「lib の production コードの静的検査（tests/）」1 つ。逸脱一覧の変更は見込まない。
+- **依存**: なし（manifesto-check-ambient-surface は done）。
+- **決定記録**（判断役が選択（PR #462））:
+  - **Q1=A**（検査は新しい `tests/no_host_abort_audit.rs` に置き、行の切り出しと `use` の展開は `tests/ambient_access_audit.rs` から共有の helper へ移して 1 つだけ持つ）。理由: 守る性質が違う（原則 6 と原則 2・8）ので検査と対応表は分け、
+    production コードの範囲を決める切り出しは 1 つにして、2 つの検査が違う範囲を見ないようにする（原則 8・9、優先順位の表「再現可能な検証」）。[Capability Model仕様](capability-model.md) §18 の manifesto-check-ambient-surface の Q1=A
+    （同じものを 2 つ持つと、食い違ったときにどちらが正しいか説明できない）と同じ考え方で、性質が別なので検査は 2 本・作りは 1 つになる。`ambient_access_audit.rs` の検出結果を変えないことは NHA-AT-04 で確かめる。
+    採らなかった案 B（helper を複製する）は、片方だけ直ったときに 2 つの検査の「production コード」の範囲が食い違い、どちらの裏付けが正しいか説明できなくなる（原則 9）ため採らない。
+    案 C（`ambient_access_audit.rs` に足す）は、原則 2・8 の許可リスト・対応表に原則 6 の検査が混ざって許可の理由がどの原則のものか読みにくくなり、対応表を 2 本それぞれのテストの冒頭に持つという `slices.toml` の P-1 のメモとも合わないため採らない。
+  - **Q2=A**（`unreachable!` を検出に含め、到達条件を確かめたうえで件数つきの組で許可する）。理由: `unreachable!` は届けば無条件に panic するので、原則 6 と本書 §11 規則 5 の対象である。§11 規則 1 の `catch_unwind` は最後の受け皿で、
+    その前の段で新しい箇所に機械で気付けるようにする（優先順位の表「構造化された停止・失敗」「再現可能な検証 ＞ 根拠のない安全性の主張」）。29 か所の確認は `src/` を変えず、届く箇所は fix スライスへ返すので [開発ループ手順書](loop-runbook.md) §14.1 に収まる。
+    採らなかった案 B（含めない）は、無条件の panic の大半（設計時点で 33 か所中 29）が検査の外に残り、script の入力から届く `unreachable!` が新しく入っても 1 段目で弾けず、検査が通ることを「無条件の panic が許可リスト外に無い」の裏付けとして扱えなくなるため、原則 6 に反しうるとして採らない。
+  - **Q3=A**（`process::exit`・`abort` をこの検査でも検出し、lib の許可は 0 組にする）。理由: `ambient_access_audit.rs` の `process` の key は原則 2・8 の検査で、`Command` なども同じ key に入る。あちらで lib のファイル×`process` の組が理由付きで許可されると、
+    そのファイルの exit・abort も通るので、原則 6 の裏付けが別の原則の許可リストの運用に依ってしまう。こちらで独立に弾けば原則 6 の 1 段目がそれだけで閉じる（原則 6、§11 規則 5、優先順位の表「再現可能な検証」）。
+    こちらの許可は空で、走査から `main.rs` を除くので、許可リストの二重持ち（manifesto-check-ambient-surface の Q1=A が避けたもの）にはならない。
+    採らなかった案 B（検出せず対応表で参照する）は、パターンを 1 か所にできるが、原則 6 の側の検査が「別の検査の許可リストが広がらないこと」を前提にし、広がったときに気付く仕組みが無いため採らない。
+  - **Q4=A**（`.unwrap()`・`.expect()` は本スライスに含めず、検査の限界に書き、sub-slice manifesto-check-no-host-unwrap〔todo、order 116〕を `slices.toml` に残す）。理由: `slices.toml` の P-1 のメモ（含めると変更が増えうるので sub-slice に分ける）のとおりで、
+    未解決事項を次の作業の正本に記録して追えるようにする（原則 9）。限界を小節に明記するので、検査が通ることを unwrap・expect まで含めた保証として扱う余地は無い（[マニフェスト](manifesto.md)「現在地の扱い」）。order 116 は手順書 §8 の「それ以外」の既定に合う。
+    採らなかった案 B（sub-slice を足さない）は、残りが検査の限界の一文だけになり `slices.toml` から追えない（原則 9）ため採らない。案 C（本スライスで含める）は、130 か所近くの到達条件を `unreachable!` 29 か所と合わせて 1 回で確かめることになって確認が粗くなりやすく、
+    根拠の弱い許可が「確かめた」ものとして残る（優先順位の表「再現可能な検証 ＞ 根拠のない安全性の主張」、手順書 §14.1）ため採らない。
+  - **Q5=A**（許可リストは「ファイル・パターン・件数」の組、各組に理由と原則、件数と一致数が違えば失敗）。理由: `eval.rs`×`unreachable!` のように 1 つの組に 18 か所が入るので、ファイル・パターンの組だけでは新しい箇所が素通りする。
+    件数があれば増えたときに新しい箇所に、減ったときに古い許可に気付ける（原則 6・9）。manifesto-check-ambient-surface の Q2=A（許可したファイルの中の新しい呼びを弾けない単位は採らない、一致しない組で失敗させる）と同じ理由を、1 組に多数の箇所が入るこちらの事情に当てたもの。
+    件数が同じまま箇所が入れ替わる場合を区別しないことは上の「検査の限界」に書いた。
+    採らなかった案 B（ファイル・パターンの組）は、許可したファイルの中に新しい無条件の panic が入っても機械チェックで弾けないため、原則 6 に反しうるとして採らない。案 C（箇所ごと）は、`unreachable!()` のように同じ文字列の行が多く箇所を区別できず、
+    行番号に頼ると無関係な編集のたびに検査が壊れて許可リストの直しが形だけになる（原則 8・9）ため採らない。
+  - **Q6=A**（共有 helper の切り出しを実装範囲 3 の規則にし、`tests/ambient_access_audit.rs` と `tests/no_host_abort_audit.rs` が同じ範囲を見る。設計 PR のレビュー指摘から出た候補）。理由: `#[cfg(test)]` の付いた文・関数は production の build に入らないので、
+    ambient の検査の対象（原則 2・8 の production コードの ambient な直接呼び）が production コードから外れることはない。「production コード」の定義が 1 つなら、2 つの検査が通ることを同じ範囲についての裏付けとして読める
+    （原則 9、優先順位の表「再現可能な検証 ＞ 根拠のない安全性の主張」）。上の Q1=A（切り出しは 1 つにして、2 つの検査が違う範囲を見ない）と [Capability Model仕様](capability-model.md) §18 manifesto-check-ambient-surface の Q1=A にそのまま合う。
+    NHA-AT-04 で ambient の検出結果が main で変わらないことを確かめるので、共有した切り出しが production コードを誤って除けば、ambient の既存の許可リスト（一致しない組で失敗）と unit が回帰の検査として働く。
+    MAS-AT-01 の「フィールド等の `#[cfg(test)]` で打ち切られない」も、除くのがその item だけで走査は続くので成り立つ。同 §18 の実装範囲 3（除外を mod に限る）は、その時点の経緯の記録として残す。
+    採らなかった案 B（共有は mod の除外までとし、広い除外は新しいテストだけに置く）は、ambient の検査の挙動に触れずに済む（原則 8）が、切り出しが 2 通りになって 2 つの検査の範囲が違う理由を持ち続けることになり、
+    Q1=A で採らなかった案 B と同じ弱点を範囲の定義の側に残す（原則 9）。除かれるのは build に入らないコードだけなので、ambient の側を広いまま残しても原則 2 の裏付けは強まらないため採らない。
+    判断の外の気付き（判断役のコメント）を受け、`#[cfg(test)]` と item が同じ行にある場合（`src/embedding.rs` 2229 行）の扱いを実装範囲 3 と NHA-AT-01 に明記した。2 つの検査に同時に効く切り出しの誤りで `run_audited_inner` の本体を丸ごと除かないためである。
+
 ## 15. 受入基準
 
 | ID | Phase | 基準 |
