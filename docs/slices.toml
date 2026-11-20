@@ -768,7 +768,7 @@ acceptance = ["NHA-AT-01..04"]
 design_pr  = 462
 order      = 16
 
-# manifesto-check-no-host-abort の設計（判断の候補 Q4 の推奨案）で、`.unwrap()`・`.expect()` の検査を分けた sub-slice。未設計（todo）。
+# manifesto-check-no-host-abort の設計（判断役が選択（PR #462）の Q4=A）で、`.unwrap()`・`.expect()` の検査を分けた sub-slice。未設計（todo）。
 # lib の production コードに `.unwrap()` が 7 か所・`.expect(` が 120 か所余り（設計時点の main c5e5e84 の粗い数え）あり、検査に含めると
 # 許可リストか `src/` の書き換えが大きくなるため別にした。order は loop-runbook §8 の「それ以外」の既定（すべてのスライスより後）。
 [[slice]]
