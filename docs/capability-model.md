@@ -1364,7 +1364,7 @@ fix-handle-import-from-link の `depends_on` は、この 1 本に付け替え�
 
 loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェスト](manifesto.md) 原則 2（ambient authority を既定で公開しない）と原則 8（外部効果はホスト境界の後ろ）を、
 `cargo test` で走る静的検査として固定する（週次計画 #355・#417 の P-1、親 AUD-022）。CAP-AT-27（本書 §19）の静的検査の対象と精度を広げるスライスで、§19 の目標の文は変えない。
-検査の置き場所・許可リストの単位・`std::thread` と `UNIX_EPOCH` の扱いは、判断役が選択（PR #460）の Q1=A・Q2=A・Q3=A・Q4=B による（下の「決定記録」）。
+検査の置き場所・許可リストの単位・`std::thread` と `UNIX_EPOCH` の扱いは、判断役が選択（PR #460）の Q1=A・Q2=A・Q3=A・Q4=B・Q5=A による（下の「決定記録」）。
 
 - **前提（設計時点の main 968b64f で確かめたこと）**:
   - `tests/ambient_access_audit.rs::core_has_no_direct_ambient_os_access` は `src/` 直下の `*.rs` だけを走査し、`src/bin/` などのサブディレクトリを見ない。
@@ -1378,7 +1378,7 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
     Clock capability の `now_utc()` から受け取った値を秒へ写すだけで、system clock は読まない）である。`UNIX_EPOCH` はほかに `src/embedding.rs`（5013 行）・`src/vm.rs`（2810 行）・
     `src/capability.rs`（2548 行）にもあるが、いずれも `#[cfg(test)] mod tests` の中（それぞれ 3647・2643・2533 行から）なので検査の対象外である。
   - 今の許可ファイルの production コード（各ファイルの `#[cfg(test)] mod tests` より前）で、広げたパターンに当たるものは次のとおりで、組の単位の許可（Q2=A）にするときはすべてを組として載せる。
-    `src/main.rs`: `std::process::exit`・`use std::fs`・`use std::env as std_env`・`std::thread::Builder`（24 行。CLI の実行スレッドのスタック確保）。
+    `src/main.rs`: `std::process::exit`・`use std::fs`・`use std::env as std_env`・`io::stdin`（56・247 行）・`io::stdout`（45 行。5 行の `use std::io::{self, Read, Write};` 経由で、完全修飾の照合には当たらない）・`std::thread::Builder`（24 行。CLI の実行スレッドのスタック確保）。
     `src/cli_capability.rs`: `std::env::var`・`vars`・`current_dir`。`src/capability.rs`: `std::fs`（`use std::fs` を含む）・`std::env::current_dir`・`std::io::stdin`・`stdout`・
     `use std::time::SystemTime`・`SystemTime::now`。`src/module.rs`: `std::fs`・`std::env::current_dir`。`src/sandbox.rs`: `std::env::var`・`current_dir`。
     許可リスト外のファイルの該当は上の項目のものだけで、ほかの production の `std::process`・`std::net`・`std::io::std*`・`use std::{...}` の取り込みは無い（main 968b64f の木で確かめた）。
@@ -1387,7 +1387,7 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
   1. 検査は既存の `tests/ambient_access_audit.rs` を拡張して 1 本に保つ（Q1=A）。ファイル冒頭に、検査項目ごとに守る原則（OS・network・process・clock の項目は原則 2・8、`std::thread` の項目は原則 1・3）と CAP-AT-27 の対応表を置く。
   2. 走査対象を `src/` 配下の全 `*.rs`（サブディレクトリを含む）にする。
   3. test コードの除外を、`#[cfg(test)]` の直後の item が `mod` であるもの（その module の終わりまで）に限る。フィールド・文・関数に付いた `#[cfg(test)]` では走査を打ち切らない。
-  4. 検出パターンを広げる: `std::env::` のすべて（`args`・`set_var` を含む）、`std::fs`、`std::io::stdin`・`stdout`・`stderr`、`std::process`（`exit`・`Command`・`abort`・`id`）、
+  4. 検出パターンを広げる: `std::env::` のすべて（`args`・`set_var` を含む）、`std::fs`、`std::io::stdin`・`stdout`・`stderr`（修飾無しの `io::stdin`・`io::stdout`・`io::stderr` も照合する。Q5=A）、`std::process`（`exit`・`Command`・`abort`・`id`）、
      `std::net`、`std::thread`（`spawn`・`Builder`・`park*`・`sleep`）、`std::time::SystemTime`・`UNIX_EPOCH`、および修飾無しの `SystemTime::now`・`Instant::now`（既存の `SystemTime::now` の照合を残す）。`std::thread::current` は検出しない（`available_parallelism` と同じ扱い）。`use` 文でこれらの module・item を取り込む行も検出する
      （取り込み自体を違反として数え、以降の短縮名の呼びは追わない）。
   5. 許可リストを「ファイル・パターン」の組の単位にし（Q2=A）、各組に理由と原則を書く。許可リストにある組が実際には 1 度も一致しなければ検査を失敗させる（古い許可を残さない）。
@@ -1397,13 +1397,13 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
   7. 動的検査 `safe_default_denies_all_ambient_operations` は変えない。
 - **検査の限界**: 行単位の文字列照合なので、許可した組のファイルの中の同じパターンの別の使い方は区別しない。たとえば `builtin_core.rs` の中で `UNIX_EPOCH.elapsed()`
   （`SystemTime::elapsed` は内部で現在の system clock を読む）を書いても、`builtin_core.rs`×`UNIX_EPOCH` の許可で素通りする。capability から受け取った `SystemTime` に対する
-  `.elapsed()` も、`now` も `std::time` も現れないので、どのファイルでも検出されない。これらはレビューで見る。
+  `.elapsed()` も、`now` も `std::time` も現れないので、どのファイルでも検出されない。`use std::io as x;` のような別名のあとの `x::stdin()` や、`std::io::stdin` 以外の経路での再 export を通した呼びも検出されない（Q5=A でも残る）。これらはレビューで見る。
 - **範囲外**: lib の script 到達経路の `process::exit`・`abort`・`panic!` の検査（manifesto-check-no-host-abort）。構文木による厳密な解析（文字列照合のまま）。
   `.github/`（凍結）の変更。§19 の CAP-AT-27 の目標の文の変更。
 - **受入基準**:
   - **MAS-AT-01**（走査の範囲）: `src/` 配下のサブディレクトリの `*.rs` も走査され、`#[cfg(test)] mod` より前でもフィールド等の `#[cfg(test)]` で打ち切られない。
     確かめ方: 検査関数を小さい入力（文字列）で呼ぶ unit を同じテストファイルに置き、サブディレクトリ相当のパスとフィールドの `#[cfg(test)]` の後ろの違反が検出されることを確かめる。
-  - **MAS-AT-02**（検出パターン）: 実装範囲 4 のパターンと `use` 経由の取り込みが、それぞれ違反として検出される。確かめ方: パターンごとの文字列入力の unit（修飾無しの `SystemTime::now` と、複数行の `use std::time::{ SystemTime }` のあとの `SystemTime::now()` を含む）。
+  - **MAS-AT-02**（検出パターン）: 実装範囲 4 のパターンと `use` 経由の取り込みが、それぞれ違反として検出される。確かめ方: パターンごとの文字列入力の unit（修飾無しの `SystemTime::now` と、複数行の `use std::time::{ SystemTime }` のあとの `SystemTime::now()`、`use std::io;` のあとの `io::stdin()` を含む）。
   - **MAS-AT-03**（許可リスト）: 許可リストの各組に理由と原則があり、一致しない組があると検査が失敗する。確かめ方: unit と、`cargo test --test ambient_access_audit` が main で通ること。
   - **MAS-AT-04**（対応表）: テストファイル冒頭に、検査項目・守る原則・CAP-AT-27 の対応表がある。確かめ方: レビューで読む。
 - **想定の変更規模**: `tests/ambient_access_audit.rs` が +150〜250 行（既存の静的検査の置き換えを含む）。`src/` は 0 行の見込み（実装範囲 6 のとおり、直す必要が出たら fix スライスへ）。
@@ -1429,6 +1429,13 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
     による利便性」「再現可能な検証 ＞ 根拠のない安全性の主張」、本書 §19 CAP-AT-27）。B でも残る検出漏れは上の「検査の限界」に書いた。
     採らなかった案 A（`UNIX_EPOCH` を検出パターンから外す）は、`UNIX_EPOCH.elapsed()` の経路を検出から外し「許可リスト外に ambient な時刻の読み取りが無い」という裏付けを弱めるため、
     原則 2 に反しうるとして採らない（設計 PR の候補では「反しうる選択肢: なし」としていたが、判断役の見立てで改めた）。許可リストを 1 組小さくできる利点は優先順位の表で劣る。
+  - **Q5=A**（修飾無しの `io::stdin`・`io::stdout`・`io::stderr` も照合する）。理由: `src/main.rs:5` の `use std::io::{self, Read, Write};` のあとの 45・56・247 行は完全修飾の照合では検出されず、
+    同じ書き方が許可リスト外のファイルに入ると素通りする。標準入出力は原則 2 が capability として明示に渡すと名指ししている外部効果で、§19 CAP-AT-27 も stdio の直接利用 0 を目標にしているので、
+    この経路を機械チェックの中に置く（原則 2、優先順位の表「明示的な capability ＞ ambient authority による利便性」「再現可能な検証 ＞ 根拠のない安全性の主張」）。呼びの場所で当たり、
+    `capability.rs` の `use std::io::BufRead`・`Write`・`Read` のような trait の取り込みには当たらないので、許可は `main.rs` の組が増えるだけで、修飾無しの `SystemTime::now`・`Instant::now` と同じ形で検査の作りも増えない（原則 8・9）。
+    採らなかった案 B（照合は今のままにし、検査の限界に書く）は、許可リスト外の ambient な stdin・stdout の経路を検査から外したまま CAP-AT-27 の裏付けとして扱うことになり、原則 2 に反しうるため採らない。
+    案 C（`std::io` の module を取り込む `use` を違反として数える）は、マニフェストには反しないが、`use std::io;` は `io::Error`・`io::Result` や trait のためだけにも書かれ、ambient な呼びが無いファイルまで違反になって
+    理由付きの許可が増え、許可リストの意味が薄まる（原則 8・9）ため採らない。
 
 ## 19. 受入基準
 
