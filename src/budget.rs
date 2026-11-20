@@ -799,6 +799,11 @@ pub struct AllocationLedger {
     peak_bytes: u64,
     /// live 上限（`BudgetConfig::max_live_heap_bytes`）。
     limit: u64,
+    /// `BudgetCharged` の accumulator（`BudgetLedger` と共有。fix-heap-charge-audit-notify）。
+    ///
+    /// 確保（`charge` 成功）と解放（`release` で live が減ったとき）を、経路を問わず通知する。
+    /// `None`（単体の台帳）なら通知しない。
+    notifier: Option<crate::audit::SharedBudgetChargeAccumulator>,
 }
 
 impl AllocationLedger {
@@ -809,7 +814,15 @@ impl AllocationLedger {
             live_bytes: 0,
             peak_bytes: 0,
             limit,
+            notifier: None,
         }
+    }
+
+    /// 通知先の accumulator を付けて空の台帳を作る。
+    fn with_notifier(limit: u64, notifier: crate::audit::SharedBudgetChargeAccumulator) -> Self {
+        let mut ledger = Self::new(limit);
+        ledger.notifier = Some(notifier);
+        ledger
     }
 
     /// 新しい [`AllocationId`] を 1 個発番する（§5.2）。
@@ -839,6 +852,17 @@ impl AllocationLedger {
                 if total > self.peak_bytes {
                     self.peak_bytes = total;
                 }
+                if bytes > 0
+                    && let Some(notifier) = &self.notifier
+                {
+                    notifier.borrow_mut().note_heap_charge(
+                        BudgetResource::HeapBytes,
+                        charge_reason_for(BudgetResource::HeapBytes),
+                        bytes,
+                        self.live_bytes,
+                        self.peak_bytes,
+                    );
+                }
                 Ok(())
             }
             Some(_) => Err(ControlStop::BudgetExceeded(BudgetExceeded {
@@ -867,8 +891,24 @@ impl AllocationLedger {
     /// live byte の減少であり、cumulative counter の refund ではない。二重 release で
     /// 0 未満へ回らないよう saturating で引く（§7.1 の禁止は saturating *更新* による
     /// 上限迂回であり、release の 0 下限 clamp は許される）。peak は据え置く。
+    ///
+    /// live が実際に減ったときは、減った分を `BudgetCharged` の accumulator へ通知する
+    /// （`bytes == 0`・live が 0 で減らない二重 release は論理 release ではないので通知しない）。
     pub fn release(&mut self, bytes: u64) {
-        self.live_bytes = self.live_bytes.saturating_sub(bytes);
+        let before = self.live_bytes;
+        self.live_bytes = before.saturating_sub(bytes);
+        let released = before - self.live_bytes;
+        if released > 0
+            && let Some(notifier) = &self.notifier
+        {
+            notifier.borrow_mut().note_release(
+                BudgetResource::HeapBytes,
+                charge_reason_for(BudgetResource::HeapBytes),
+                released,
+                self.live_bytes,
+                self.peak_bytes,
+            );
+        }
     }
 
     /// 現在の live heap byte 数。
@@ -952,7 +992,8 @@ pub struct BudgetLedger {
     /// [`crate::audit::BudgetChargeAccumulator::note_release`] を呼んで集約する。加算は常に走る
     /// 軽量操作で観測挙動を変えない。emission は embedding facade の監査経路だけが
     /// [`Self::drain_budget_charges`]（＝ accumulator.flush）で drain して行う（§7.3 / §8 規則 7）。
-    accumulator: crate::audit::BudgetChargeAccumulator,
+    /// heap 台帳（`AllocationLedger`）と共有する（fix-heap-charge-audit-notify）。
+    accumulator: crate::audit::SharedBudgetChargeAccumulator,
 }
 
 /// cumulative `BudgetResource` を §7.2 の [`crate::audit::BudgetChargeReason`] へ写す（§7.3）。
@@ -997,9 +1038,11 @@ fn charge_reason_for(resource: BudgetResource) -> crate::audit::BudgetChargeReas
 impl BudgetLedger {
     /// config と cancellation token から台帳を作る。
     pub fn new(config: BudgetConfig, cancellation: CancellationToken) -> Self {
+        let accumulator = Rc::new(RefCell::new(crate::audit::BudgetChargeAccumulator::new()));
         Self {
-            heap: Rc::new(RefCell::new(AllocationLedger::new(
+            heap: Rc::new(RefCell::new(AllocationLedger::with_notifier(
                 config.max_live_heap_bytes,
+                Rc::clone(&accumulator),
             ))),
             config,
             committed: BudgetCounters::default(),
@@ -1007,7 +1050,7 @@ impl BudgetLedger {
             peaks: BudgetPeaks::default(),
             cancellation,
             clock: None,
-            accumulator: crate::audit::BudgetChargeAccumulator::new(),
+            accumulator,
         }
     }
 
@@ -1394,7 +1437,7 @@ impl BudgetLedger {
         if committed > 0 {
             // commit 後の累積値を usage_after として渡す（§7.3）。
             let usage_after = self.committed_of(resource);
-            self.accumulator.note_charge(
+            self.accumulator.borrow_mut().note_charge(
                 resource,
                 charge_reason_for(resource),
                 committed,
@@ -2246,23 +2289,10 @@ impl BudgetLedger {
     /// object の最後の execution 内参照が消えたときに live heap を戻す（§5.2 / §7-6）。
     ///
     /// cumulative counter は減らさない。二重 release でも 0 未満へ回らない。
-    /// release 後の live/peak を `BudgetCharged` アキュムレータへ通知する（§7.3）。`bytes == 0`
-    /// は論理 release ではないため通知しない。
+    /// release 後の live/peak の `BudgetCharged` への通知は `AllocationLedger::release` が行う（§7.3）。
     pub fn release_heap(&mut self, bytes: u64) {
+        // 通知は `AllocationLedger::release` が行う（二重に数えない）。
         self.heap.borrow_mut().release(bytes);
-        if bytes > 0 {
-            let (live, peak) = {
-                let heap = self.heap.borrow();
-                (heap.live_bytes(), heap.peak_bytes())
-            };
-            self.accumulator.note_release(
-                BudgetResource::HeapBytes,
-                charge_reason_for(BudgetResource::HeapBytes),
-                bytes,
-                live,
-                peak,
-            );
-        }
     }
 
     /// 集約済み `BudgetCharged` 監査 event を drain して返す（§7.3 / §8 規則 7）。
@@ -2271,13 +2301,15 @@ impl BudgetLedger {
     /// 空にする。embedding facade の監査経路が Terminal 直前に 1 回呼び、返った event を journal
     /// へ `append_normal` する。sink 無し経路は呼ばない（emission ゼロ・挙動不変）。
     pub(crate) fn drain_budget_charges(&mut self) -> Vec<crate::audit::AuditEvent> {
-        self.accumulator.flush()
+        self.accumulator.borrow_mut().flush()
     }
 
     /// 確定済み（256-charge cut 済み・未 drain）`BudgetCharged` が audit drain queue に占める
     /// 推定 byte 数（Phase 6 B-2、§10.2）。進行中の未確定集約は数えない。
     pub(crate) fn audit_finalized_charge_bytes(&self, envelope_overhead: u64) -> u64 {
-        self.accumulator.finalized_queue_bytes(envelope_overhead)
+        self.accumulator
+            .borrow()
+            .finalized_queue_bytes(envelope_overhead)
     }
 
     /// 現在の live heap byte 数（REPL rollback の snapshot 用）。

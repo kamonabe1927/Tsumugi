@@ -630,3 +630,179 @@ fn with_sink_but_missing_execution_id_fails_before_script_work() {
     // Started すら発行していないので sink は空。
     assert!(sink.is_empty());
 }
+
+// --- fix-heap-charge-audit-notify: heap の課金・解放の通知（HCN-AT-01..05） ---
+
+/// script を sink 付きで実行し、全 envelope を返す（heap の上限は `mutate` で変えられる）。
+fn run_heap_audit(
+    text: &'static str,
+    mutate: impl FnOnce(&mut BudgetConfig),
+) -> Vec<tsumugi::AuditEnvelope> {
+    let sink = Arc::new(InMemoryAuditSink::new());
+    let engine = EmbeddingEngine::builder()
+        .audit_sink(sink.clone() as Arc<dyn AuditSink>)
+        .build()
+        .expect("build");
+    let script = link_source(&engine, "heap", text);
+    let linked = engine.link(&script, link_request()).expect("link");
+    let mut ctx = EmbeddingContext::new(&engine);
+    let clock: Arc<dyn MonotonicClock> = Arc::new(FakeClock::new());
+    let mut budget = BudgetConfig::standard(clock.as_ref()).expect("standard budget");
+    mutate(&mut budget);
+    let request = EmbeddingRequest::new(budget, clock)
+        .expect("same domain")
+        .with_execution_id(ExecutionId::new(77u128.try_into().unwrap()));
+    let _ = engine.run_audited(&linked, &mut ctx, request);
+    sink.snapshot()
+}
+
+/// HeapBytes の BudgetCharged の (committed 合計, released 合計, 件数, 最後の peak_after)。
+fn heap_charged_totals(envelopes: &[tsumugi::AuditEnvelope]) -> (u64, u64, usize, Option<u64>) {
+    let (mut committed, mut released, mut count, mut peak) = (0u64, 0u64, 0usize, None);
+    for env in envelopes {
+        if let AuditEvent::BudgetCharged {
+            resource: tsumugi::BudgetResource::HeapBytes,
+            committed_delta,
+            released_delta,
+            peak_after,
+            ..
+        } = &env.event
+        {
+            committed += committed_delta;
+            released += released_delta;
+            count += 1;
+            peak = *peak_after;
+        }
+    }
+    (committed, released, count, peak)
+}
+
+/// Terminal の usage を取り出す。
+fn terminal_usage_of(envelopes: &[tsumugi::AuditEnvelope]) -> tsumugi::BudgetUsage {
+    match &envelopes.last().expect("non-empty").event {
+        AuditEvent::Terminal { usage, .. } => *usage,
+        other => panic!("期待 Terminal, 実際 {other:?}"),
+    }
+}
+
+/// HCN-AT-01 の突合: committed − released = Terminal の live heap、最後の peak_after = Terminal の peak。
+fn assert_heap_reconciles(envelopes: &[tsumugi::AuditEnvelope]) -> (u64, u64) {
+    let (committed, released, count, peak) = heap_charged_totals(envelopes);
+    let usage = terminal_usage_of(envelopes);
+    assert!(count >= 1, "HeapBytes の BudgetCharged が 1 件以上あるはず");
+    assert_eq!(
+        committed - released,
+        usage.live_heap_bytes,
+        "committed({committed}) − released({released}) は Terminal の live_heap_bytes と一致するはず"
+    );
+    assert_eq!(
+        peak,
+        Some(usage.peak_heap_bytes),
+        "最後の HeapBytes の peak_after は Terminal の peak_heap_bytes と一致するはず"
+    );
+    (committed, released)
+}
+
+#[test]
+fn hcn_at_01_heap_charges_reconcile_with_terminal_live_heap() {
+    let envelopes = run_heap_audit(
+        "let xs = [1, 2, 3]\nlet s = \"abc\" + \"def\"\nlet d = {\"a\": [1], \"b\": s}\n\
+         let n = 10\nfn mk(k)\n    return fn() k + n + len(xs) end\nend\n\
+         let f = mk(2)\nprint(f())\nprint(len(d))\n",
+        |_| {},
+    );
+    assert_heap_reconciles(&envelopes);
+}
+
+#[test]
+fn hcn_at_01_single_expression_reconciles() {
+    let envelopes = run_heap_audit("print(len([1, 2, 3] + [4]))\n", |_| {});
+    assert_heap_reconciles(&envelopes);
+}
+
+#[test]
+fn hcn_at_02_lifetime_end_releases_are_counted() {
+    let envelopes = run_heap_audit(
+        "fn work()\n    let xs = [1, 2, 3, 4]\n    let s = \"hello\" + \" world\"\n    return len(xs) + len(s)\nend\nprint(work())\nprint(work())\n",
+        |_| {},
+    );
+    let (_, released) = assert_heap_reconciles(&envelopes);
+    assert!(
+        released > 0,
+        "寿命終了の release が released_delta に入るはず"
+    );
+}
+
+#[test]
+fn hcn_at_03_no_double_counting_for_shrink_and_frame_release() {
+    // retrack の縮小（pop）。
+    let envelopes = run_heap_audit(
+        "let xs = [1, 2, 3, 4, 5, 6]\npop(xs)\npop(xs)\npush(xs, 9)\nprint(len(xs))\n",
+        |_| {},
+    );
+    assert_heap_reconciles(&envelopes);
+    // frame・try の heap 課金の戻し。
+    let envelopes = run_heap_audit(
+        "fn g(n)\n    let t = [n, n]\n    return len(t)\nend\n\
+         try\n    let u = [1, 2]\n    print(g(1))\n    let z = 1 / 0\ncatch err\n    print(\"caught\")\nend\nprint(g(2))\n",
+        |_| {},
+    );
+    assert_heap_reconciles(&envelopes);
+}
+
+#[test]
+fn hcn_at_04_failed_charge_is_not_notified() {
+    // Tracked::new 経由（大きな List の確保）で上限超過。
+    let envelopes = run_heap_audit(
+        "let a = [1, 2, 3]\nlet b = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] + a\nprint(len(b))\n",
+        |b| b.max_live_heap_bytes = 2_000,
+    );
+    assert!(matches!(
+        envelopes.last().map(|e| &e.event),
+        Some(AuditEvent::Terminal {
+            outcome: TerminalOutcome::BudgetExceeded(_),
+            ..
+        })
+    ));
+    assert_heap_reconciles(&envelopes);
+    // 変数 cell（new_via_handle）経由: baseline の直上の上限で let を重ね、cell の確保（32 byte）で超過させる。
+    let envelopes = run_heap_audit(
+        "let a = 1\nlet b = 2\nlet c = 3\nlet d = 4\nlet e = 5\nlet f = 6\nlet g = 7\nlet h = 8\n",
+        |b| b.max_live_heap_bytes = 1600,
+    );
+    assert!(matches!(
+        envelopes.last().map(|e| &e.event),
+        Some(AuditEvent::Terminal {
+            outcome: TerminalOutcome::BudgetExceeded(_),
+            ..
+        })
+    ));
+    assert_heap_reconciles(&envelopes);
+}
+
+#[test]
+fn hcn_at_05_heap_notifications_cut_every_256_charges() {
+    // 確保・解放が 256 回を超える script では、確定済みの HeapBytes event が複数件に分かれ、
+    // どの 1 件の charge_count も 256 を超えない。
+    let envelopes = run_heap_audit(
+        "let i = 0\nwhile i < 200\n    let t = [i, i]\n    i = i + 1\nend\nprint(i)\n",
+        |_| {},
+    );
+    let counts: Vec<u64> = envelopes
+        .iter()
+        .filter_map(|e| match &e.event {
+            AuditEvent::BudgetCharged {
+                resource: tsumugi::BudgetResource::HeapBytes,
+                charge_count,
+                ..
+            } => Some(*charge_count),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        counts.len() >= 2,
+        "確定 event が複数件に分かれるはず: {counts:?}"
+    );
+    assert!(counts.iter().all(|c| *c <= 256), "{counts:?}");
+    assert_heap_reconciles(&envelopes);
+}

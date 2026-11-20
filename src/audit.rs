@@ -928,6 +928,13 @@ pub struct BudgetChargeAccumulator {
     finalized_event_bytes: u64,
 }
 
+/// [`BudgetChargeAccumulator`] の共有ハンドル。`BudgetLedger` と heap 台帳
+/// （`AllocationLedger`）が同じ集約器へ書く（fix-heap-charge-audit-notify）。
+///
+/// borrow は 1 回の通知・1 回の drain の中で閉じる。borrow を持ったまま `Value` を drop しない。
+pub(crate) type SharedBudgetChargeAccumulator =
+    std::rc::Rc<std::cell::RefCell<BudgetChargeAccumulator>>;
+
 /// 進行中の 1 (resource, reason) グループ（§7.3）。
 #[derive(Debug)]
 struct ChargeGroup {
@@ -988,29 +995,29 @@ impl BudgetChargeAccumulator {
         committed_delta: u64,
         usage_after: u64,
     ) {
-        match self.position(resource, reason) {
-            Some(idx) => {
-                let g = &mut self.groups[idx];
-                g.committed_delta = g.committed_delta.saturating_add(committed_delta);
-                g.usage_after = usage_after;
-                g.charge_count = g.charge_count.saturating_add(1);
-                if g.charge_count >= CHARGE_FLUSH_THRESHOLD {
-                    let group = self.groups.remove(idx);
-                    self.push_finalized(group.into_event());
-                }
-            }
-            None => {
-                self.groups.push(ChargeGroup {
-                    resource,
-                    reason,
-                    committed_delta,
-                    released_delta: 0,
-                    usage_after,
-                    peak_after: None,
-                    charge_count: 1,
-                });
-            }
-        }
+        self.note(resource, reason, committed_delta, 0, usage_after, None);
+    }
+
+    /// live heap の確保を 1 件通知する（§7.3、fix-heap-charge-audit-notify）。
+    ///
+    /// [`Self::note_charge`] と同じ集約規則で、`usage_after` に確保後の live、`peak_after` に
+    /// 確保後の peak を記録する（live heap 系）。
+    pub fn note_heap_charge(
+        &mut self,
+        resource: BudgetResource,
+        reason: BudgetChargeReason,
+        committed_delta: u64,
+        usage_after: u64,
+        peak_after: u64,
+    ) {
+        self.note(
+            resource,
+            reason,
+            committed_delta,
+            0,
+            usage_after,
+            Some(peak_after),
+        );
     }
 
     /// heap release を 1 件通知する（§7.3）。
@@ -1026,12 +1033,35 @@ impl BudgetChargeAccumulator {
         usage_after: u64,
         peak_after: u64,
     ) {
+        self.note(
+            resource,
+            reason,
+            0,
+            released_delta,
+            usage_after,
+            Some(peak_after),
+        );
+    }
+
+    /// charge / release の共通の集約。256 charge 到達で確定 buffer へ切り出す。
+    fn note(
+        &mut self,
+        resource: BudgetResource,
+        reason: BudgetChargeReason,
+        committed_delta: u64,
+        released_delta: u64,
+        usage_after: u64,
+        peak_after: Option<u64>,
+    ) {
         match self.position(resource, reason) {
             Some(idx) => {
                 let g = &mut self.groups[idx];
+                g.committed_delta = g.committed_delta.saturating_add(committed_delta);
                 g.released_delta = g.released_delta.saturating_add(released_delta);
                 g.usage_after = usage_after;
-                g.peak_after = Some(peak_after);
+                if peak_after.is_some() {
+                    g.peak_after = peak_after;
+                }
                 g.charge_count = g.charge_count.saturating_add(1);
                 if g.charge_count >= CHARGE_FLUSH_THRESHOLD {
                     let group = self.groups.remove(idx);
@@ -1042,10 +1072,10 @@ impl BudgetChargeAccumulator {
                 self.groups.push(ChargeGroup {
                     resource,
                     reason,
-                    committed_delta: 0,
+                    committed_delta,
                     released_delta,
                     usage_after,
-                    peak_after: Some(peak_after),
+                    peak_after,
                     charge_count: 1,
                 });
             }
