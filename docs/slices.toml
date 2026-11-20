@@ -413,8 +413,8 @@ order      = 9
 # どの部分を満たせば完了かは、各スライスの spec 小節「受入基準（eN が満たす部分）」に書く。
 # e1〜e3 は done。e4 は分割の PR #250 で設計し、e3 が done になったあと設計 PR（design_pr）で e2a〜e3 の実装に合わせて
 # 小節を具体化して ready にした。そのとき #250 の受入基準 6 項目（TEC-AT-01..03・05..07）が loop-runbook §14.1 の
-# 5 項目を超えるため、判断の候補（design_pr の Q1）の推奨案 A に沿って TEC-AT-03 を acceptance から外し、全 sub-slice
-# 共通の完了条件として満たすことにした。
+# 5 項目を超えるため、TEC-AT-03 を acceptance から外し、全 sub-slice 共通の完了条件（e4 の done の条件のまま）として
+# 満たすことにした（判断役が選択（PR #464）、Q1=A）。
 [[slice]]
 id         = "tree-expr-continuation-e1"
 title      = "tree evaluator の式レベル continuation e1：文レベルのユーザー関数呼び出しを driver 上で実行し関数本体の文/反復境界で slice yield（強制 yield フック）"

@@ -2123,7 +2123,7 @@ builtin・host のどれに解決されるかは静的には決まらない（us
 > `CallTarget` を最初の段で 1 回だけ決める）。それに合わせて、下の「具体化（e4 を ready にした設計 PR）」に、対象の呼び出しの
 > 決め方、同期経路と同じ順序、保存する状態、yield 可能点、終了経路、受入基準の確かめ方、「想定の変更規模」を書き足した。
 > e3 の設計 PR #287 が残した「`map` / `filter` / `each` 自身の引数の段階評価」もここで決めた。受入基準の ID の数は、
-> 下の「受入基準の ID の数」に書いた判断の候補（この設計 PR の Q1）の推奨案 A に沿って書いた。
+> 判断役が Q1=A を選んだ（PR #464）。内容と理由は下の「受入基準の ID の数」。
 
 - **範囲**:
   - poll 経路で、`map` / `filter` / `each` の要素ループを明示 frame の反復に載せる（上の小節
@@ -2204,12 +2204,23 @@ builtin・host のどれに解決されるかは静的には決まらない（us
 - **TEC-AT-04 を持たない理由**: callback の深度検査は上の 4 の段で `call_fn_value` と同じ関数・同じ順序で行い、callback 本体は
   e1 が TEC-AT-04 を固定した driver 上の Call frame で実行する。深度の上限を超える入れ子の callback は、下の TEC-AT-01（全体）の
   エラー経路の script（callback の中から同じ `map` を呼んで `call_depth_limit` に達する）で同期経路との一致として確かめる。
-- **受入基準の ID の数（この設計 PR の判断の候補 Q1。推奨案 A に沿って書いた）**: #250 の割り当て（TEC-AT-01〜03・05〜07 の
-  6 項目）は [開発ループ手順書](loop-runbook.md) §14.1 の「受入基準は 5 項目以内」を超える。推奨案 A では、TEC-AT-03（e4 分。
-  既存テスト無改変で緑）を `acceptance` の ID から外し、全 sub-slice 共通の完了条件（既存テストは無改変、`cargo test
-  --all-features` が緑）として満たす。TEC-AT-03 の本文の観測（同期経路と terminal まで poll する入口の観測値が不変）は、共通の
-  完了条件と下の TEC-AT-01（全体）の `live_heap` / `peak_heap` の比較で確かめる。判断役が別の案を選んだら、この節と
-  `slices.toml` をその案に合わせて直す。
+- **受入基準の ID の数（判断役が選択（PR #464）、Q1=A）**: #250 の割り当て（TEC-AT-01〜03・05〜07 の 6 項目）は
+  [開発ループ手順書](loop-runbook.md) §14.1 の「受入基準は 5 項目以内」を超える。e4 は 1 スライスのまま、TEC-AT-03（e4 分。
+  既存テスト無改変で緑）を `acceptance` の ID から外し、全 sub-slice 共通の完了条件で満たす。
+  - **e4 の done の条件として効き続けること**: TEC-AT-03 の ID を外しても、全 sub-slice 共通の完了条件（`cargo fmt --check`・
+    `cargo clippy --all-targets --all-features -- -D warnings`・`cargo test --all-features` が緑で既存テストは無改変、同期経路の
+    コードパスを変えず、同期経路と terminal まで poll する入口の fuel・heap・エラー行・trace・stdout・exit code が現状と一致）は
+    e4 の done の条件のままである。e4 の実装 PR は、既存の `tests/`・unit test を 1 つも変えずに緑であることを確かめて PR 本文に
+    書く。上の「受入基準（e4 が満たす部分）」の TEC-AT-03（e4 分）は、この共通の完了条件として満たす。観測値の一致は、加えて
+    下の TEC-AT-01（全体）の `live_heap` / `peak_heap` の比較でも確かめる。
+  - **理由**: TEC-AT-03 の本文は共通の完了条件の第 1・第 2 項（「TEC-AT-03 のその sub-slice 分」と明記）と同じ内容で、ID を
+    外しても確かめる内容は減らず、CI と TEC-AT-01（全体）の比較で再現可能に裏付けられる（マニフェスト原則 9）。e4 に固有の
+    検証（TEC-AT-01・02・05・06・07）はすべて残り、callback 途中の yield を跨ぐ transaction 不変（TEC-AT-05、原則 6）も e4 で
+    確かめる。約 400 行・仕組み 1 つの変更を 1 スライスに保ち、機構と組み合わせテストが同じ PR で入る（原則 8、手順書 §14.1）。
+  - **採らなかった案**: e4a / e4b への分割（B）は、e4b がテストだけのスライスになり、e4a の done の時点で e1〜e4 を跨ぐ組み合わせが
+    未検証のまま機構だけが入るうえ、設計・実装の往復が 2 組かかる。TEC-AT-05 を外す案（C）は、TEC-AT-05 本文が明示する「callback
+    途中」の yield を確かめるスライスが無いまま tree-expr-continuation が done になりうるため、マニフェスト（原則 6・9）に反しうる
+    （e3 が TEC-AT-05 を外せたのは式 frame が e2a と同じ frame 種別だったからで、e4 は新しい反復の状態と受け渡し先を足す）。
 - **受入基準の確かめ方（e4 が満たす部分）**:
   - **TEC-AT-07**: `tests/engine_api.rs` に `map` / `filter` / `each` それぞれの script（callback 本体が `print` と `while` を持つ、
     callback が lambda・名前付き関数・captured を使う closure のもの）を置き、強制 yield フックで要素の境界と callback 本体の
@@ -2247,7 +2258,7 @@ builtin・host のどれに解決されるかは静的には決まらない（us
   - e2b は見積もり約 385 行に対し実績 491 行（PR #280）、e3 は約 650 行に対し 691 行（PR #296）だった。e2b の比率で上振れしても
     約 510 行で 1000 行に収まる。
   - 触る仕組みは tree evaluator の call の評価 1 つ（e3 と同じく、`src/builtin.rs` は builtin の挙動を変えず、検査と結果の組み立ての
-    境目を分けるだけ）。受入基準は推奨案 A で 5 項目。
+    境目を分けるだけ）。受入基準は 5 項目（PR #464 の Q1=A）。
 
 ### Slice 4: cancellation・pause・transaction
 
