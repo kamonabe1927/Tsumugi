@@ -29,6 +29,7 @@ PM は spec も実装も自分で書かない。各役を Agent ツールで**�
 - `gate` が `ng` の PR: loop-guard §4.3 のとおり止める
 - `pending_decisions`: 判断役（`model: "fable"`、loop-decide）を起動し、決まった内容を書いた役に反映させる
 - `stuck_counts` が 2 以上: そのスライスを `blocked` にする状態整理の PR を出す
+- CI のジョブが runner 起因で取り消された PR（`conclusion` が `cancelled`、runner が割り当てられず step が 0 件）: 手順書 §6.4 のとおり判定し、`gh api -X POST repos/kamonabe1927/Tsumugi/actions/runs/<run_id>/rerun-failed-jobs` で再実行する（同じ commit につき 2 回まで、`run_attempt` で数える）。`failure` や step が始まってからの取り消しが混じれば再実行せず「CI が赤」として扱う。`state.py` は判定しないので `gh api` で見る
 - CI が赤・`main` と競合・`gate` が `findings` の PR: 手順書 §6.1 の 6 のとおり
 - `review` または `gate` が `null` の PR（最新 commit を名指ししたものが無い）: `loop:running` を付け、
   - review が無ければレビュー役（`model: "opus"`、loop-review）を起動する
@@ -36,7 +37,7 @@ PM は spec も実装も自分で書かない。各役を Agent ツールで**�
   - 終わったら `loop:running` を外す。1 回で回すのは PR 1 本まで
 - `review` が `findings` の PR: 指摘が機械的なら書いた役に直させ（`loop:design` は設計役 opus、`loop:impl` は実装役 sonnet）、新しいレビュー役で再レビューする（往復 5 回まで。数え直しは手順書 §13）。選択肢のある指摘は手順書 §7 の判断にかける
 - `merge_candidate` が true の PR（1 回で 1 本まで）: loop-guard §6 の全条件を改めて確かめる
-  - CI: `gh api repos/kamonabe1927/Tsumugi/commits/<head_sha>/check-runs` と `.../commits/<head_sha>/status`（`Frozen guard (status)` を含む）がすべて成功
+  - CI: `gh api repos/kamonabe1927/Tsumugi/commits/<head_sha>/check-runs` と `.../commits/<head_sha>/status`（`Frozen guard (status)` を含む）がすべて成功。runner 起因の取り消しだけで満たさなければ、手順書 §6.4 のとおり再実行し、成功してからマージする
   - マージ可能: `gh api repos/kamonabe1927/Tsumugi/pulls/<番号> --jq .mergeable` が true
   - マニフェストの改訂なら、参照している issue が開いていて `manifesto-change` が付いていること
   - 満たせば `gh api -X PUT repos/kamonabe1927/Tsumugi/pulls/<番号>/merge -f merge_method=merge -f sha=<head_sha>` でマージし、loop-guard §6 の一言を残す（sha が違えば失敗するので、そのときは次の回に回す）
