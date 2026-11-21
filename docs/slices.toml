@@ -531,12 +531,13 @@ order      = 25
 [[slice]]
 id         = "F-2b"
 title      = "FuelSchedule と Charge opcode の土台（課金点・課金値は版 1 のまま、観測不変）"
-status     = "todo"
+status     = "ready"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "F-2b 実装スライス（`FuelSchedule` と `Charge` opcode の土台、課金点・課金値は版 `1` のまま）" }
 acceptance = ["F2b-AT-01..03"]
 depends_on = ["F-2a", "tree-expr-continuation-e4"]
+design_pr  = 474
 order      = 26
 
 # 見積もり: src/ 約 550〜750 行、触る仕組みは fuel の課金点 1 つ、受入基準 5（旧 F2-AT-01..08・01b をまとめた。Q2=A）。

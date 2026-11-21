@@ -2875,11 +2875,60 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   - **F2b-AT-01**: 既存の fuel の期待値（F1-AT-*・`tests/differential.rs` の `assert_fuel_parity`・integration の
     境界）が無改変で緑。両 engine の必要 fuel・上限到達の line が F-2b の前後で変わらない。
   - **F2b-AT-02**: compiler がループ反復・呼び出しの位置に `Charge` を出し、最適化で削除・併合しない。verifier は
-    未知の種別の `Charge` を拒否する（`src/compiler.rs`・`src/verifier.rs` の unit test）。
+    bytecode に出てはならない種別（builtin callback・host function 呼び出し）の `Charge` を拒否する（Q2 = A。
+    F-2b の設計 PR #474 で「未知の種別」から書き直した）（`src/compiler.rs`・`src/verifier.rs` の unit test）。
   - **F2b-AT-03**: `tests/defensive_vm.rs` の停止性ケース（`Jump(0)` 自己ループ・後方 `Loop` 迂回・raw `Call`
     再帰）が従来どおり有限停止する。
 - **想定の変更規模**: `src/` 約 350 行、触る仕組みは fuel の課金点 1 つ（両 engine の課金を同じ API へ寄せる）、
   受入基準 3。
+
+**ready にする時点の注記**（F-2b の設計 PR #474。main d1c7d02 で確かめた。上の範囲は変えず、受入基準は F2b-AT-02
+だけを Q2 = A に合わせて書き直した。ほかは実装で読み違えやすい点だけを補う）:
+
+- 置き換える課金点は、tree が `src/eval.rs` の `count_step` 呼び出し 7 か所（`while` / `for` の反復 2・user function
+  呼び出し 1（同期経路と式 frame が共有する `begin_user_call`）・host function 呼び出し 4（`prepare_call` の
+  host 経路、式 frame の `CallTarget::Host`・`CallTarget::Cooperative`、`eval_cooperative_call`））と `src/builtin.rs` の callback 前処理 1 か所、VM が `OpCode::Loop`・`OpCode::PrepareCall`・
+  `Vm::call_fn_value` の 3 か所である。tree の host function 呼び出し（embedder が登録した関数）は版 `1` では
+  user function 呼び出しと同じ 1 を課金する。`FuelSchedule` では別の種別にする（Q1 = A。下の判断の記録）。
+- compiler は `Loop` を出すすべての位置（ループ末尾の back-edge と、`while` の `continue` が出す `Loop`）の直前に、
+  その `Loop` と同じ line（ループ文の行）で `Charge` を出す。`PrepareCall` についても直前に同じ line で出す。どの
+  jump も `Charge` と `Loop` / `PrepareCall` の間へ飛び込まない（`Charge` を飛ばすと F2b-AT-01 の観測が変わる）。
+- `Loop`・`PrepareCall` は課金しなくなる。`PrepareCall` の深度検査はそのまま残す。手組みの bytecode で `Charge` を
+  省いた `Loop` は fuel を課金せず、instruction watchdog の (W1) で止まる（`Jump(0)` と同じ扱い。停止性は watchdog が
+  担う、[次期意味論・実装決定](semantic-decisions.md) §17.7）。`tests/defensive_vm.rs` の `backward_loop_halts_with_limit`
+  は `limit` での停止を確かめるだけなので assert は変わらないが、「`Loop` は fuel を課金する」という doc comment は
+  直す。正規 compiler 出力の「watchdog の tick 数は fuel 課金数 + root frame 数を超えない」不変条件は、各 `Loop` の
+  直前に `Charge` があることで保たれる。
+- 文書: [次期意味論・実装決定](semantic-decisions.md) §17.7.3 の fuel の論理課金点 (F1)・(F2) の記述（`Loop` 命令・
+  `PrepareCall` で課金）を「直前の `Charge`」に合わせ、本仕様 §4.1 の後の段落・`src/vm.rs` の `count_step` の doc を
+  合わせる。逸脱一覧の §4.1 の行は F-2c まで残す（F-2b の後も課金は版 `1` のまま）。
+- `Charge` の payload は `FuelSchedule` と共有する Rust の enum にする（Q2 = A。下の判断の記録）。上の範囲の
+  「verifier は payload が既知の種別であることを検査する」は、Q2 = A の enum では既知であることが型で決まるため、
+  F2b-AT-02 と同じく「bytecode に出てよい種別（ループ反復・user function 呼び出し）以外の `Charge`（builtin
+  callback・host function 呼び出し）を拒否する」と読む。
+
+**判断の記録**（F-2b の設計 PR #474 の判断の候補。判断役が選択（PR #474）、Q1・Q2=A）:
+
+- **Q1 = A（`FuelSchedule` の種別を今の課金点の種類ごとに 4 つにする）**: ループ反復・user function 呼び出し・
+  host function 呼び出し・builtin callback の 4 種別で、版 `1` ではどれも 1。tree の host function の課金 4 か所は
+  user function の課金（`begin_user_call`）と別の位置にある。§4.1 は invocation 5 と host call attempt 10 を別の
+  charge point とし、embedder が登録した host function をどちらに数えるかは spec に無い。A は種別を今の課金点に
+  1 対 1 で付けるだけなので、F-2b がその未決の対応を先に決めず、F-2c は値を変えるだけで済む。版 `1` の値は
+  どれも 1 なので、F2b-AT-01 の観測不変は既存のテストが無改変で緑であることで確かめられる（[マニフェスト](manifesto.md)
+  原則 5・9）。host function を invocation と host call のどちらに数えるかはこの判断では決めず、F-2c で決める。
+  採らなかった案: B（user function と host function を 1 つの「呼び出し」種別にまとめる）は、「host function は
+  invocation と同じ」という対応を F-2b が暗に先取りし、F-2c で分けるときに課金点を探し直して種別を付け直す変更が
+  増える（原則 8・9）。
+- **Q2 = A（`Charge` の payload は `FuelSchedule` と共有する Rust の enum、verifier は bytecode に出てはならない
+  種別を拒否する）**: 既存の opcode の payload は型付き（`CallBuiltin(BuiltinId, usize)`・`SetIndex(MutationTarget)`
+  など）で、bytecode の直列化は無いので、整数コードにする理由になる読み込み経路が無い。enum なら存在しない種別を
+  作れず、VM の dispatch に整数からの変換と再検査の分岐が要らない（原則 8）。verifier が builtin callback・host
+  function 呼び出しの種別の `Charge` を拒否するので、手組み bytecode での二重課金や、Q5 = A（callback は
+  `call_fn_value` から直接課金）と食い違う課金経路が gate で止まる（原則 5、[次期意味論・実装決定](semantic-decisions.md)
+  §17.7 層2）。bytecode に出てよいのはループ反復と user function 呼び出しの 2 種別である。F2b-AT-02 の「未知の種別」は
+  この意味に書き直した。確かめる中身（verifier が不正な `Charge` を拒否する unit test）は減らない（原則 9）。
+  採らなかった案: B（整数の種別コードにし、verifier が既知のコードかを検査する）は、受入基準の文面を変えないことだけが
+  利点で、dispatch 側に変換と防御的な再検査を足し、既存の opcode の形ともそろわない（原則 8）。
 
 ##### F-2c 実装スライス（§4.1 の主要 charge point への移行・`fuel_accounting_revision` 1 → 2・既定 `total_fuel`）
 
