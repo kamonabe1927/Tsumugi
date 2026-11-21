@@ -517,13 +517,14 @@ order      = 24
 [[slice]]
 id         = "F-2a"
 title      = "fuel_accounting_revision の field・会計版の config error の heap / fuel の区別・ExecutionStarted の field と audit schema version 2（版 1 のまま）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "F-2a 実装スライス（会計版の field と config error の区別、版は `1` のまま）" }
 acceptance = ["F2a-AT-01..03"]
 depends_on = ["F-1"]
 design_pr  = 470
+impl_pr    = 471
 order      = 25
 
 # 見積もり: src/ 約 350 行、触る仕組みは fuel の課金点 1 つ（両 engine の課金を FuelSchedule へ寄せる。観測不変）、受入基準 3。

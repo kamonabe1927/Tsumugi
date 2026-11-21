@@ -48,7 +48,6 @@ host call 開始前に `BudgetCharged` を flush しない行（loop:drift #342 
 
 | 未実装範囲 | 対象の節(§) | 備考 |
 |---|---|---|
-| audit の schema version 2（§7.1）。`AuditEnvelope.schema_version` は `1` のままで、`ExecutionStarted` と `BudgetConfig`（`src/budget.rs`・`src/audit.rs`）に `fuel_accounting_revision` が無い | §7.1/§7.2/§9.2 | F-2a（[実行予算・協調実行仕様](execution-control.md) §14） |
 | sink 必須化（§1.1、`ConfigError::AuditSinkRequired`。opt-in を既定から外す） | §1.1 | CLI 側の sink 構築が整う後続スライスへ延期 |
 | 監査設定の公開 setter（`EngineBuilder::audit_redaction_policy` / `EngineBuilder::audit_budget`）と `ConfigError` への `AuditConfigError` 接続。現状は `#[doc(hidden)]` のテスト用 shim（`audit_redaction_policy_for_test` / `audit_budget_for_test`、不正 budget は panic）だけ | §1.1/§9.1/§10.2 | sink 必須化スライスへ延期 |
 | strict deterministic CBOR。現 `encoded_bytes` は naive 推定で後で差し替え可能に隔離 | §9.2 | — |

@@ -60,7 +60,6 @@ handle 経路を §3 の `ExecutionRequest` と組み込みAPI仕様 §8 の `Ex
 | VM の式レベル continuation（VM の slice yield と continuation parity） | §9.3 | Slice 6（VM が experimental の間） |
 | script / host の明示 yield（`YieldReason::ExplicitYield`）。型はあるが trigger を配線していない | §9 | — |
 | §4.1 課金表の主要 charge point（statement / expression / operation 単位）への移行。現状の fuel は文・反復・呼び出しと一部 builtin の per-element だけ（課金は §3.1 の版 `1` 相当） | §4.1 | F-2b（土台）・F-2c（移行） |
-| `BudgetConfig.fuel_accounting_revision` の field と、heap/fuel のどちらの会計版が不正かを区別できる config error。`BudgetConfig`（`src/budget.rs`）に field が無く、会計版の不正は単一 variant の `UnsupportedAccountingRevision(u32)`（heap だけ）で返す（目標は §3.1 の 2 つの variant） | §3/§3.1 | F-2a |
 | reservation オブジェクト（§7 の `reserve` が返し `commit(actual)` / `refund()` で settle する型）と、未 settle の drop を release build でも `InternalFailure(UnsettledReservation)` にする規則 7。現状の `Budget::reserve_all` は `Result<(), ControlStop>` を返し、`commit(resource, reserved, actual)`・`refund(resource, reserved)` に量を渡す形で、未 settle は検出しない。`actual > reserved` は規則 3 の拒否でなく `debug_assert` と `min` による丸めで扱う | §7 | budget-reservation-settle |
 | deadline の timer による waker の通知。§9.1 は deadline timer が状態を ready にした後で waker を呼び、host の busy-poll を不要とするが、deadline は poll の checkpoint（`src/engine.rs` の `checkpoint_terminal`）でしか観測せず、deadline に waker を結ぶ timer が無い（`src/engine.rs`・`src/scheduler.rs`・`src/host_pending.rs`・`src/budget.rs`）。`HostCallPending`・`AdmissionQueued` で待つ handle は、host が poll しない限り deadline の到達に気づけない。admission の昇格の wake（逸脱一覧の D-115 の行）とは別。loop:drift #429 D-138 | §9.1 | 未設計 |
 
