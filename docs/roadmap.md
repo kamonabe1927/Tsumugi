@@ -39,7 +39,7 @@
 | ID | 一行概要 | 状態 | owning spec |
 |---|---|---|---|
 | REV-001 | 共有 DAG の比較・表示・join・sort を有限化（指数化対策は完結、全順序化は REV-017 で実装済み・revision 0.21。残りは包括 budget 側の Phase 6 伝播で、うち `BudgetCharged`・host-call lifecycle 3 event〔fs builtin の範囲〕・yield/resume 2 event emission は実装済み） | 🟡 | [実行予算・協調実行仕様](execution-control.md) |
-| REV-015 | source/string/heap/I-O/bulk work の包括 budget・deadline・cancel（budget 本体は tree/VM 完了。fuel の課金点は F-1 で tree/VM を揃えた。§4.1 課金表の主要 charge point への移行〔F-2〕は設計確定〔PR #241〕だが前段 `tree-expr-continuation`〔式レベル continuation・Slice 3 PR-e、e1〜e4 に分割〕待ち（e1・e2a・e2b・e3 は done、e4 は設計済み todo）、CAP-AT-17 の source/import 本数 N 境界受入試験は tree 経路で完了。残りは Phase 6 への伝播。うち `BudgetCharged`・host-call lifecycle 3 event〔fs builtin の範囲〕・yield/resume 2 event（`Yielded` / `Resumed`）emission は tree backend で実装済み） | 🟡 | [実行予算・協調実行仕様](execution-control.md) |
+| REV-015 | source/string/heap/I-O/bulk work の包括 budget・deadline・cancel（budget 本体は tree/VM 完了。fuel の課金点は F-1 で tree/VM を揃えた。§4.1 課金表の主要 charge point への移行〔F-2〕は設計確定〔PR #241〕だが前段 `tree-expr-continuation`〔式レベル continuation・Slice 3 PR-e、e1〜e4 に分割〕は完了（e1〜e4 がすべて done。F-2 は状態整理 PR で ready にする）、CAP-AT-17 の source/import 本数 N 境界受入試験は tree 経路で完了。残りは Phase 6 への伝播。うち `BudgetCharged`・host-call lifecycle 3 event〔fs builtin の範囲〕・yield/resume 2 event（`Yielded` / `Resumed`）emission は tree backend で実装済み） | 🟡 | [実行予算・協調実行仕様](execution-control.md) |
 | REV-007 | `ExecutionContext` の session state と run meter を request ごとに分離 | ⬜ | [実行予算・協調実行仕様](execution-control.md) |
 | REV-008 | 全 stable execution へ transaction を適用（REPL は AUD-024 で完了） | 🟡 | [組み込みAPI仕様](embedding-api.md)・[実行予算・協調実行仕様](execution-control.md) |
 | REV-010 | 32-bit target の `i64 as usize` wrap を `try_from`/checked へ | ⬜ | [実行予算・協調実行仕様](execution-control.md) |

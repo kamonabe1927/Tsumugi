@@ -477,13 +477,14 @@ order      = 15
 [[slice]]
 id         = "tree-expr-continuation-e4"
 title      = "tree evaluator の式レベル continuation e4：map / filter / each の要素ループを明示反復にし callback 本体・要素境界を yield 可能に"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 3"
 spec       = { doc = "docs/execution-control.md", section = "tree-expr-continuation-e4 実装スライス（`map` / `filter` / `each` の段階実行）" }
 acceptance = ["TEC-AT-01..02", "TEC-AT-05..07"]
 depends_on = ["tree-expr-continuation-e3"]
 design_pr  = 464
+impl_pr    = 467
 order      = 20
 
 # tree-expr-continuation が呼び出し・反復を必ず yield 可能点にした後、callback なし bulk builtin
