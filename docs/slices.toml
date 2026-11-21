@@ -1272,4 +1272,5 @@ status     = "ready"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-dangling-final-symlink-write 実装スライス（root 外を指す dangling final symlink への `write_file` / `append_file` の拒否を試験で固定し、文書を試験の範囲に合わせる）" }
 acceptance = ["DSW-AT-01..04"]
+design_pr  = 472
 order      = 117
