@@ -1257,3 +1257,19 @@ acceptance = ["TWC-AT-01..04"]
 design_pr  = 449
 impl_pr    = 450
 order      = 115
+
+# needs-design #433（loop:drift #429 の D-124 が審査で manifesto 疑い、手順書 §12.3 の 4）への kamonabe の判断 (a)（2026-11-17）から作った fix。
+#   root 外を指す dangling final symlink への write_file / append_file の拒否を OS adapter と tree・VM の builtin の試験で固定し、同じ PR で
+#   design.md・language-spec.md の文と src/capability.rs のコメントを試験の範囲に合わせる。見積もり: src/ はコメントだけ ±10 行（コード 0 行）、
+#   試験 +120〜220 行、触る仕組みは OS adapter の final symlink の扱い 1 つ、受入基準 4。parent は dangling symlink を受入試験化する AUD-020。
+# order は loop-runbook §12.3 の 1 の既定（`すり抜け` の印が無い D-N から作るもの: 今あるすべての ready より後。今 ready は無い）と、
+#   §8 の「それ以外」の既定（コードは §8.3 契約 4・5 どおり拒否しており不具合の報告ではない: すべてのスライスより後）の両方を満たす 117 に置いた。
+#   §6.3 の分類は非該当（spec が拒否する操作は main でも拒否されており、足りないのは試験と文書）。
+[[slice]]
+id         = "fix-dangling-final-symlink-write"
+title      = "root 外を指す dangling final symlink への write_file / append_file の拒否を OS adapter と tree・VM の builtin の試験で固定し、design.md・language-spec.md の文と capability.rs のコメントを lstat による拒否に合わせる（capability-model §8.3 契約 4・5、issue #433）"
+status     = "ready"
+parent     = "AUD-020"
+spec       = { doc = "docs/capability-model.md", section = "fix-dangling-final-symlink-write 実装スライス（root 外を指す dangling final symlink への `write_file` / `append_file` の拒否を試験で固定し、文書を試験の範囲に合わせる）" }
+acceptance = ["DSW-AT-01..04"]
+order      = 117
