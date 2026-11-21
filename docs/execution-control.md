@@ -2816,6 +2816,9 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   従う。呼び出しも反復も含まない部分式は式 frame を積まないので、その区間の expression / operation の課金は
   区間を抜けた最初の yield 可能点まで slice を超えてよい（区間の AST node 数で有界）。新しい yield 可能点は作らない。
 - 「List / Dict の深度の読み直し」（§4.1）は版 `1` に含まれる（§3.1）。F-2 はこの課金を変えない。
+- 上の小節の変更箇所の `src/vm.rs` の箇条（`call_fn_value` の `count_step` を外して `Charge` opcode の dispatch で
+  課金する）は、builtin callback については Q5 = A で読み替える。callback の課金は `Charge` にせず、`Vm::call_fn_value`
+  から `FuelSchedule` を直接呼ぶ（F-2b・F-2c とも。下の判断の記録）。
 - 上の小節の F2-AT-06 は旧版の拒否を `ConfigError::UnsupportedAccountingRevision` と書くが、同じ小節の変更箇所と
   §3.1 は heap と fuel のどちらの版が不正かを区別できる形にするとする。区別の形は Q3 = A（variant を 2 つに
   分ける。下の判断の記録）で、受入基準はその形で書く。
@@ -2884,7 +2887,8 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
 - **範囲**: 上の小節の「課金点を §4.1 の主要 charge point どおりへ張り直す」「既定 `total_fuel` の見直し」
   「`fuel_accounting_revision` を 1 → 2 へ bump する」のとおり。F-2b の `FuelSchedule` に statement 1・
   expression 1・operation 1・invocation 5・loop iteration 2・host call 10 を載せ、tree（`eval_expr` の再帰と
-  式 frame の段階評価の両方）と VM（compiler の `Charge` 挿入）で同じ順序・同じ line で課金する。受理する版を
+  式 frame の段階評価の両方）と VM（compiler の `Charge` 挿入）で同じ順序・同じ line で課金する。ただし builtin
+  callback の invocation（5）は、F-2b と同じく `Vm::call_fn_value` から `FuelSchedule` を直接呼ぶ（Q5 = A）。受理する版を
   `2` だけにし、`BudgetConfig::standard` を `2` にする。既定 `total_fuel` は上の小節の代表 script 集合で測って
   決め、§3.1 の表を更新する。
 - **範囲外**: 上の小節の「逸脱」のとおり（UTF-8 payload・AST node・`map` / `filter` / serialize の per-element は
