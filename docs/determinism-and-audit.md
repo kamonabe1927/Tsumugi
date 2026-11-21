@@ -48,7 +48,6 @@ host call 開始前に `BudgetCharged` を flush しない行（loop:drift #342 
 
 | 未実装範囲 | 対象の節(§) | 備考 |
 |---|---|---|
-| audit の schema version 2（§7.1）。`AuditEnvelope.schema_version` は `1` のままで、`ExecutionStarted` と `BudgetConfig`（`src/budget.rs`・`src/audit.rs`）に `fuel_accounting_revision` が無い | §7.1/§7.2/§9.2 | F-2a（[実行予算・協調実行仕様](execution-control.md) §14） |
 | sink 必須化（§1.1、`ConfigError::AuditSinkRequired`。opt-in を既定から外す） | §1.1 | CLI 側の sink 構築が整う後続スライスへ延期 |
 | 監査設定の公開 setter（`EngineBuilder::audit_redaction_policy` / `EngineBuilder::audit_budget`）と `ConfigError` への `AuditConfigError` 接続。現状は `#[doc(hidden)]` のテスト用 shim（`audit_redaction_policy_for_test` / `audit_budget_for_test`、不正 budget は panic）だけ | §1.1/§9.1/§10.2 | sink 必須化スライスへ延期 |
 | strict deterministic CBOR。現 `encoded_bytes` は naive 推定で後で差し替え可能に隔離 | §9.2 | — |
@@ -1868,7 +1867,7 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
   - **選択: A**（kamonabe の選択、2026-10-24、PR #256）。§9.1 と本小節の実装範囲へ反映した。
 - **受入基準（c1）**:
   - **SC-AT-01（primitive の golden）**: unsigned integer の幅の境界（0・23・24・255・256・65535・65536・2^32−1・2^32・u64::MAX）、負の i64（−1・−24・−25・i64::MIN）、空と非空の text / byte string、`Option` の `None` / `Some`、`i128`（0・−1・i128::MIN・i128::MAX）の 16 byte BE、Float bits の 8 byte BE が、手で組んだ期待 byte 列と一致する（RFC 8949 §4.2.1 の最短幅・定長）。
-  - **SC-AT-02（schema v1 の全型の golden）**: `AuditEvent` の 8 variant と、上記の全 enum の全 variant について、§9.2 の tag と field 順で組んだ期待 byte 列と一致する。`AuditEnvelope` は `[schema_version, execution_id(16), source_hash(32), language_revision, sequence, timestamp, event]` の順になる。
+  - **SC-AT-02（schema v2 の全型の golden）**: `AuditEvent` の 8 variant と、上記の全 enum の全 variant について、§9.2 の tag と field 順で組んだ期待 byte 列と一致する。`AuditEnvelope` は `[schema_version, execution_id(16), source_hash(32), language_revision, sequence, timestamp, event]` の順になる。
   - **SC-AT-03（size pass と write pass の一致）**: SC-AT-01/02 の全ケースと、極値（全 u64 field が u64::MAX、長い text、64 段 nesting の `AuditValue`）で、size pass の長さが write pass の byte 長と一致する。size pass の加算は checked で、overflow を検出できる（unit test で overflow 経路を直接呼ぶ）。
   - **SC-AT-04（決定性）**: 同じ値は 100 回 encode しても同じ byte 列になる。`BTreeMap` / `AuditValue::Object` は挿入順に関係なく UTF-8 key byte 順で出る。clock instance だけが異なる（tick は同じ）`MonotonicInstant` を含む `BudgetConfig` は同じ byte 列になる（§9.2・§15.1）。
   - **SC-AT-05（非破壊）**: 既存の `tests/audit_*.rs` が無改変で緑。sink なし経路・sink あり経路とも観測結果（envelope 列・`committed_bytes`・yield 位置・出力 byte・exit code）が変わらない（c1 は計測にも redaction にも配線しない）。

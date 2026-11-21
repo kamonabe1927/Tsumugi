@@ -705,6 +705,8 @@ pub enum AuditEvent {
         rules_revision: u32,
         /// heap accounting revision。
         heap_accounting_revision: u32,
+        /// fuel accounting revision（§4.1 の課金表の版）。
+        fuel_accounting_revision: u32,
         /// この実行の budget config。
         budget: BudgetConfig,
         /// capability policy の hash。
@@ -2518,7 +2520,7 @@ pub(crate) mod cbor {
 
     impl Encode for BudgetConfig {
         fn encode<O: CborOut>(&self, out: &mut O) -> Result<(), CborError> {
-            encode_struct!(out, self; heap_accounting_revision, total_fuel, max_live_heap_bytes,
+            encode_struct!(out, self; heap_accounting_revision, fuel_accounting_revision, total_fuel, max_live_heap_bytes,
                 max_string_allocations, max_string_bytes, max_single_string_bytes,
                 max_source_count, max_source_bytes, max_single_source_bytes, max_import_count,
                 max_import_bytes, max_collection_elements, max_input_calls, max_input_bytes,
@@ -2644,12 +2646,13 @@ pub(crate) mod cbor {
                     backend,
                     rules_revision,
                     heap_accounting_revision,
+                    fuel_accounting_revision,
                     budget,
                     capability_policy_hash,
                     redaction_policy_id,
                     mode,
                 } => encode_variant!(out, 0; engine_version, backend, rules_revision,
-                    heap_accounting_revision, budget, capability_policy_hash,
+                    heap_accounting_revision, fuel_accounting_revision, budget, capability_policy_hash,
                     redaction_policy_id, mode),
                 Self::CapabilityDecision {
                     operation_id,
@@ -2741,7 +2744,7 @@ pub(crate) mod cbor {
     ) -> Result<u64, CborError> {
         let mut size = SizeOut::new();
         array_header(&mut size, 7)?;
-        uint(&mut size, 1)?; // schema_version（常に 1）
+        uint(&mut size, 2)?; // schema_version（常に 2）
         bytes(&mut size, &[0u8; 16])?; // execution_id
         bytes(&mut size, &[0u8; 32])?; // source_hash
         text(&mut size, language_revision)?;
@@ -2772,7 +2775,7 @@ mod tests {
 
     fn started_envelope(id: ExecutionId, sequence: u64) -> AuditEnvelope {
         AuditEnvelope {
-            schema_version: 1,
+            schema_version: 2,
             execution_id: id,
             source_hash: [0u8; 32],
             language_revision: "0.20".to_string(),
@@ -2785,6 +2788,7 @@ mod tests {
                 backend: Backend::TreeWalk,
                 rules_revision: 1,
                 heap_accounting_revision: 1,
+                fuel_accounting_revision: 1,
                 budget: standard_budget(),
                 capability_policy_hash: [0u8; 32],
                 redaction_policy_id: "default".to_string(),
@@ -2799,7 +2803,7 @@ mod tests {
         outcome: TerminalOutcome,
     ) -> AuditEnvelope {
         AuditEnvelope {
-            schema_version: 1,
+            schema_version: 2,
             execution_id: id,
             source_hash: [0u8; 32],
             language_revision: "0.20".to_string(),
@@ -4135,7 +4139,7 @@ mod tests {
 
     fn one_envelope_batch() -> Arc<[AuditEnvelope]> {
         Arc::from(vec![AuditEnvelope {
-            schema_version: 1,
+            schema_version: 2,
             execution_id: exec_id(1),
             source_hash: [0; 32],
             language_revision: "0.21".to_string(),
@@ -4547,32 +4551,33 @@ mod cbor_tests {
         let clock = FakeClock::new();
         BudgetConfig {
             heap_accounting_revision: 1,
-            total_fuel: 2,
-            max_live_heap_bytes: 3,
-            max_string_allocations: 4,
-            max_string_bytes: 5,
-            max_single_string_bytes: 6,
-            max_source_count: 7,
-            max_source_bytes: 8,
-            max_single_source_bytes: 9,
-            max_import_count: 10,
-            max_import_bytes: 11,
-            max_collection_elements: 12,
-            max_input_calls: 13,
-            max_input_bytes: 14,
-            max_output_calls: 15,
-            max_output_bytes: 16,
-            max_host_calls: 17,
-            max_host_request_bytes: 18,
-            max_host_response_bytes: 19,
-            max_host_call_bytes: 20,
-            deadline: clock.instant_at(21),
+            fuel_accounting_revision: 2,
+            total_fuel: 3,
+            max_live_heap_bytes: 4,
+            max_string_allocations: 5,
+            max_string_bytes: 6,
+            max_single_string_bytes: 7,
+            max_source_count: 8,
+            max_source_bytes: 9,
+            max_single_source_bytes: 10,
+            max_import_count: 11,
+            max_import_bytes: 12,
+            max_collection_elements: 13,
+            max_input_calls: 14,
+            max_input_bytes: 15,
+            max_output_calls: 16,
+            max_output_bytes: 17,
+            max_host_calls: 18,
+            max_host_request_bytes: 19,
+            max_host_response_bytes: 20,
+            max_host_call_bytes: 21,
+            deadline: clock.instant_at(22),
         }
     }
 
     fn numbered_config_bytes() -> Vec<u8> {
-        let mut v = vec![0x95];
-        v.extend(1..=21u8);
+        let mut v = vec![0x96];
+        v.extend(1..=22u8);
         v
     }
 
@@ -4619,6 +4624,34 @@ mod cbor_tests {
         v
     }
 
+    /// F2a-AT-03（SC-AT-02 の該当分）: `ExecutionStarted` と `BudgetConfig` は
+    /// `heap_accounting_revision` の直後に `fuel_accounting_revision` を置いた field 順で
+    /// encode され、envelope の `schema_version` は 2 になる（`cbor_all_eight_event_variants_match_golden_bytes`
+    /// と `cbor_envelope_field_order_matches_spec` が全体の byte 列を固定する）。
+    #[test]
+    fn f2a_at_03_fuel_accounting_revision_follows_heap_in_field_order() {
+        let event = AuditEvent::ExecutionStarted {
+            engine_version: "e".into(),
+            backend: Backend::TreeWalk,
+            rules_revision: 2,
+            heap_accounting_revision: 1,
+            fuel_accounting_revision: 1,
+            budget: numbered_config(),
+            capability_policy_hash: [0x11; 32],
+            redaction_policy_id: "r".into(),
+            mode: ExecutionMode::Record,
+        };
+        let bytes = encode_to_vec(&event).unwrap();
+        // [0x8a(10 field), tag 0, "e", backend, rules=2, heap=1, fuel=1, BudgetConfig...]
+        assert_eq!(
+            &bytes[..9],
+            &[0x8a, 0x00, 0x61, 0x65, 0x81, 0x00, 0x02, 0x01, 0x01]
+        );
+        // BudgetConfig の先頭 2 field は heap=1・fuel=2（numbered_config の値）。
+        assert_eq!(&bytes[9..12], &[0x96, 0x01, 0x02]);
+        assert_eq!(envelope(0, event).schema_version, 2);
+    }
+
     #[test]
     fn cbor_budget_config_and_usage_use_declaration_order() {
         check(&numbered_config(), &numbered_config_bytes());
@@ -4653,13 +4686,14 @@ mod cbor_tests {
                     backend: Backend::TreeWalk,
                     rules_revision: 2,
                     heap_accounting_revision: 1,
+                    fuel_accounting_revision: 1,
                     budget: numbered_config(),
                     capability_policy_hash: [0x11; 32],
                     redaction_policy_id: "r".into(),
                     mode: ExecutionMode::Record,
                 },
                 cat(&[
-                    &[0x89, 0x00, 0x61, 0x65, 0x81, 0x00, 0x02, 0x01],
+                    &[0x8a, 0x00, 0x61, 0x65, 0x81, 0x00, 0x02, 0x01, 0x01],
                     &numbered_config_bytes(),
                     &[0x58, 0x20],
                     &[0x11; 32],
@@ -4804,7 +4838,7 @@ mod cbor_tests {
 
     fn envelope(sequence: u64, event: AuditEvent) -> AuditEnvelope {
         AuditEnvelope {
-            schema_version: 1,
+            schema_version: 2,
             execution_id: ExecutionId::new(NonZeroU128::new(1).unwrap()),
             source_hash: [0xab; 32],
             language_revision: "0.20".into(),
@@ -4821,7 +4855,7 @@ mod cbor_tests {
         let mut id = [0u8; 16];
         id[15] = 1;
         let expected = cat(&[
-            &[0x87, 0x01, 0x50],
+            &[0x87, 0x02, 0x50],
             &id,
             &[0x58, 0x20],
             &[0xab; 32],

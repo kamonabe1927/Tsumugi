@@ -133,7 +133,21 @@ fn with_sink_emits_started_then_terminal_in_order() {
 
     // Started は sequence 0 に 1 件。
     assert_eq!(envelopes[0].sequence, 0);
-    assert_eq!(envelopes[0].schema_version, 1);
+    // F2a-AT-03: schema version 2 と、ExecutionStarted の fuel_accounting_revision = 1。
+    assert_eq!(envelopes[0].schema_version, 2);
+    match &envelopes[0].event {
+        AuditEvent::ExecutionStarted {
+            heap_accounting_revision,
+            fuel_accounting_revision,
+            budget,
+            ..
+        } => {
+            assert_eq!(*heap_accounting_revision, 1);
+            assert_eq!(*fuel_accounting_revision, 1);
+            assert_eq!(budget.fuel_accounting_revision, 1);
+        }
+        other => panic!("先頭は ExecutionStarted のはず: {other:?}"),
+    }
     assert_eq!(envelopes[0].execution_id, execution_id);
     assert_eq!(envelopes[0].source_hash, *script.source_hash().as_bytes());
     assert_eq!(envelopes[0].language_revision, "0.21");

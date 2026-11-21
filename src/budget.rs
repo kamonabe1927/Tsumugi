@@ -35,6 +35,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// heap 論理サイズ表の revision。初期実装は 1 だけを受理する（§3.1 / §5.1）。
 pub const HEAP_ACCOUNTING_REVISION: u32 = 1;
 
+/// fuel 課金表（§4.1）の版。F-2c が課金表を移行するとき 2 へ上げる。
+pub const FUEL_ACCOUNTING_REVISION: u32 = 1;
+
 const MIB: u64 = 1_048_576;
 
 // =============================================================================
@@ -199,8 +202,10 @@ impl MonotonicClock for SystemMonotonicClock {
 /// execution 作成時の設定エラー（§3）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
-    /// `heap_accounting_revision` が 1 以外。
-    UnsupportedAccountingRevision(u32),
+    /// `heap_accounting_revision` が受理しない版（現状は 1 以外）。値は指定された版。
+    UnsupportedHeapAccountingRevision(u32),
+    /// `fuel_accounting_revision` が受理しない版（現状は 1 以外）。値は指定された版。
+    UnsupportedFuelAccountingRevision(u32),
     /// deadline が別 clock domain の instant。
     ForeignClock,
     /// deadline が作成時点以前。
@@ -217,6 +222,9 @@ pub enum ConfigError {
 pub struct BudgetConfig {
     /// 論理 accounting 契約。初期実装は 1 だけを受理する。
     pub heap_accounting_revision: u32,
+
+    /// fuel 課金表（§4.1 の charge point と課金値）の版。初期実装は 1 だけを受理する。
+    pub fuel_accounting_revision: u32,
 
     /// 論理 fuel unit。
     pub total_fuel: u64,
@@ -261,6 +269,7 @@ impl BudgetConfig {
         let deadline = clock.instant_at(deadline_ns);
         Ok(Self {
             heap_accounting_revision: HEAP_ACCOUNTING_REVISION,
+            fuel_accounting_revision: FUEL_ACCOUNTING_REVISION,
             total_fuel: 1_000_000,
             max_live_heap_bytes: 64 * MIB,
             max_string_allocations: 1_000_000,
@@ -298,6 +307,7 @@ impl BudgetConfig {
         };
         Self {
             heap_accounting_revision: HEAP_ACCOUNTING_REVISION,
+            fuel_accounting_revision: FUEL_ACCOUNTING_REVISION,
             total_fuel,
             max_live_heap_bytes: 64 * MIB,
             max_string_allocations: 1_000_000,
@@ -417,13 +427,19 @@ impl BudgetConfig {
 
     /// config の妥当性を検証する（§3）。execution 作成前に呼ぶ。
     ///
-    /// - `heap_accounting_revision` が 1 以外なら拒否。
+    /// - `heap_accounting_revision` が 1 以外なら拒否（先に検査する）。
+    /// - `fuel_accounting_revision` が 1 以外なら拒否。
     /// - deadline が `clock` と別 domain なら拒否。
     /// - deadline が `clock.now()` 以前なら拒否。
     pub fn validate(&self, clock: &dyn MonotonicClock) -> Result<(), ConfigError> {
         if self.heap_accounting_revision != HEAP_ACCOUNTING_REVISION {
-            return Err(ConfigError::UnsupportedAccountingRevision(
+            return Err(ConfigError::UnsupportedHeapAccountingRevision(
                 self.heap_accounting_revision,
+            ));
+        }
+        if self.fuel_accounting_revision != FUEL_ACCOUNTING_REVISION {
+            return Err(ConfigError::UnsupportedFuelAccountingRevision(
+                self.fuel_accounting_revision,
             ));
         }
         if self.deadline.clock_id() != clock.clock_id() {
@@ -2550,6 +2566,8 @@ mod tests {
         let clock = FakeClock::new();
         let config = BudgetConfig::standard(&clock).unwrap();
         assert_eq!(config.heap_accounting_revision, 1);
+        // F2a-AT-01: fuel の会計版の既定は 1。
+        assert_eq!(config.fuel_accounting_revision, 1);
         assert_eq!(config.total_fuel, 1_000_000);
         assert_eq!(config.max_live_heap_bytes, 64 * 1_048_576);
         assert_eq!(config.max_single_string_bytes, 8 * 1_048_576);
@@ -2561,14 +2579,26 @@ mod tests {
         assert_eq!(config.deadline.as_nanos(), 30 * 1_000_000_000);
     }
 
+    /// F2a-AT-02: heap / fuel の不正な会計版は別の variant で拒否し、両方不正なら heap を先に返す。
     #[test]
-    fn validate_rejects_unsupported_accounting_revision() {
+    fn f2a_at_02_validate_rejects_unsupported_accounting_revisions() {
         let clock = FakeClock::new();
         let mut config = BudgetConfig::standard(&clock).unwrap();
         config.heap_accounting_revision = 2;
         assert_eq!(
             config.validate(&clock),
-            Err(ConfigError::UnsupportedAccountingRevision(2))
+            Err(ConfigError::UnsupportedHeapAccountingRevision(2))
+        );
+        let mut config = BudgetConfig::standard(&clock).unwrap();
+        config.fuel_accounting_revision = 2;
+        assert_eq!(
+            config.validate(&clock),
+            Err(ConfigError::UnsupportedFuelAccountingRevision(2))
+        );
+        config.heap_accounting_revision = 3;
+        assert_eq!(
+            config.validate(&clock),
+            Err(ConfigError::UnsupportedHeapAccountingRevision(3))
         );
     }
 

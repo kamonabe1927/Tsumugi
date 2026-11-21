@@ -3943,3 +3943,38 @@ fn f1_fuel_limit_is_not_catchable_in_both_engines() {
         );
     }
 }
+
+// =============================================================
+// F-2a: fuel_accounting_revision の field（execution-control §14「F-2a 実装スライス」）
+// =============================================================
+
+/// F2a-AT-01: `BudgetConfig::standard` の `fuel_accounting_revision` は 1 で、1 を明示した実行と
+/// 既定の実行は同じ fuel・同じ成否になる（上限の手前と上限で比べる）。`language_revision` は変わらない。
+#[test]
+fn f2a_at_01_explicit_fuel_revision_1_matches_default() {
+    let clock = tsumugi::FakeClock::new();
+    let standard = tsumugi::BudgetConfig::standard(&clock).expect("standard budget");
+    assert_eq!(standard.fuel_accounting_revision, 1);
+
+    let source = "let i = 0\nwhile i < 20\n  i = i + 1\nend\nprint(i)\n";
+    let mut saw_ok = false;
+    let mut saw_err = false;
+    for total_fuel in [1u64, 10, 30, 40, 60, 1_000] {
+        let run = |explicit: bool| {
+            let config = standard_budget_with(|c| {
+                c.total_fuel = total_fuel;
+                if explicit {
+                    c.fuel_accounting_revision = 1;
+                }
+            });
+            let (result, printed) = run_tree_in_process("f2a-at-01", config, &[], source);
+            (result.map_err(|e| e.to_string()), printed)
+        };
+        let default_run = run(false);
+        let explicit_run = run(true);
+        assert_eq!(default_run, explicit_run, "total_fuel={total_fuel}");
+        saw_ok |= default_run.0.is_ok();
+        saw_err |= default_run.0.is_err();
+    }
+    assert!(saw_ok && saw_err, "上限の手前と上限の両方を確かめる");
+}

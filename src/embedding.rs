@@ -1729,7 +1729,9 @@ impl ExecutionRequest {
     /// ならない。構築時に [`BudgetConfig::validate`](crate::budget::BudgetConfig::validate) を
     /// 呼び、clock domain 不一致を [`BudgetConfigError::ForeignClock`](crate::budget::ConfigError::ForeignClock)、
     /// `heap_accounting_revision != 1` を
-    /// [`BudgetConfigError::UnsupportedAccountingRevision`](crate::budget::ConfigError::UnsupportedAccountingRevision)、
+    /// [`BudgetConfigError::UnsupportedHeapAccountingRevision`](crate::budget::ConfigError::UnsupportedHeapAccountingRevision)、
+    /// `fuel_accounting_revision != 1` を
+    /// [`BudgetConfigError::UnsupportedFuelAccountingRevision`](crate::budget::ConfigError::UnsupportedFuelAccountingRevision)、
     /// deadline が作成時点以前なら
     /// [`BudgetConfigError::DeadlineNotInFuture`](crate::budget::ConfigError::DeadlineNotInFuture)
     /// で弾く。capability は既定で empty（deny-by-default）、引数は空で、`with_arguments` /
@@ -2288,7 +2290,7 @@ impl Engine {
         };
         // envelope を組む小ヘルパ（borrow を避けるため値 clone で閉じる）。
         let make_envelope = |sequence: u64, event: AuditEvent| AuditEnvelope {
-            schema_version: 1,
+            schema_version: 2,
             execution_id,
             source_hash,
             language_revision: language_revision.clone(),
@@ -2305,6 +2307,7 @@ impl Engine {
             backend: self.config.backend,
             rules_revision: DETERMINISM_RULES_REVISION,
             heap_accounting_revision: crate::budget::HEAP_ACCOUNTING_REVISION,
+            fuel_accounting_revision: crate::budget::FUEL_ACCOUNTING_REVISION,
             budget,
             // capability policy hash は実行を認可した frozen set の相関 ID（上で算出）。
             // Phase 6 R-1: 注入 redaction policy の policy_id をそのまま載せる（既定 "default-r1"、
@@ -2384,7 +2387,7 @@ impl Engine {
             sink: Arc::clone(&sink),
             engine_id: self.id,
             execution_id,
-            schema_version: 1,
+            schema_version: 2,
             source_hash,
             language_revision: language_revision.clone(),
             timestamp,
@@ -5722,8 +5725,20 @@ mod tests {
         let mut budget = BudgetConfig::standard(clock.as_ref()).unwrap();
         budget.heap_accounting_revision = 2;
         assert_eq!(
+            ExecutionRequest::new(budget, Arc::clone(&clock)).unwrap_err(),
+            BudgetConfigError::UnsupportedHeapAccountingRevision(2)
+        );
+        // F2a-AT-02: fuel の会計版は別の variant。両方不正なら heap を先に返す。
+        let mut budget = BudgetConfig::standard(clock.as_ref()).unwrap();
+        budget.fuel_accounting_revision = 2;
+        assert_eq!(
+            ExecutionRequest::new(budget, Arc::clone(&clock)).unwrap_err(),
+            BudgetConfigError::UnsupportedFuelAccountingRevision(2)
+        );
+        budget.heap_accounting_revision = 2;
+        assert_eq!(
             ExecutionRequest::new(budget, clock).unwrap_err(),
-            BudgetConfigError::UnsupportedAccountingRevision(2)
+            BudgetConfigError::UnsupportedHeapAccountingRevision(2)
         );
     }
 
