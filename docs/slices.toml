@@ -509,7 +509,7 @@ order      = 24
 # sort の比較の段、per-element 課金の無い bulk builtin、スカラー要素の join / contains と 0.20 の sort の描画キー
 # （fuel を課金しないので slice で区切れない。Q4=A、F-2・fuel-bulk-charge の後）は範囲外。
 # 見積もり: src/ 約 450 行、触る仕組みは callback なし bulk builtin の段階実行 1 つ、受入基準 5。
-# F-2 は 1 PR に収まらない（受入基準 9・触る仕組み 3、loop-runbook §14.1）ため F-2a / F-2b / F-2c に分割した
+# F-2 は 1 PR に収まらない（受入基準 9・触る仕組み 2・src/ 約 1050〜1250 行、loop-runbook §14.1）ため F-2a / F-2b / F-2c に分割した
 # （spec「F-2 の sub-slice 分割（F-2a / F-2b / F-2c）」、設計 PR #470。割り方・受入基準・config error の形・audit schema version は
 # 判断役が選択（PR #470、Q1〜Q4=A））。元の id は置き換えて残さない。「F-2 が done」は F-2a・F-2b・F-2c がともに done を意味する。
 # 旧 F-2 の設計 PR は #241。空きを作るため、order 26〜43 の既存スライスを 2 ずつ後ろへ付け直した（相対順は変えていない）。

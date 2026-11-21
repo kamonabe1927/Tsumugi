@@ -2795,11 +2795,14 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
 **§14.1 に収まらない理由**（main 7d46a4f で確かめた）:
 
 - 受入基準が 9 個（F2-AT-01..08 と F2-AT-01b）で、上限の 5 個を超える。
-- 触る仕組みが 3 つある。(1) budget の config と監査の event（`fuel_accounting_revision` の field・config error・
+- 触る仕組みが 2 つある。(1) budget の config と監査の event（`fuel_accounting_revision` の field・config error・
   `AuditEvent::ExecutionStarted` と strict CBOR の `BudgetConfig` の encode、`src/budget.rs`・`src/embedding.rs`・
-  `src/audit.rs`）、(2) VM の bytecode（`Charge` opcode・compiler の挿入・verifier・`unstable-bytecode` の公開面、
-  `src/opcode.rs`・`src/chunk.rs`・`src/compiler.rs`・`src/verifier.rs`・`src/vm.rs`）、(3) tree evaluator の課金点
-  （`src/eval.rs` の `eval_expr` の再帰と式 frame（`FrameKind::Expr`）の段階評価の両方、`src/builtin.rs`）。
+  `src/audit.rs`）、(2) fuel の課金点（両 engine）。(2) は VM の bytecode（`Charge` opcode・compiler の挿入・verifier・
+  `unstable-bytecode` の公開面、`src/opcode.rs`・`src/chunk.rs`・`src/compiler.rs`・`src/verifier.rs`・`src/vm.rs`）と
+  tree evaluator（`src/eval.rs` の `eval_expr` の再帰と式 frame（`FrameKind::Expr`）の段階評価の両方、`src/builtin.rs`）に
+  またがるが、F-1 と同じく 1 つの仕組みと数える（片方の engine だけを変えると F-1 の exact parity が main で崩れるため、
+  engine ごとには分けられない）。
+- 規模: 全体で `src/` 約 1050〜1250 行（下の F-2a・F-2b・F-2c の見積もりの和）の見込みで、§14.1 の 1000 行を超える。
 - 現状の課金点は tree の `count_step`（`src/eval.rs` に 7 か所、`src/builtin.rs` に 1 か所）と VM の `count_step`
   （`src/vm.rs` に 3 か所）だけで、statement / expression / operation の課金点は両 engine に無い。式 frame
   （tree-expr-continuation e2a〜e4 で入った）の上で expression / operation の課金順を `eval_expr` の再帰と VM の

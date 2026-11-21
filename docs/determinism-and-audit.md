@@ -2288,4 +2288,4 @@ Phase 5/6実装完了には次をすべて自動化する。
 
 Phase 5は、treeが唯一のproduction backendとなり、すべてのambient inputがHostBoundaryへ移り、DeterminismInputとbackend非依存規則が自動検証され、VMのproduction化に差分0件gateが設定された時点で完了とする。
 
-Phase 6は、schema version 1の全event、redaction、bounded journal、fail-closed sink、host call correlation、budget集約、Started/Terminal完全性、record/replay連携が全terminal pathで検証された時点で完了とする。
+Phase 6は、schema version 2（§7.1）の全event、redaction、bounded journal、fail-closed sink、host call correlation、budget集約、Started/Terminal完全性、record/replay連携が全terminal pathで検証された時点で完了とする。
