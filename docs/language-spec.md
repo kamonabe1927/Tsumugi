@@ -2,7 +2,7 @@
 
 バージョン: 0.21
 
-最終更新: 2026-11-18
+最終更新: 2026-11-22
 
 この番号は言語仕様のrevisionであり、Cargo package / REPLの実装バージョン `0.1.0` とは独立して管理する。
 
@@ -23,11 +23,12 @@
 
 ### 逸脱一覧（目標仕様に対する現在の逸脱）
 
-本書の本文は目標の仕様であり、現在の実装との差（逸脱）はこの表にだけ書く（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。表にある挙動へ依存するコードは移植可能とみなさない。解消した行は削除する。ツリーウォーク版と `--vm` 版の差、および本書の規範との差は、整合点検（loop:drift #382）で確かめた範囲で表に無かった。その後に issue #358 で見つかった `for` の反復列の差を表に足し（解消済み）、issue #399 の `path_join` の途中の長さの差を足した。loop:drift #395 の D-90 で、issue #393 のステップ上限の行番号の差を足した（解消済み）。issue #365 で見つかった `--vm` 版の `for` の隠しローカルの差を足した（解消済み）。
+本書の本文は目標の仕様であり、現在の実装との差（逸脱）はこの表にだけ書く（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。表にある挙動へ依存するコードは移植可能とみなさない。解消した行は削除する。ツリーウォーク版と `--vm` 版の差、および本書の規範との差は、整合点検（loop:drift #382）で確かめた範囲で表に無かった。その後に issue #358 で見つかった `for` の反復列の差を表に足し（解消済み）、issue #399 の `path_join` の途中の長さの差を足した。loop:drift #395 の D-90 で、issue #393 のステップ上限の行番号の差を足した（解消済み）。issue #365 で見つかった `--vm` 版の `for` の隠しローカルの差を足した（解消済み）。loop:drift #475 の D-142 で、debug build の `--vm` 版で builtin の callback を通る再帰が深度上限の手前で host を abort させる差を足した。
 
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
 | REPL（tree・VM）の import は link 時の resolver gate を通らず、import root を要さずに現在の作業ディレクトリからの相対パスで解決され、profile にかかわらず `TSUMUGI_SANDBOX` を読む。import chain の深度も link で検証されず、129 段目は評価器内蔵 `ModuleLoader` の `import` ランタイムエラー `import 失敗: ネストが深すぎます (上限: 128)` になり、REPL は次の入力へ進む（詳細は[次期意味論・実装決定](semantic-decisions.md)の逸脱一覧の import chain の深度上限の行）。目標は、REPL もファイル・標準入力と同じく各入力を link 時に import root の下で解決し（未許可なら拒否）、深度も link 時に検証し、`TSUMUGI_SANDBOX` を読まないことである。両 engine 共通で、[Capability Model仕様](capability-model.md) の目標（§10・§14.3・§14.4）との差でもあり、詳細は同仕様の逸脱一覧の REPL の import の行にある | 「モジュール / import」の「制約」、「実行安全性」の「import chain深度制限」、[Capability Model仕様](capability-model.md) §10・§14.3・§14.4 | E7（tree）、E9 の VM file/stdin 統合で据え置いた VM REPL |
+| `--vm` 版で `map` / `filter` / `each` の callback から同じ関数を呼ぶ再帰（`fn rec(x)` の本体が `return map([x], rec)` で、`print(rec(1))` を実行する）は、debug build では呼び出しの深度上限 128 に届く前に Rust の stack（`src/main.rs` の 8 MiB の実行スレッド `tsumugi-main`）を使い切り、`thread 'tsumugi-main' has overflowed its stack` で host process が abort する（exit 134）。目標は「コールフレーム深度制限」の「プロセスクラッシュ前にランタイムエラー化する」「ツリーウォーク版・VM版で同じ境界・同じメッセージ」で、ツリーウォーク版は同じスクリプトで「スタックオーバーフロー: 再帰が深すぎます (上限: 128)」のランタイムエラー（exit 1）になる。release build の `--vm` 版も同じランタイムエラー（exit 1）で、abort は debug build だけである。callback を通らない直接の再帰（`return rec(x)`）は debug build の `--vm` 版でも同じランタイムエラー（exit 1）になる。callback は VM の `Vm::call_fn_value`（`src/vm.rs`）を通る。main 2d37fe0 で確かめた（`cargo build` → `target/debug/tsumugi --vm`）。[脅威モデル](threat-model.md) の TM-AT-07 との差でもある | 「実行安全性」の「コールフレーム深度制限」 | —（fix スライス fix-vm-callback-recursion-stack で直す。loop:drift #475 D-142） |
 
 この表は loop:drift #382 の D-82 を受けて、それまでの箇条書きの「現在の既知非適合」（詳細の参照先をロードマップとしていた）から移した。表に載せたのは、整合点検の輪番で tree・VM とも今も成り立つことを確かめた REPL の import の 1 行だけである。逸脱一覧の形に移す案（Q1=A）は判断役が選択した（issue #382）。理由: spec の実装状態の正本を各 spec の逸脱一覧 1 つとする [ドキュメント運用ガイド](documentation-guide.md)「状態の正本は粒度ごとに 1 箇所だけ」に合わせ、同ガイドの移行の規則（輪番で事実を確かめたものから寄せる）どおりに移す。参照先だったロードマップには該当する節も ID も無く、状態の正本が読み手に分からなかった（[マニフェスト](manifesto.md) 原則 9）。採らなかった案B（次に本書に触れる done の実装 PR まで今の形のままにする）は、その PR がいつ来るか決まっておらず、その間ロードマップと本書に状態が分かれたままになるため採らない。
 

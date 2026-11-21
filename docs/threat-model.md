@@ -1,6 +1,6 @@
 # Tsumugi — 脅威モデル
 
-最終更新: 2026-11-14
+最終更新: 2026-11-22
 設計ステータス: **実装仕様確定・実装進行中**
 
 本文書の §1〜§13 は **到達目標の確定仕様**であり、現在の実装状態ではない。現在の実装が目標からどう逸脱しているかは、下の
@@ -30,11 +30,14 @@ file/stdin に絞る案（判断役の Q1=A）は、それを反映した PR #31
 | scheduler の handle 経路（`src/engine.rs` の `Engine::compile` / `create_execution` / `start`）の import は `Engine::link` と resolver を経ず、実行中に評価器内蔵 `ModuleLoader`（`src/module.rs`）がファイルを読む。`module_resolver` の grant を要さず（`TSUMUGI_SANDBOX` の検査だけを受ける）、この経路では TM-024 の「全 import は link 時に resolver capability だけを使う。runtime import 禁止」と TM-AT-24 が成り立たない。REPL（tree・`--vm`）は fix-repl-import-gate で解消した。handle 経路は [Capability Model仕様](capability-model.md) の逸脱一覧の handle 経路の行（§10）にある | §10 TM-024、§11 TM-AT-24 | exec-control Slice 3 PR-a（scheduler の handle 経路） |
 | fuel の charge point が §4.1 の課金表（statement / expression / operation 単位）に揃っておらず、課金は文・反復・呼び出しと一部 builtin の per-element だけである。TM-005 の「fuel hookを全評価・callback経路へ置く」と TM-AT-05 の「全loop/function/callback/collection builtin/host callでfuel N-1/Nは完了、N+1は`BudgetExceeded`」は、この範囲では成り立たない。詳細は [実行予算・協調実行仕様](execution-control.md) の未実装範囲の §4.1 課金表の行にある | §10 TM-005、§11 TM-AT-05 | —（未実装範囲。execution-control では F-2 で扱う） |
 | closure の capture の連鎖（`f = fn() g() end` で前の関数値を capture し続ける）の破棄が host stack を枯渇させる。関数値の深度は 0 と数えるので、値のネスト深度上限では防げず、20 万段の連鎖の破棄で tree・`--vm` とも abort する（exit 134）。TM-007 の「深い値で stack を枯渇させる」攻撃に対して、構造化 error にならない。詳細は [実行予算・協調実行仕様](execution-control.md) の未実装範囲の closure の capture の連鎖の行にある | §10 TM-007、§11 TM-AT-07 | —（未実装範囲。fix スライス fix-closure-capture-chain-stack で直す） |
+| debug build の `--vm` で、`map` / `filter` / `each` の callback から同じ関数を呼ぶ再帰が、call depth の上限 128 に届く前に host stack を使い切って abort する（exit 134）。tree と release build の `--vm` は同じスクリプトで構造化 error（exit 1）になる。TM-AT-07 の「call depth の境界が host abort ではなく構造化 error になり、tree・VM で同じ境界になる」は、この経路では成り立たない。詳細は [言語仕様](language-spec.md) の逸脱一覧の `--vm` 版の callback を通る再帰の行にある | §10 TM-007、§11 TM-AT-07 | —（fix スライス fix-vm-callback-recursion-stack で直す） |
 | link 時の import source の byte 上限を適用していない。module source は上限を見ずに全部読み（`src/embedding.rs` の `read_module_source`）、TM-019 の「source/import byte予算」と TM-AT-19 の import source byte の N-1/N/N+1 は成り立たない（module 数の上限は適用している）。詳細は [Capability Model仕様](capability-model.md) の逸脱一覧の有限の byte 上限 N の行にある | §10 TM-019、§11 TM-AT-19 | C11 |
 
 照合済みの節に残っている逸脱は上の表の行だけである（照合していない節に逸脱が無いことを意味しない）。
 
 TM-005・TM-007・TM-019 の 3 行は loop:drift #395 の D-93・D-94・D-95 で足した。2026-11-14 の整合点検の輪番で、TM-005（fuel の charge point）・TM-007（closure の capture の連鎖）・TM-019（import source の byte 上限）を、他の spec の逸脱一覧の行と実装（`src/embedding.rs` の `read_module_source` など）に照らして照合した分である。照合済みの節は、上の 2026-11-02 の輪番の範囲にこの 3 つを加えたものである。3 行とも、内容を再掲せず他の spec の行を参照する形で持つ（TM-024 の行と同じ持ち方）。
+
+debug build の `--vm` の callback を通る再帰の行（TM-007）は、loop:drift #475 の D-142 で足した。TM-007 は照合済みの節で、上の「照合済みの節に残っている逸脱は上の表の行だけ」を事実に合わせるため、D-95 と同じく [言語仕様](language-spec.md) の行を参照する形で載せた。
 
 - **D-93（TM-005）:** 本文の Residual risk にあった「fuel の charge point が §4.1 課金表に揃うまでの差は…逸脱一覧にある」という時点つきの注記を消し、この表に行を足す案（Q1=A）は判断役が選択（issue #395）した。理由: 時点つきの状態は目標の章に置けず（ドキュメント運用ガイド「逸脱一覧の持ち方」）、TM-AT-05 は本書自身の目標なので、その未達は本書の逸脱一覧が正本である。注記だけ消す案（B）は、未達が本書のどこにも残らず、上の「照合済みの節に残っている逸脱は上の表の行だけ」という一文が事実と合わなくなるので採らなかった。
 - **D-94（TM-007）:** closure の capture の連鎖の破棄による stack 枯渇を、本文の Residual risk（受け入れるリスク）から外し、直す予定の逸脱としてこの表に載せる案（Q1=A）は判断役が選択（issue #395）した。理由: execution-control は同じ事項を未実装範囲に載せ、fix スライス（fix-closure-capture-chain-stack）があるので、受け入れるリスクではない。script 起因の host の abort を目標の章の残余リスクに固定すると、[マニフェスト](manifesto.md) 原則 1・原則 6 に対して目標を弱める読み方が残る。目標の章にスライス名を置かない点もドキュメント運用ガイドに揃う。スライス名だけ消して残余リスクに残す案（B）は、spec どうしの位置づけの食い違いが残るので採らなかった。OS stack overflow 一般と「別 process が最終防御」の残余リスクは本文に残す。
