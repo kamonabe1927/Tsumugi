@@ -4,7 +4,7 @@
 //! §8（event 順序・完全性）/ §10（sink 契約・fail-closed）/ §11（監査自体の予算）である。
 //! 本モジュールは A-1 の最小縦切りを実装する:
 //!
-//! - schema version 1 の型（§7.1 `AuditEnvelope` / §7.2 `AuditEvent` 全8 variant と
+//! - schema version 2 の型（§7.1 `AuditEnvelope` / §7.2 `AuditEvent` 全8 variant と
 //!   `TerminalOutcome`）。ただし emission するのは `ExecutionStarted` と `Terminal` だけで、
 //!   残り6 event と redaction payload 型は **型のみ**（構築配線なし）。
 //! - per-execution bounded logical journal（§8/§11）。`sequence` は 0 始まり、gap/重複なし、
@@ -39,10 +39,10 @@ const MIB: u64 = 1024 * 1024;
 // §7.1 envelope
 // =============================================================================
 
-/// 監査 event 1 件を包む envelope（§7.1）。schema version 1 で field 名・型・意味を固定する。
+/// 監査 event 1 件を包む envelope（§7.1）。schema version 2 で field 名・型・意味を固定する。
 #[derive(Clone, Debug, PartialEq)]
 pub struct AuditEnvelope {
-    /// 常に 1（schema version）。
+    /// 常に 2（schema version）。
     pub schema_version: u16,
     /// host が供給する 128-bit 実行 ID（§7.1、ambient random source へ engine は触れない）。
     pub execution_id: ExecutionId,

@@ -2265,7 +2265,7 @@ fn collection_limit_is_consistent_in_both_engines() {
 fn step_limit_env_still_gates_both_engines_via_budget_ledger() {
     // REV-015 Slice 1: step 課金を BudgetLedger の fuel へ移しても、legacy 環境変数
     // TSUMUGI_MAX_STEPS が両 engine で従来どおり上限として機能する。
-    let source = "let i = 0\nwhile i < 1000000\n    i = i + 1\nend\n";
+    let source = "let i = 0\nwhile i < 1000000\n    i = i + 1\nend\nprint(i)\n";
 
     for use_vm in [false, true] {
         let output = run_repl_process(source, use_vm, &[("TSUMUGI_MAX_STEPS", "50")]);
