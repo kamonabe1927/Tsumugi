@@ -1470,7 +1470,7 @@ loop:drift #429 の D-124 の扱いを、kamonabe の判断（issue #433 の (a)
      「lstat→種別判定→`O_NOFOLLOW` open」）と、試験 `deny_all_rejects_final_symlink_open` のコメント（「`O_NOFOLLOW`」「`O_NOFOLLOW` により host error」）を、
      open 前の lstat で検出して拒否するという実装（`os_secure` の module コメント・`open_file` の doc と同じ）に合わせる。コードは変えない。
   5. **脅威モデルの追跡**: `tests/threat_model_traceability.rs` の TM-AT-03 に足した試験を挙げ、`Partial` の理由の文を、今回の試験を反映した文
-     （dangling final symlink と write / append は Unix の OS adapter と builtin で確かめた。Windows での試験と、lstat と open の間の差し替え race の試験は無い、など）へ直す。TM-AT-03 は `Partial` のままにする。
+     （dangling final symlink と write / append は Unix の OS adapter と builtin で確かめた。deterministic fake adapter での試験〔[脅威モデル](threat-model.md) の TM-AT-03 の基準〕と、Windows での試験と、lstat と open の間の差し替え race の試験は無い、など）へ直す。TM-AT-03 は `Partial` のままにする。
 - **範囲外**: lstat と open の間の差し替え race（AUD-020 の TOCTOU。CAP-AT-11 の stress gate、Phase 7）、`OpenFileRequest::CreateNew` / `WriteExisting` / `ReadExisting`
   （`write_file` / `append_file` が使うのは `Upsert` だけ）、Windows での試験（判断役が選択（PR #472）の Q1=A。Windows は未検証として文書と TM-AT-03 に残す）、OS adapter・`dispatch_fs` のコードの変更、
   AUD-020 の完了（[ロードマップ](roadmap.md) の AUD-020 は 🟡 のまま）、TM-AT-03 の `Covered` への変更。
@@ -1485,7 +1485,7 @@ loop:drift #429 の D-124 の扱いを、kamonabe の判断（issue #433 の (a)
   - **DSW-AT-03**（builtin、legacy profile）: `TSUMUGI_SANDBOX=<root>` で、`write_file` と `append_file` に symlink の絶対 path を渡すと DSW-AT-02 と同じく止まり、
     root 外の target が作られない。tree と `--vm` の両方。確かめ方: `tests/cli_legacy_profile.rs` と同じ形の subprocess test（`#[cfg(unix)]`）。
   - **DSW-AT-04**（文書の範囲）: 設計書と言語仕様の dangling final symlink の文が実装範囲 3 の趣旨になり、「許可範囲外の target を作成し得る」「targetの場所を認可できない」の
-    記述が残らない。書き直した文から、拒否の裏付けが Unix の試験で Windows は未検証であることが読める。TM-AT-03 は `Partial` のまま、理由の文に Windows での試験と
+    記述が残らない。書き直した文から、拒否の裏付けが Unix の試験で Windows は未検証であることが読める。TM-AT-03 は `Partial` のまま、理由の文に deterministic fake adapter での試験と、Windows での試験と、
     lstat と open の間の race の試験が無いことが書かれ、DSW-AT-01〜03 の試験が挙がる。
     確かめ方: `cargo test --test threat_model_traceability`（挙げた試験の名前が実在することを検査する）と、レビューでの文書の照合。
 - **想定の変更規模**: `src/` の本体はコメントだけで ±10 行程度（コードの変更 0 行）。試験は +120〜220 行程度（OS adapter の unit test、safe・legacy の subprocess test）。
