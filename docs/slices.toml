@@ -1268,9 +1268,10 @@ order      = 115
 [[slice]]
 id         = "fix-dangling-final-symlink-write"
 title      = "root 外を指す dangling final symlink への write_file / append_file の拒否を OS adapter と tree・VM の builtin の試験で固定し、design.md・language-spec.md の文と capability.rs のコメントを lstat による拒否に合わせる（capability-model §8.3 契約 4・5、issue #433）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-dangling-final-symlink-write 実装スライス（root 外を指す dangling final symlink への `write_file` / `append_file` の拒否を試験で固定し、文書を試験の範囲に合わせる）" }
 acceptance = ["DSW-AT-01..04"]
 design_pr  = 472
+impl_pr    = 473
 order      = 117

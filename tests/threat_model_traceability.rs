@@ -149,15 +149,19 @@ const TABLE: &[Row] = &[
             "src/vm.rs::lexical_path_error_is_argument",
         ],
     ),
+    // TM-AT-03 の Partial の理由と挙げた試験は DSW-AT-04（fix-dangling-final-symlink-write）に対応する。
     (
         "TM-AT-03",
         Coverage::Partial(
-            "dangling symlink と create / write / append を組み合わせた deterministic fake adapter の試験が見当たらない（実 OS の adapter での試験が中心）",
+            "root 外を指す dangling final symlink と write / append は、Unix の OS adapter と builtin（safe・legacy、tree・VM）で拒否と root 外の target 無しを確かめた（DSW-AT-01〜03）。deterministic fake adapter での試験（TM-AT-03 の基準）と、Windows での試験と、lstat と open の間の差し替え race の試験は無い",
         ),
         &[
             "src/capability.rs::intermediate_symlink_escaping_root_denied",
             "src/capability.rs::intermediate_symlink_denied_under_deny_all",
             "src/capability.rs::deny_all_rejects_final_symlink_open",
+            "src/capability.rs::dangling_final_symlink_upsert_denied_for_all_policies",
+            "tests/cli_safe_profile.rs::dangling_final_symlink_write_and_append_are_denied",
+            "tests/cli_legacy_profile.rs::legacy_dangling_final_symlink_write_and_append_are_denied",
             "src/capability.rs::symlink_escaping_root_is_denied_under_deny_all",
             "src/capability.rs::rename_src_symlink_is_rejected",
             "src/capability.rs::remove_final_symlink_does_not_touch_target",

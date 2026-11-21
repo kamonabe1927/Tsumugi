@@ -1724,12 +1724,12 @@ fn encode_filesystem(buf: &mut Vec<u8>, fs: &FilesystemCapability) {
 // OS filesystem を backing にする [`DirectoryHandle`] / [`FileHandle`] 実装。root
 // directory を 1 つの base path へ bind し、script が指定する mount 相対 [`RelativePath`]
 // を **component ごとに** 解決する。各中間 component は `symlink_metadata`（lstat 相当）で
-// 種別を確認してから降り、[`SymlinkPolicy`] に従って symlink を拒否/拘束する。final entry の
-// open は `O_NOFOLLOW` を付けて symlink を追従しない（契約4・5）。
+// 種別を確認してから降り、[`SymlinkPolicy`] に従って symlink を拒否/拘束する。final entry は
+// open の前に lstat し、symlink（dangling を含む）なら追従せず拒否する（契約4・5）。
 //
 // # platform サポート（契約2・3）
 //
-// secure な component 解決は Unix でだけ提供する。`O_NOFOLLOW` と lstat による symlink 検出は
+// secure な component 解決は Unix でだけ提供する。lstat による symlink 検出は
 // Unix `std::os::unix` surface（外部 crate 非依存）で表現できる。root 拘束・symlink policy を
 // 同じ保証で満たせない platform（非 Unix）では、文字列 prefix check へ fallback せず
 // [`AdapterError::SecureResolutionUnsupported`] を返して fail closed する（契約3）。これは
@@ -1740,7 +1740,7 @@ fn encode_filesystem(buf: &mut Vec<u8>, fs: &FilesystemCapability) {
 //
 // TOCTOU race（component 解決中に symlink が差し替わる）は本 slice の対象外で、AUD-020
 // （path-handle TOCTOU、P2）と CAP-AT-11 の stress gate で扱う。ここでは lstat→種別判定→
-// `O_NOFOLLOW` open という契約1（canonicalize せず handle/path を bind）の形を確立する。
+// open（final entry は open 前の lstat で symlink を拒否）という契約1（canonicalize せず handle/path を bind）の形を確立する。
 
 /// OS filesystem を backing にする secure な [`DirectoryHandle`]（仕様第8.3節）。
 ///
@@ -3349,7 +3349,7 @@ mod tests {
         #[cfg(unix)]
         #[test]
         fn deny_all_rejects_final_symlink_open() {
-            // 契約4: DenyAll は final symlink の read を拒否する（O_NOFOLLOW）。
+            // 契約4: DenyAll は final symlink の read を拒否する（open 前の lstat で検出）。
             let root = TempRoot::new();
             // root 内に実体 file と、それを指す symlink を作る。
             fs::write(root.path.join("real.txt"), b"data").expect("write real");
@@ -3361,12 +3361,48 @@ mod tests {
                 .open_file(&rel(&["real.txt"]), OpenFileRequest::ReadExisting)
                 .expect("open real");
             assert_eq!(f.read_to_end(None).expect("read"), b"data");
-            // symlink 経由の open は拒否（O_NOFOLLOW により host error）。
+            // symlink 経由の open は、open 前の lstat で検出して拒否する（host error）。
             let res = h.open_file(&rel(&["link.txt"]), OpenFileRequest::ReadExisting);
             assert!(
                 matches!(res, Err(AdapterError::Host(_))),
                 "symlink open must fail"
             );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn dangling_final_symlink_upsert_denied_for_all_policies() {
+            // DSW-AT-01 / 契約4・5: root 外の存在しない path を指す dangling final symlink は、
+            // policy によらず Upsert（write_file / append_file の要求）で拒否され、target は作られない。
+            for policy in [
+                SymlinkPolicy::DenyAll,
+                SymlinkPolicy::FollowWithinRoot,
+                SymlinkPolicy::OperateOnFinalEntry,
+            ] {
+                for mode in [WriteMode::Truncate, WriteMode::Append] {
+                    let root = TempRoot::new();
+                    let outside = TempRoot::new();
+                    let target = outside.path.join("created.txt");
+                    let link = root.path.join("link.txt");
+                    std::os::unix::fs::symlink(&target, &link).expect("symlink");
+                    assert!(!target.exists(), "前提: target は未作成");
+                    let h = handle(&root, policy);
+                    let res = h.open_file(&rel(&["link.txt"]), OpenFileRequest::Upsert { mode });
+                    assert!(
+                        matches!(res, Err(AdapterError::Host(_))),
+                        "dangling final symlink の Upsert は拒否 [{policy:?}/{mode:?}]"
+                    );
+                    assert!(
+                        !target.exists(),
+                        "root 外の target が作られない [{policy:?}/{mode:?}]"
+                    );
+                    let meta = fs::symlink_metadata(&link).expect("lstat link");
+                    assert!(
+                        meta.file_type().is_symlink(),
+                        "symlink は symlink のまま残る [{policy:?}/{mode:?}]"
+                    );
+                }
+            }
         }
 
         #[cfg(unix)]
