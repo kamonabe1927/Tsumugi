@@ -2881,6 +2881,28 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
 - **想定の変更規模**: `src/` 約 350 行、触る仕組みは fuel の課金点 1 つ（両 engine の課金を同じ API へ寄せる）、
   受入基準 3。
 
+**ready にする時点の注記**（F-2b の設計 PR。main d1c7d02 で確かめた。上の範囲・受入基準は変えず、実装で読み違え
+やすい点だけを補う）:
+
+- 置き換える課金点は、tree が `src/eval.rs` の `count_step` 呼び出し 7 か所（`while` / `for` の反復 2・user function
+  呼び出し 1（同期経路と式 frame が共有する `begin_user_call`）・host function 呼び出し 4（`prepare_call` の
+  host 経路、式 frame の `CallTarget::Host`・`CallTarget::Cooperative`、`eval_cooperative_call`））と `src/builtin.rs` の callback 前処理 1 か所、VM が `OpCode::Loop`・`OpCode::PrepareCall`・
+  `Vm::call_fn_value` の 3 か所である。tree の host function 呼び出し（embedder が登録した関数）は版 `1` では
+  user function 呼び出しと同じ 1 を課金する。`FuelSchedule` の種別でどう表すかは判断の候補 Q1。
+- compiler は `Loop` を出すすべての位置（ループ末尾の back-edge と、`while` の `continue` が出す `Loop`）の直前に、
+  その `Loop` と同じ line（ループ文の行）で `Charge` を出す。`PrepareCall` についても直前に同じ line で出す。どの
+  jump も `Charge` と `Loop` / `PrepareCall` の間へ飛び込まない（`Charge` を飛ばすと F2b-AT-01 の観測が変わる）。
+- `Loop`・`PrepareCall` は課金しなくなる。`PrepareCall` の深度検査はそのまま残す。手組みの bytecode で `Charge` を
+  省いた `Loop` は fuel を課金せず、instruction watchdog の (W1) で止まる（`Jump(0)` と同じ扱い。停止性は watchdog が
+  担う、[次期意味論・実装決定](semantic-decisions.md) §17.7）。`tests/defensive_vm.rs` の `backward_loop_halts_with_limit`
+  は `limit` での停止を確かめるだけなので assert は変わらないが、「`Loop` は fuel を課金する」という doc comment は
+  直す。正規 compiler 出力の「watchdog の tick 数は fuel 課金数 + root frame 数を超えない」不変条件は、各 `Loop` の
+  直前に `Charge` があることで保たれる。
+- 文書: [次期意味論・実装決定](semantic-decisions.md) §17.7.3 の fuel の論理課金点 (F1)・(F2) の記述（`Loop` 命令・
+  `PrepareCall` で課金）を「直前の `Charge`」に合わせ、本仕様 §4.1 の後の段落・`src/vm.rs` の `count_step` の doc を
+  合わせる。逸脱一覧の §4.1 の行は F-2c まで残す（F-2b の後も課金は版 `1` のまま）。
+- `Charge` の payload の型と、F2b-AT-02 の「未知の種別」の読み方は判断の候補 Q2。
+
 ##### F-2c 実装スライス（§4.1 の主要 charge point への移行・`fuel_accounting_revision` 1 → 2・既定 `total_fuel`）
 
 - **範囲**: 上の小節の「課金点を §4.1 の主要 charge point どおりへ張り直す」「既定 `total_fuel` の見直し」
