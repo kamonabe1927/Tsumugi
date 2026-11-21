@@ -3314,6 +3314,555 @@ print(a, b)
         assert!(pending.is_none());
         assert!(pairs >= 200 / 16, "callback 本体で yield している: {pairs}");
     }
+
+    // =========================================================================
+    // fuel-bulk-chunk-yield（execution-control の同名小節、BCY-AT-01〜05）
+    // =========================================================================
+
+    /// 2,000 要素の置換（同じ並びを Rust 側でも作る）。
+    const BCY_SCALARS_2000: &str =
+        "let xs = []\nfor i in range(0, 2000)\n  push(xs, (i * 7919) % 2000)\nend\n";
+
+    /// 小さな List を要素に持つ List（`n` 要素）を作る prelude。
+    fn bcy_nested(name: &str, n: usize) -> String {
+        format!("let {name} = []\nfor i in range(0, {n})\n  push({name}, [i])\nend\n")
+    }
+
+    /// `PollSlice::max_fuel = 16` で terminal まで poll し、(poll ごとの commit 済み fuel の増分と
+    /// SliceFuelExhausted で yield したか, terminal の outcome) を返す。
+    fn bcy_poll(text: &str) -> (Vec<(u64, bool)>, tsumugi::ExecutionOutcome) {
+        let engine = Engine::new();
+        let script = engine.compile(text).expect("compile");
+        let mut ctx = ExecutionContext::new();
+        let mut handle = engine
+            .create_execution(&script, &mut ctx, ExecutionRequest::new())
+            .expect("admit");
+        let mut previous = handle.usage().committed.fuel;
+        let mut polls = Vec::new();
+        loop {
+            let result = handle.poll(PollSlice { max_fuel: 16 }).expect("poll");
+            let fuel = handle.usage().committed.fuel;
+            let slice_yield = matches!(
+                result,
+                PollResult::Yielded {
+                    reason: tsumugi::YieldReason::SliceFuelExhausted,
+                    ..
+                }
+            );
+            polls.push((fuel - previous, slice_yield));
+            previous = fuel;
+            if let PollResult::Terminal { outcome, .. } = result {
+                return (polls, outcome);
+            }
+        }
+    }
+
+    /// 0.21 の `sort` の比較の段 1 回分の fuel（`bulk_step` を走査の段のあとまで回して測る）。
+    /// `nested` なら各要素を 1 要素の List にする（比較が List のノードごとに fuel を課金する）。
+    fn bcy_compare_stage_fuel(items: Vec<i64>, nested: bool) -> u64 {
+        use tsumugi::builtin_core::{BulkStep, bulk_start_sort, bulk_step};
+        use tsumugi::value::{Tracked, Value};
+        let wrap = |i: i64| {
+            if nested {
+                Value::List(Tracked::constant(vec![Value::Int(i)]))
+            } else {
+                Value::Int(i)
+            }
+        };
+        let list = Value::List(Tracked::constant(items.into_iter().map(wrap).collect()));
+        let mut budget = tsumugi::budget::BudgetLedger::with_config(BudgetConfig::for_legacy(
+            u64::MAX / 2,
+            1 << 20,
+        ));
+        let mut state = bulk_start_sort(&[list], tsumugi::embedding::LanguageRevision::CURRENT, 1)
+            .expect("start");
+        let mut last = budget.committed_fuel();
+        loop {
+            let done = matches!(
+                bulk_step(&mut state, &mut budget).expect("step"),
+                BulkStep::Done(_)
+            );
+            let now = budget.committed_fuel();
+            let stage = now - last;
+            last = now;
+            if done {
+                return stage;
+            }
+        }
+    }
+
+    /// 1 chunk の fuel の上限（小さな List の要素の描画・等価判定と `sort` の走査は 1 / element）。
+    const BCY_CHUNK_FUEL: u64 = 256;
+
+    /// BCY-AT-01: slice の使用量が builtin の fuel を数え、poll ごとの fuel の増分が
+    /// `max_fuel + chunk 1 つ分 + sort の比較の段 1 回分` 以内で、`sort` の文の直後に
+    /// `Yielded(SliceFuelExhausted)` になる。
+    #[test]
+    fn bcy_at_01_slice_usage_counts_builtin_fuel() {
+        let order: Vec<i64> = (0..2000).map(|i| (i * 7919) % 2000).collect();
+        let compare = bcy_compare_stage_fuel(order, true);
+        assert!(
+            compare > 16 + BCY_CHUNK_FUEL,
+            "比較の段は 1 chunk より重い: {compare}"
+        );
+        let bound = 16 + BCY_CHUNK_FUEL + compare;
+        // 2,000 要素の List の sort（要素は小さな List）と、2,000 個の List を要素に持つ List の join。
+        let text = format!(
+            "{BCY_SCALARS_2000}let zs = []\nfor x in xs\n  push(zs, [x])\nend\nlet s = sort(zs)\nlet j = join(zs, \",\")\n"
+        );
+        let (polls, outcome) = bcy_poll(&text);
+        assert_eq!(outcome, tsumugi::ExecutionOutcome::Completed);
+        for (increment, _) in &polls {
+            assert!(*increment <= bound, "1 poll の fuel {increment} > {bound}");
+        }
+        // 比較の段を含む poll は、`sort` の文の直後の yield 可能点で SliceFuelExhausted になる
+        // （従来は slice が count_step だけを数え、比較の段の後も文を続けていた）。
+        let heavy: Vec<_> = polls
+            .iter()
+            .filter(|(increment, _)| *increment > 16 + BCY_CHUNK_FUEL)
+            .collect();
+        assert_eq!(heavy.len(), 1, "比較の段は 1 回: {heavy:?}");
+        assert!(heavy[0].1, "比較の段のあと slice fuel で yield する");
+        assert!(
+            heavy[0].0 <= compare + 16,
+            "比較の段のあとに文を続けない: {} > {}",
+            heavy[0].0,
+            compare + 16
+        );
+        // スカラー要素の sort は比較の段が fuel を課金しないが、走査の chunk ごとに yield する。
+        let (base, _) = bcy_poll(BCY_SCALARS_2000);
+        let (polls, outcome) = bcy_poll(&format!("{BCY_SCALARS_2000}let s = sort(xs)\n"));
+        assert_eq!(outcome, tsumugi::ExecutionOutcome::Completed);
+        assert!(
+            polls.len() - base.len() >= 2000 / 256,
+            "{}",
+            polls.len() - base.len()
+        );
+
+        // index 代入・`pop` の深度の読み直しを含む script: ただ 1 つの最も深い子を浅い値で置き換える・
+        // 外すたびに、残りの子 500 個を読み直す fuel が 1 文の中で課金される（semantic-decisions §21.3）。
+        // 読み直しも slice の使用量に入るので、1 poll の増分は `16 + 1 文の読み直し分` 以内に収まる
+        // （main の数え方〔count_step だけ〕では読み直しを含む文を 1 slice に何文も続けて超える）。
+        let children = 500;
+        let iterations = 20;
+        let text = format!(
+            "\
+let xs = range(0, {children})
+for i in range(0, {iterations})
+  xs[0] = [[i]]
+  xs[0] = 0
+  push(xs, [[i]])
+  let p = pop(xs)
+end
+"
+        );
+        let (polls, outcome) = bcy_poll(&text);
+        assert_eq!(outcome, tsumugi::ExecutionOutcome::Completed);
+        let total: u64 = polls.iter().map(|(increment, _)| increment).sum();
+        // 反復 1 回につき index 代入で 500、`pop` で 500 の読み直し。
+        assert!(
+            total >= (iterations * 2 * children) as u64,
+            "読み直しが課金されている: {total}"
+        );
+        let reread_bound = 16 + children as u64 + 1;
+        for (increment, _) in &polls {
+            assert!(
+                *increment <= reread_bound,
+                "1 poll の fuel {increment} > {reread_bound}"
+            );
+        }
+    }
+
+    /// 監査付き（`audit_slice_fuel(16)`）で実行し、Yielded / Resumed の対と順序を確かめて対の数を返す。
+    fn bcy_audit_pairs(text: &str) -> usize {
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let audited = EmbeddingEngine::builder()
+            .audit_sink(sink.clone() as Arc<dyn AuditSink>)
+            .audit_slice_fuel(16)
+            .build()
+            .expect("build");
+        let linked = link(&audited, text);
+        let mut ctx = EmbeddingContext::new(&audited);
+        let outcome = audited.run_audited(&linked, &mut ctx, request(CapabilitySet::empty()));
+        assert!(
+            matches!(outcome.outcome(), Some(EmbeddingOutcome::Completed { .. })),
+            "{text}"
+        );
+        let mut pending: Option<u64> = None;
+        let mut last: Option<u64> = None;
+        let mut pairs = 0;
+        for envelope in sink.snapshot() {
+            match envelope.event {
+                AuditEvent::Yielded { poll_index, .. } => {
+                    assert!(pending.is_none(), "Yielded が連続した");
+                    assert!(
+                        last.is_none_or(|prev| poll_index > prev),
+                        "poll_index が単調でない"
+                    );
+                    pending = Some(poll_index);
+                    last = Some(poll_index);
+                }
+                AuditEvent::Resumed { poll_index, .. } => {
+                    assert_eq!(pending.take(), Some(poll_index), "Resumed が対にならない");
+                    pairs += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(pending.is_none());
+        pairs
+    }
+
+    /// BCY-AT-02: 0.21 の `sort` の走査と、複合要素の `join`・`contains` が builtin の途中の chunk 境界で
+    /// yield する（Q4 = A）。スカラー要素の `join` / `contains` は slice fuel では途中で区切れない。
+    #[test]
+    fn bcy_at_02_chunk_boundaries_yield_inside_builtins() {
+        let n: usize = 10_000;
+        let min_inside = n.div_ceil(256) - 1;
+        let compare = bcy_compare_stage_fuel((0..n as i64).rev().collect(), true);
+        let bound = 16 + BCY_CHUNK_FUEL + compare;
+        let scalars = format!("let xs = range(0, {n})\nlet r = reverse(xs)\n");
+        let nested = bcy_nested("ys", n);
+        let cases = [
+            (scalars.clone(), "let s = sort(r)\n"),
+            (nested.clone(), "let j = join(ys, \",\")\n"),
+            (
+                nested.clone(),
+                format!("let c = contains(ys, [{}])\n", n - 1).leak() as &str,
+            ),
+        ];
+        for (prelude, call) in &cases {
+            let (base, _) = bcy_poll(prelude);
+            let text = format!("{prelude}{call}");
+            let (polls, outcome) = bcy_poll(&text);
+            assert_eq!(outcome, tsumugi::ExecutionOutcome::Completed, "{call}");
+            let inside = polls.len() - base.len();
+            assert!(
+                inside >= min_inside,
+                "{call}: builtin の途中の yield {inside} < {min_inside}"
+            );
+            for (increment, _) in &polls {
+                assert!(
+                    *increment <= bound,
+                    "{call}: 1 poll の fuel {increment} > {bound}"
+                );
+            }
+            let pairs = bcy_audit_pairs(&text) - bcy_audit_pairs(prelude);
+            assert!(pairs >= min_inside, "{call}: Yielded/Resumed の対 {pairs}");
+        }
+        // スカラー要素の `join` / `contains` は要素の描画・等価判定が fuel を課金しないので、
+        // slice fuel による yield が builtin の途中で起きない（範囲外の記録どおり）。
+        for call in ["let j = join(xs, \",\")\n", "let c = contains(xs, -1)\n"] {
+            let (base, _) = bcy_poll(&scalars);
+            let (polls, outcome) = bcy_poll(&format!("{scalars}{call}"));
+            assert_eq!(outcome, tsumugi::ExecutionOutcome::Completed, "{call}");
+            assert!(
+                polls.len() - base.len() <= 1,
+                "{call}: {}",
+                polls.len() - base.len()
+            );
+        }
+    }
+
+    /// tree（Rust 再帰の同期経路）と VM を standard の予算で走らせ、(成否と行・メッセージ, stdout,
+    /// committed fuel) を返す。
+    fn bcy_run_sync(
+        text: &str,
+        vm: bool,
+        revision: tsumugi::embedding::LanguageRevision,
+    ) -> (Result<(), (usize, String)>, String, u64) {
+        let text = text.to_string();
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let program =
+                    tsumugi::parser::Parser::new(tsumugi::lexer::Lexer::new(&text).tokenize())
+                        .parse()
+                        .expect("parse");
+                let config = BudgetConfig::standard(shared_clock().as_ref()).expect("standard");
+                let (caps, buffer) = stdout_caps();
+                let (result, fuel) = if vm {
+                    let chunk = tsumugi::compiler::Compiler::new()
+                        .compile(&program)
+                        .expect("compile");
+                    let mut machine = tsumugi::vm::Vm::with_budget(chunk, config);
+                    machine.set_capabilities(caps);
+                    machine.set_language_revision(revision);
+                    let result = machine.run();
+                    (result, machine.budget_usage().committed.fuel)
+                } else {
+                    let mut evaluator = tsumugi::eval::Evaluator::with_budget(config);
+                    evaluator.set_capabilities(caps);
+                    evaluator.set_language_revision(revision);
+                    let result = evaluator.run(&program, text.len() as u64);
+                    (result, evaluator.budget_usage().committed.fuel)
+                };
+                let stdout =
+                    String::from_utf8(buffer.lock().expect("lock").clone()).expect("utf-8");
+                (
+                    result.map_err(|e| (e.line(), e.message().to_string())),
+                    stdout,
+                    fuel,
+                )
+            })
+            .expect("spawn")
+            .join()
+            .expect("join")
+    }
+
+    /// 埋め込みの outcome を (成否と行・メッセージ, committed fuel) に畳む。
+    fn bcy_fold(outcome: &EmbeddingOutcome) -> (Result<(), (usize, String)>, u64) {
+        match outcome {
+            EmbeddingOutcome::Completed { usage } => (Ok(()), usage.committed.fuel),
+            EmbeddingOutcome::RuntimeError { error, usage }
+            | EmbeddingOutcome::BudgetExceeded { error, usage } => (
+                Err((
+                    error.line.expect("line") as usize,
+                    error.safe_message.clone(),
+                )),
+                usage.committed.fuel,
+            ),
+            other => panic!("想定外の terminal: {other:?}"),
+        }
+    }
+
+    /// BCY-AT-03 の比較: 強制 yield（全 chunk 境界）の poll 経路・同期の poll 経路（監査付きと sink 無し）・
+    /// `Evaluator::run`・VM が一致する。強制側の Yielded 回数を返す。
+    fn bcy_assert_matches(text: &str) -> usize {
+        let (forced, yields) = run_audited(text, true);
+        let (plain, _) = run_audited(text, false);
+        // outcome は usage（committed fuel・live_heap / peak_heap を含む）ごと比べる。
+        assert_eq!(
+            forced, plain,
+            "監査付き: 強制 yield と同期実行が食い違う\n{text}"
+        );
+        assert_eq!(run_plain(text, true), run_plain(text, false), "{text}");
+        let (result, fuel) = bcy_fold(&forced.outcome);
+        let revision = tsumugi::embedding::LanguageRevision::CURRENT;
+        for vm in [false, true] {
+            let (sync, stdout, sync_fuel) = bcy_run_sync(text, vm, revision);
+            assert_eq!(forced.stdout, stdout, "vm={vm}\n{text}");
+            assert_eq!(result, sync, "vm={vm}\n{text}");
+            assert_eq!(fuel, sync_fuel, "vm={vm}\n{text}");
+        }
+        yields
+    }
+
+    /// BCY-AT-03: BCY-AT-01・02 の script とエラー経路が、強制 yield の poll 経路・同期経路・VM で一致する。
+    #[test]
+    fn bcy_at_03_chunked_builtins_match_sync_and_vm() {
+        let nested = bcy_nested("ys", 1000);
+        let scalars = "let xs = range(0, 1000)\n".to_string();
+        let scripts = [
+            (
+                BCY_SCALARS_2000.to_string(),
+                "let s = sort(xs)\nprint(s[0], s[1999], len(s))\n",
+            ),
+            (nested.clone(), "let j = join(ys, \", \")\nprint(len(j))\n"),
+            (
+                nested.clone(),
+                "print(contains(ys, [999]), contains(ys, [1000]))\n",
+            ),
+            (nested.clone(), "let s = sort(ys)\nprint(s[0], s[999])\n"),
+            (
+                nested.clone(),
+                "let r = reverse(ys)\nprint(contains(r, [700]))\n",
+            ),
+            // スカラー要素の join / contains（slice fuel では区切れないが強制 yield では区切る）。
+            (
+                scalars,
+                "print(len(join(xs, \"-\")), contains(xs, 999), contains(xs, -1))\n",
+            ),
+        ];
+        for (prelude, call) in &scripts {
+            let base = bcy_assert_matches(prelude);
+            let text = format!("{prelude}{call}");
+            // 強制 yield は builtin の途中の chunk 境界（1,000 要素なら 3 つ以上）でも yield する。
+            assert!(bcy_assert_matches(&text) >= base + 3, "{text}");
+        }
+        // 1 要素が 8 KiB の文字列の List への join: 強制 yield で 16 KiB の chunk 境界ごとに区切る。
+        // 8 要素なら 2 要素（16 KiB）ごとの 4 chunk で、1 要素のとき（chunk 1 つ）より builtin の途中の
+        // yield がちょうど 3 回多い（要素の途中では区切らない）。
+        let join_yields = |elements: usize| {
+            let prelude = format!(
+                "let s = \"x\"\nfor i in range(0, 13)\n  s = s + s\nend\nlet bigs = [{}]\n",
+                vec!["s"; elements].join(", ")
+            );
+            let base = bcy_assert_matches(&prelude);
+            let joined = format!("{prelude}let j = join(bigs, \"\")\nprint(len(j))\n");
+            bcy_assert_matches(&joined) - base
+        };
+        assert_eq!(join_yields(8), join_yields(1) + 3, "16 KiB ごとに区切る");
+
+        // エラー経路。
+        let dag = "let a = [1]\nfor i in range(0, 9)\n  a = [a, a]\nend\nlet zs = []\nfor i in range(0, 3000)\n  push(zs, a)\nend\n";
+        let errors = [
+            // join の途中で total fuel が尽きる（共有 DAG の描画）。
+            format!("{dag}print(1)\nlet j = join(zs, \",\")\n"),
+            // max_single_string_bytes（8 MiB）を超える。
+            "let s = \"x\"\nfor i in range(0, 17)\n  s = s + s\nend\nlet bigs = []\nfor i in range(0, 80)\n  push(bigs, s)\nend\nlet j = join(bigs, \"\")\n".to_string(),
+            "print(join([1, 2], 3))\n".to_string(),
+            "print(join(5, \",\"))\n".to_string(),
+            "print(contains(5, 1))\n".to_string(),
+            "print(sort(\"abc\"))\n".to_string(),
+            "try\n  print(join([1], 2))\ncatch e\n  print(e)\nend\n".to_string(),
+            format!("{nested}print(contains(ys, [300]))\n"),
+        ];
+        for text in &errors {
+            bcy_assert_matches(text);
+            let (outcome, _) = run_plain(text, false);
+            let failed = !matches!(outcome, EmbeddingOutcome::Completed { .. });
+            // `contains` が途中で見つかる経路と、型違いを `try` で捕捉する経路は成功する。
+            let succeeds =
+                text.ends_with("print(contains(ys, [300]))\n") || text.starts_with("try");
+            assert_eq!(failed, !succeeds, "{text}");
+        }
+        // 予算超過の 2 経路は BudgetExceeded（fuel・単一文字列の上限）。
+        for text in &errors[..2] {
+            assert!(
+                matches!(
+                    run_plain(text, false).0,
+                    EmbeddingOutcome::BudgetExceeded { .. }
+                ),
+                "{text}"
+            );
+        }
+
+        // revision 0.20 の `sort`（描画キーの chunk）: 強制 yield と同期の poll 経路・tree・VM が一致する。
+        let text = format!(
+            "{nested}let s = sort(ys)\nprint(s[0], s[1], s[999])\nprint(sort([10, 9, 1]))\n"
+        );
+        let rev = tsumugi::embedding::LanguageRevision::V0_20;
+        let run = |forced: bool| {
+            let config = tsumugi::EngineConfig {
+                language_revision: rev,
+                ..tsumugi::EngineConfig::default()
+            };
+            let engine = EmbeddingEngine::builder()
+                .config(config)
+                .build()
+                .expect("build");
+            let linked = link(&engine, &text);
+            let mut ctx = EmbeddingContext::new(&engine);
+            ctx.force_yield_at_every_boundary_for_test(forced);
+            let (caps, buffer) = stdout_caps();
+            let outcome = engine.run(&linked, &mut ctx, request(caps));
+            let stdout = String::from_utf8(buffer.lock().expect("lock").clone()).expect("utf-8");
+            (outcome, stdout)
+        };
+        let forced = run(true);
+        assert_eq!(forced, run(false));
+        assert!(forced.1.ends_with("[1, 10, 9]\n"), "{}", forced.1);
+        let (result, fuel) = bcy_fold(&forced.0);
+        for vm in [false, true] {
+            let (sync, stdout, sync_fuel) = bcy_run_sync(&text, vm, rev);
+            assert_eq!(
+                (result.clone(), forced.1.clone(), fuel),
+                (sync, stdout, sync_fuel),
+                "vm={vm}"
+            );
+        }
+    }
+
+    /// BCY-AT-05: 同期経路（tree の `Evaluator::run` と VM）の `sort` / `join` / `contains` の fuel 値が
+    /// 本スライスの前（main）と同じ。値は変更前の main で測った。
+    #[test]
+    fn bcy_at_05_sync_fuel_values_unchanged() {
+        use tsumugi::embedding::LanguageRevision;
+        let nested = bcy_nested("ys", 600);
+        let cases = [
+            (
+                format!("{nested}let s = sort(ys)\n"),
+                LanguageRevision::CURRENT,
+                1799,
+            ),
+            (
+                format!("{nested}let s = sort(ys)\n"),
+                LanguageRevision::V0_20,
+                1200,
+            ),
+            (
+                format!("{BCY_SCALARS_2000}let s = sort(xs)\n"),
+                LanguageRevision::CURRENT,
+                4000,
+            ),
+            (
+                format!("{nested}let j = join(ys, \",\")\n"),
+                LanguageRevision::CURRENT,
+                1200,
+            ),
+            (
+                format!("{nested}let c = contains(ys, [599])\nlet d = contains(ys, [7])\n"),
+                LanguageRevision::CURRENT,
+                1208,
+            ),
+            (
+                "let xs = range(0, 600)\nlet j = join(xs, \",\")\nlet c = contains(xs, -1)\n"
+                    .to_string(),
+                LanguageRevision::CURRENT,
+                0,
+            ),
+        ];
+        let mut got = Vec::new();
+        for (text, revision, _) in &cases {
+            for vm in [false, true] {
+                let (result, _, fuel) = bcy_run_sync(text, vm, *revision);
+                assert!(result.is_ok(), "{text}");
+                got.push(fuel);
+            }
+        }
+        let expected: Vec<u64> = cases.iter().flat_map(|c| [c.2, c.2]).collect();
+        assert_eq!(got, expected);
+    }
+
+    /// BCY-AT-04（engine 分）: context の変数へ書き込んだあと bulk builtin の途中で yield させても
+    /// submission journal が保たれ、成功で commit、chunk の途中の予算超過で rollback される。
+    #[test]
+    fn bcy_at_04_transaction_spans_yields_inside_bulk_builtins() {
+        // 予算超過（強制 yield で全 chunk 境界を跨ぐ）。
+        let engine = EmbeddingEngine::builder().build().expect("build");
+        let mut ctx = EmbeddingContext::new(&engine);
+        ctx.force_yield_at_every_boundary_for_test(true);
+        let run = |ctx: &mut EmbeddingContext, text: &str| {
+            let linked = link(&engine, text);
+            engine.run(&linked, ctx, request(CapabilitySet::empty()))
+        };
+        let prelude = format!("let total = 0\n{}", bcy_nested("ys", 600));
+        assert!(matches!(
+            run(&mut ctx, &prelude),
+            EmbeddingOutcome::Completed { .. }
+        ));
+        assert!(matches!(
+            run(
+                &mut ctx,
+                "total = 6\nlet j = join(ys, \",\")\nlet s = sort(ys)\n"
+            ),
+            EmbeddingOutcome::Completed { .. }
+        ));
+        assert!(matches!(
+            run(
+                &mut ctx,
+                "if total != 6 or len(s) != 600 or len(j) == 0\n  nope\nend\n"
+            ),
+            EmbeddingOutcome::Completed { .. }
+        ));
+        let dag = "let a = [1]\nfor i in range(0, 9)\n  a = [a, a]\nend\nlet zs = []\nfor i in range(0, 3000)\n  push(zs, a)\nend\n";
+        let bad = format!("total = 100\nlet later = 2\n{dag}let j2 = join(zs, \",\")\n");
+        assert!(matches!(
+            run(&mut ctx, &bad),
+            EmbeddingOutcome::BudgetExceeded { .. }
+        ));
+        assert!(matches!(
+            run(&mut ctx, "let probe = later\n"),
+            EmbeddingOutcome::RuntimeError { .. }
+        ));
+        assert!(matches!(
+            run(&mut ctx, "if total != 6\n  nope\nend\n"),
+            EmbeddingOutcome::Completed { .. }
+        ));
+
+        // cancel の rollback は src/engine.rs の単体テスト（bcy_at_04_cancel_inside_bulk_builtin_rolls_back）。
+    }
 }
 
 // =============================================================================
