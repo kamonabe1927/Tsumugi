@@ -335,6 +335,9 @@ struct ExprFrame {
     snapshot: Option<Value>,
     /// `map` / `filter` / `each`: 要素ループの反復状態（e4。引数の評価と型検査を終えてから持つ）。
     callback: Option<Box<CallbackIter>>,
+    /// `join` / `contains` / `sort`: chunk ごとに進める途中状態（fuel-bulk-chunk-yield。引数を評価し
+    /// 終えた dispatch の段で作る）。
+    bulk: Option<Box<crate::builtin_core::BulkState>>,
     /// 値の受け渡し先（親の式 frame の operand stack、または根なら文の受け渡し先）。
     dest: CallDest,
 }
@@ -573,9 +576,10 @@ pub struct Evaluator {
     /// suspend / resume できる（PR-d-2）。関数呼び出しの再入（`drive_call_body`）はこの共有
     /// スタックへ Call frame を積み、`run_driver(stop_depth)` が自分より上だけを回す。
     frames: Vec<Frame>,
-    /// この slice（1 回の `poll`）で消費した fuel（REV-015 Slice 3 PR-d-2、§4.2）。
-    /// `count_step` が加算し、slice 開始時に 0 へ戻す。
-    slice_fuel_used: u64,
+    /// この slice（1 回の `poll`）の開始時の台帳の commit 済み fuel（fuel-bulk-chunk-yield Q1 = A、§4.2）。
+    /// slice の使用量は「現在の commit 済み fuel − この値」で数える。`count_step` の 1 だけでなく、
+    /// builtin が台帳へ直接課金する per-element fuel も slice の使用量に入る。
+    slice_fuel_base: u64,
     /// この slice で消費を許す fuel 上限（§4.2）。`None` は slice 制限なし（同期 `run` /
     /// テスト経路）で、この場合 yield しない。`Some(limit)` は `poll` が 1 slice ぶんを設定。
     slice_fuel_limit: Option<u64>,
@@ -769,7 +773,7 @@ impl Evaluator {
             body_tokens: Vec::new(),
             retain_token_table: std::collections::HashMap::new(),
             frames: Vec::new(),
-            slice_fuel_used: 0,
+            slice_fuel_base: 0,
             slice_fuel_limit: None,
             session: None,
             // C10: library 既定は deny-by-default（empty）。CLI は safe/legacy profile builder が
@@ -1062,22 +1066,27 @@ impl Evaluator {
     /// ステップ（fuel）を 1 課金し、上限チェックする（REV-015 Slice 1）。
     ///
     /// 既存挙動どおり、total fuel 上限到達時は `step_limit` エラーを call trace 付きで返す。
-    /// あわせて slice fuel 使用量（§4.2）を 1 加算する。slice 上限の判定は yield 可能な
-    /// 文/反復境界（driver）で行うため、ここでは加算だけ行い yield はしない（式の途中で
+    /// 課金した 1 は台帳の commit 済み fuel として slice 使用量（§4.2）にも入る（fuel-bulk-chunk-yield
+    /// Q1 = A）。slice 上限の判定は yield 可能な文/反復境界（driver）で行うため、ここでは課金だけ行い
+    /// yield はしない（式の途中で
     /// yield すると Rust 再帰スタックを保存できず resume 不能になるため）。
     fn count_step(&mut self, line: usize) -> Result<(), TsumugiError> {
         self.budget
             .charge_fuel(1, ExecutionPhase::Run)
-            .map_err(|stop| self.control_stop_to_error(stop, line))?;
-        self.slice_fuel_used = self.slice_fuel_used.saturating_add(1);
-        Ok(())
+            .map_err(|stop| self.control_stop_to_error(stop, line))
     }
 
     /// この slice の fuel を使い切ったか（§4.2）。slice 上限が設定されていない同期実行
-    /// （`run` / テスト）では常に false で、yield しない。
+    /// （`run` / テスト）では常に false で、yield しない。使用量は slice 開始時からの台帳の
+    /// commit 済み fuel の差分（fuel-bulk-chunk-yield Q1 = A）。
     fn slice_exhausted(&self) -> bool {
         match self.slice_fuel_limit {
-            Some(limit) => self.slice_fuel_used >= limit,
+            Some(limit) => {
+                self.budget
+                    .committed_fuel()
+                    .saturating_sub(self.slice_fuel_base)
+                    >= limit
+            }
             None => false,
         }
     }
@@ -1748,7 +1757,7 @@ impl Evaluator {
         }
 
         // この slice の fuel 予算を張り直す（slice ごとに 0 から数える）。
-        self.slice_fuel_used = 0;
+        self.slice_fuel_base = self.budget.committed_fuel();
         self.slice_fuel_limit = Some(slice_fuel);
         // B-2 の前進保証: この slice ではまだ 1 文も実行していない。resume 直後の境界では
         // queue 上限を判定しない（Resumed を積んだだけで再 yield する livelock を防ぐ）。
@@ -2819,8 +2828,13 @@ impl Evaluator {
                 Expr::Ident(name) if self.env.get_cell(name).is_none() => {
                     // `map` / `filter` / `each` は引数に呼び出しが無くても要素ごとに callback を
                     // 呼ぶので、常に式 frame にする（e4）。
+                    // `join` / `contains` / `sort` も chunk 境界を yield 可能点にするため常に式 frame に
+                    // する（fuel-bulk-chunk-yield）。
                     match self.resolve_frame_target(name) {
                         Some(CallTarget::Callback) => true,
+                        Some(CallTarget::Builtin) if crate::builtin_core::is_bulk_builtin(name) => {
+                            true
+                        }
                         Some(_) => args.iter().any(crate::ast::contains_call),
                         None => false,
                     }
@@ -2899,6 +2913,7 @@ impl Evaluator {
                 cell: None,
                 snapshot: None,
                 callback: None,
+                bulk: None,
                 dest,
             })),
             scope_base: self.env.scope_depth(),
@@ -3224,6 +3239,10 @@ impl Evaluator {
                 }
             }
         }
+        // `join` / `contains` / `sort`: 引数を評価し終えた後は chunk を 1 つずつ進める（fuel-bulk-chunk-yield）。
+        if is_builtin && self.expr_frame_mut().bulk.is_some() {
+            return self.step_bulk_call(line);
+        }
         // `print`: 直前に評価した引数を描画して足す（fuel と per-item byte 上限の課金はその時点）。
         if is_builtin
             && name == "print"
@@ -3246,6 +3265,19 @@ impl Evaluator {
                 next + 1,
                 line,
             );
+        }
+        if is_builtin && crate::builtin_core::is_bulk_builtin(name) {
+            // dispatch の段: 状態を作って式 frame に保存し、同じ段で最初の chunk を進める。評価済みの
+            // 引数は同期経路の `evaluated` と同じく、結果を `track_result` するまで operand stack に残す。
+            let revision = self.language_revision();
+            let state = crate::builtin_core::bulk_start(
+                name,
+                &self.expr_frame_mut().operands,
+                revision,
+                line,
+            )?;
+            self.expr_frame_mut().bulk = Some(Box::new(state));
+            return self.step_bulk_call(line);
         }
         let mut operands = std::mem::take(&mut frame.operands);
         let value = match target {
@@ -3280,6 +3312,30 @@ impl Evaluator {
         self.finish_expr_frame(value)
     }
 
+    /// `join` / `contains` / `sort` の式 frame で chunk を 1 つ進める（fuel-bulk-chunk-yield）。
+    ///
+    /// `Continue` なら状態を式 frame に戻して段を終える（段の間が yield 可能点で、slice fuel の判定と
+    /// 強制 yield フックだけが効く）。`Done` なら同期経路の `apply_pure_core_builtin` と同じく
+    /// `track_result` してから frame を完了する。課金の順序・量・エラー点は同期経路の wrapper と同じ。
+    fn step_bulk_call(&mut self, line: usize) -> Result<Option<FlowSignal>, TsumugiError> {
+        let mut state = self
+            .expr_frame_mut()
+            .bulk
+            .take()
+            .ok_or_else(|| TsumugiError::internal_control(line, "bulk state missing"))?;
+        match crate::builtin_core::bulk_step(&mut state, &mut self.budget)? {
+            crate::builtin_core::BulkStep::Continue => {
+                self.expr_frame_mut().bulk = Some(state);
+                Ok(None)
+            }
+            crate::builtin_core::BulkStep::Done(value) => {
+                let tracked = self.track_bulk_result(value, line)?;
+                drop(state);
+                self.finish_expr_frame(tracked)
+            }
+        }
+    }
+
     /// callee が識別子で user binding を持たず、`map` / `filter` / `each` に解決される call か
     /// （tree-expr-continuation-e4）。
     fn is_callback_call(&self, expr: &Expr) -> bool {
@@ -3291,6 +3347,22 @@ impl Evaluator {
                     Expr::Ident(name)
                         if self.env.get_cell(name).is_none()
                             && self.resolve_frame_target(name) == Some(CallTarget::Callback)
+                )
+        )
+    }
+
+    /// callee が識別子で user binding を持たず、`join` / `contains` / `sort` に解決される call か
+    /// （fuel-bulk-chunk-yield）。この call は chunk 境界を yield 可能点にするため式 frame で進める。
+    fn is_bulk_call(&self, expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::Call { callee, .. }
+                if matches!(
+                    callee.as_ref(),
+                    Expr::Ident(name)
+                        if crate::builtin_core::is_bulk_builtin(name)
+                            && self.env.get_cell(name).is_none()
+                            && self.resolve_frame_target(name) == Some(CallTarget::Builtin)
                 )
         )
     }
@@ -3842,7 +3914,8 @@ impl Evaluator {
             expr,
             Expr::Call { callee, args }
                 if !crate::ast::contains_call(callee) && !args.iter().any(crate::ast::contains_call)
-        ) && !self.is_callback_call(expr);
+        ) && !self.is_callback_call(expr)
+            && !self.is_bulk_call(expr);
         if !e1_shape && !self.needs_expr_frame(expr) {
             return Ok(None);
         }

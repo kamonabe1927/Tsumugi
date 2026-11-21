@@ -1212,6 +1212,44 @@ mod tests {
         assert_rolled_back(&context);
     }
 
+    // BCY-AT-04（fuel-bulk-chunk-yield）: bulk builtin の chunk の途中の slice yield のあとで cancel すると、
+    // yield より前の書き込みも rollback される。
+    #[test]
+    fn bcy_at_04_cancel_inside_bulk_builtin_rolls_back() {
+        let engine = Engine::new();
+        let mut context = prepared(&engine, ExecutionContext::new());
+        let build = engine
+            .compile("let ys = []\nfor k in range(0, 3000)\n  push(ys, [k])\nend\n")
+            .unwrap();
+        assert_eq!(
+            engine.execute(&build, &mut context),
+            Ok(ExecutionOutcome::Completed)
+        );
+        let script = engine
+            .compile("a = 10\nlet b = 2\npush(xs, 2)\nlet c = contains(ys, [-1])\n")
+            .unwrap();
+        {
+            let mut handle = engine
+                .create_execution(&script, &mut context, ExecutionRequest::new())
+                .unwrap();
+            let start = handle.usage().committed.fuel;
+            // 前の 3 文（数 fuel）を越え、`contains`（3,000 fuel）の chunk の途中まで進める。
+            while handle.usage().committed.fuel - start < 600 {
+                match handle.poll(PollSlice { max_fuel: 16 }).unwrap() {
+                    PollResult::Yielded { .. } => {}
+                    other => panic!("yield を期待: {other:?}"),
+                }
+            }
+            assert!(
+                handle.usage().committed.fuel - start < 3000,
+                "contains の途中"
+            );
+            handle.cancellation_token().cancel();
+            assert_eq!(poll_to_terminal(&mut handle), ExecutionOutcome::Cancelled);
+        }
+        assert_rolled_back(&context);
+    }
+
     /// 一度も完了しない cooperative host function（`h()`）。
     struct PendingHost {
         descriptor: crate::host_function::HostFunctionDescriptor,

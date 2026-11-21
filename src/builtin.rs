@@ -372,6 +372,19 @@ impl Evaluator {
         }
     }
 
+    /// 段階実行した `join` / `contains` / `sort` の結果を、同期経路（[`Self::apply_pure_core_builtin`]）の
+    /// 結果と同じく tracked 化して heap 課金する（fuel-bulk-chunk-yield）。この 3 つは host call では
+    /// ないので response の課金は無い。
+    pub(super) fn track_bulk_result(
+        &mut self,
+        value: Value,
+        line: usize,
+    ) -> Result<Value, TsumugiError> {
+        self.budget
+            .track_result(value, ExecutionPhase::Run)
+            .map_err(|stop| self.control_stop_to_error(stop, line))
+    }
+
     /// `print` の引数 1 つを描画する（同期経路と式 frame で共有、tree-expr-continuation-e3）。
     pub(super) fn render_print_part(
         &mut self,

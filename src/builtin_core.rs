@@ -24,6 +24,8 @@
 //! 内部命令 `__pop_update` は public registry へ置かず、Compiler の pop lowering
 //! 専用 opcode として実装するため source から到達できない。
 
+use std::rc::Rc;
+
 use crate::error::TsumugiError;
 use crate::value::{IndexTarget, NumericOrder, NumericOrdering, Tracked, Value};
 
@@ -437,19 +439,7 @@ pub fn builtin_contains_budgeted(
     budget: &mut crate::budget::BudgetLedger,
     line: usize,
 ) -> Result<Value, TsumugiError> {
-    check_arity("contains", args, 2, line)?;
-    let Value::List(list) = &args[0] else {
-        return contains_non_list(args, line);
-    };
-    for item in list.iter() {
-        let equal = budget
-            .values_equal(item, &args[1], crate::budget::ExecutionPhase::Run)
-            .map_err(|stop| crate::budget::control_stop_to_error(stop, 0, line))?;
-        if equal {
-            return Ok(Value::Bool(true));
-        }
-    }
-    Ok(Value::Bool(false))
+    run_bulk_to_end(bulk_start_contains(args, line)?, budget)
 }
 
 /// `sort` の budget-aware 版（REV-001 / REV-017）。
@@ -473,65 +463,7 @@ pub fn builtin_sort_budgeted(
     revision: crate::embedding::LanguageRevision,
     line: usize,
 ) -> Result<Value, TsumugiError> {
-    check_arity("sort", args, 1, line)?;
-    let Value::List(list) = &args[0] else {
-        return Err(TsumugiError::builtin_arg_type(
-            line, "sort", 1, "List", &args[0],
-        ));
-    };
-
-    if revision >= crate::embedding::LanguageRevision::V0_21 {
-        // REV-017: 全順序 TotalOrder で値どうしを直接比較する（描画キーを作らない）。
-        // 比較ごとに budget 課金する `compare_budgeted` を使うことで、per-element 走査課金
-        // （charge table の 1 / element、値は不変）を比較走査へ適用する。これにより共有 DAG
-        // 要素を含む List の比較も走査課金が有限に積み上がり budget 超過で停止する（§17.8.5）。
-        //
-        // `sort_by` の comparator は失敗を返せないため、最初に起きた `ControlStop` を捕捉して
-        // 以降は `Equal` を返し、ソート後に取り出して error へ写す。安定ソート（sort_by は
-        // stable）で同順位要素は元順序を保つ。
-        use std::cmp::Ordering;
-        let phase = crate::budget::ExecutionPhase::Run;
-        // まず要素数ぶんの走査課金を明示的に行う（§17.8.5 の 1 / element）。render_display が
-        // 担っていた per-node fuel の代替で、要素数 n に対して有限に積む（単調増加）。
-        for _ in list.iter() {
-            budget
-                .charge_fuel(1, phase)
-                .map_err(|stop| crate::budget::control_stop_to_error(stop, 0, line))?;
-        }
-        let mut stop: Option<crate::budget::ControlStop> = None;
-        let mut sorted: Vec<Value> = (**list).clone();
-        sorted.sort_by(|a, b| {
-            if stop.is_some() {
-                return Ordering::Equal;
-            }
-            match crate::value::TotalOrder::compare_budgeted(a, b, budget, phase) {
-                Ok(ord) => ord,
-                Err(s) => {
-                    stop = Some(s);
-                    Ordering::Equal
-                }
-            }
-        });
-        if let Some(s) = stop {
-            return Err(crate::budget::control_stop_to_error(s, 0, line));
-        }
-        return Ok(Value::List(Tracked::constant(sorted)));
-    }
-
-    // revision <= 0.20: 従来の文字列表現比較を温存する。
-    // 各要素の描画キーを budget-aware に先に生成する（materialize 前に打ち切る）。
-    let mut keyed: Vec<(String, Value)> = Vec::with_capacity(list.len());
-    for v in list.iter() {
-        let key = budget
-            .render_display(v, crate::budget::ExecutionPhase::Run)
-            .map_err(|stop| crate::budget::control_stop_to_error(stop, 0, line))?;
-        keyed.push((key, v.clone()));
-    }
-    // 安定ソート（sort_by は stable）。キーが同じ要素は元の順序を保ち、
-    // sort_by_key(to_string) と完全に同一の並びになる。
-    keyed.sort_by(|a, b| a.0.cmp(&b.0));
-    let sorted: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
-    Ok(Value::List(Tracked::constant(sorted)))
+    run_bulk_to_end(bulk_start_sort(args, revision, line)?, budget)
 }
 
 pub fn builtin_reverse(args: &[Value], line: usize) -> Result<Value, TsumugiError> {
@@ -613,30 +545,291 @@ pub fn builtin_join_budgeted(
     budget: &mut crate::budget::BudgetLedger,
     line: usize,
 ) -> Result<Value, TsumugiError> {
+    run_bulk_to_end(bulk_start_join(args, line)?, budget)
+}
+
+// =============================================================================
+// callback なし bulk builtin の段階実行（fuel-bulk-chunk-yield、execution-control §4.1・§4.2）
+// =============================================================================
+
+/// 1 chunk で処理する要素数の上限（§4.1 の 256 elements）。
+pub const BULK_CHUNK_ELEMENTS: usize = 256;
+
+/// `join` の 1 chunk で buffer へ追記する byte 数の目安（§4.1 の 16 KiB）。達したら次の要素の前で区切る。
+pub const BULK_CHUNK_BYTES: usize = 16 * 1024;
+
+/// 段階実行する bulk builtin か（`join` / `contains` / `sort`）。
+pub fn is_bulk_builtin(name: &str) -> bool {
+    matches!(name, "join" | "contains" | "sort")
+}
+
+/// [`bulk_step`] を 1 回呼んだ結果。
+pub enum BulkStep {
+    /// chunk を 1 つ終えた。次の段で続きを進める（段の間が yield 可能点）。
+    Continue,
+    /// 完了した。値は同期経路（wrapper）の戻り値と同じ。
+    Done(Value),
+}
+
+/// bulk builtin の途中状態（yield を跨いで保存する）。第 1 引数の List は `Rc` を共有し、複製しない。
+/// 部分結果（`join` の buffer・`sort` の描画キー）は完了まで heap に課金しない（同期経路と同じ）。
+pub struct BulkState {
+    line: usize,
+    phase: BulkPhase,
+}
+
+enum BulkPhase {
+    /// `join`: 次の要素の index と追記途中の buffer。
+    Join {
+        list: Rc<crate::value::TrackedList>,
+        sep: Rc<crate::value::TrackedStr>,
+        next: usize,
+        out: String,
+    },
+    /// `contains`（第 1 引数が List）: 次に比べる要素の index。
+    Contains {
+        list: Rc<crate::value::TrackedList>,
+        needle: Value,
+        next: usize,
+    },
+    /// `sort`（revision 0.21 以降）の走査課金（1 / element）。
+    SortScan {
+        list: Rc<crate::value::TrackedList>,
+        next: usize,
+    },
+    /// `sort`（revision 0.21 以降）の比較の段。1 段で実行する（§4.2 の有界な超過）。
+    SortCompare { list: Rc<crate::value::TrackedList> },
+    /// `sort`（revision 0.20 以下）の描画キーの生成。
+    SortKeys {
+        list: Rc<crate::value::TrackedList>,
+        next: usize,
+        keyed: Vec<(String, Value)>,
+    },
+    /// 引数の検査の段で結果が決まった（`contains` の第 1 引数が List でない）。
+    Ready(Value),
+    /// 完了済み（`Done` を返した後）。
+    Finished,
+}
+
+/// `join` の状態を作る（arity → 第 1 引数 → 区切りの順に検査する）。
+pub fn bulk_start_join(args: &[Value], line: usize) -> Result<BulkState, TsumugiError> {
     check_arity("join", args, 2, line)?;
     let Value::List(list) = &args[0] else {
         return Err(TsumugiError::builtin_arg_type(
             line, "join", 1, "List", &args[0],
         ));
     };
-    let sep = require_str(&args[1], "join", 2, line)?;
-    // 要素と区切りを 1 つの buffer へ順に書き出し、書き足すたびに累積長を確かめる。
-    // 上限を超えた時点で止めるので、確保は上限に要素 1 つ（または区切り 1 つ）を足した程度に収まる。
+    let Value::Str(sep) = &args[1] else {
+        return Err(TsumugiError::builtin_arg_type(
+            line, "join", 2, "Str", &args[1],
+        ));
+    };
+    Ok(BulkState {
+        line,
+        phase: BulkPhase::Join {
+            list: Rc::clone(list),
+            sep: Rc::clone(sep),
+            next: 0,
+            out: String::new(),
+        },
+    })
+}
+
+/// `contains` の状態を作る。第 1 引数が List でなければ結果をこの段で決める（課金しない）。
+pub fn bulk_start_contains(args: &[Value], line: usize) -> Result<BulkState, TsumugiError> {
+    check_arity("contains", args, 2, line)?;
+    let phase = match &args[0] {
+        Value::List(list) => BulkPhase::Contains {
+            list: Rc::clone(list),
+            needle: args[1].clone(),
+            next: 0,
+        },
+        _ => BulkPhase::Ready(contains_non_list(args, line)?),
+    };
+    Ok(BulkState { line, phase })
+}
+
+/// `sort` の状態を作る。revision 0.21 以降は走査課金 → 比較の段、0.20 以下は描画キーの生成。
+pub fn bulk_start_sort(
+    args: &[Value],
+    revision: crate::embedding::LanguageRevision,
+    line: usize,
+) -> Result<BulkState, TsumugiError> {
+    check_arity("sort", args, 1, line)?;
+    let Value::List(list) = &args[0] else {
+        return Err(TsumugiError::builtin_arg_type(
+            line, "sort", 1, "List", &args[0],
+        ));
+    };
+    let list = Rc::clone(list);
+    let phase = if revision >= crate::embedding::LanguageRevision::V0_21 {
+        BulkPhase::SortScan { list, next: 0 }
+    } else {
+        let keyed = Vec::with_capacity(list.len());
+        BulkPhase::SortKeys {
+            list,
+            next: 0,
+            keyed,
+        }
+    };
+    Ok(BulkState { line, phase })
+}
+
+/// 名前で bulk builtin の状態を作る（tree の式 frame の dispatch の段）。
+pub fn bulk_start(
+    name: &str,
+    args: &[Value],
+    revision: crate::embedding::LanguageRevision,
+    line: usize,
+) -> Result<BulkState, TsumugiError> {
+    match name {
+        "join" => bulk_start_join(args, line),
+        "contains" => bulk_start_contains(args, line),
+        "sort" => bulk_start_sort(args, revision, line),
+        _ => Err(TsumugiError::internal_control(
+            line,
+            "bulk_start on a non-bulk builtin",
+        )),
+    }
+}
+
+/// bulk builtin を 1 chunk 進める。課金の順序・量・エラー点は 1 段で完了まで回す同期経路と同じで、
+/// chunk の境目（256 要素、`join` は 16 KiB の追記も）でだけ `Continue` を返す。要素の途中では区切らない。
+pub fn bulk_step(
+    state: &mut BulkState,
+    budget: &mut crate::budget::BudgetLedger,
+) -> Result<BulkStep, TsumugiError> {
+    let line = state.line;
     let phase = crate::budget::ExecutionPhase::Run;
     let to_error = |stop| crate::budget::control_stop_to_error(stop, 0, line);
-    let mut out = String::new();
-    for (i, v) in list.iter().enumerate() {
-        if i > 0 {
-            out.push_str(sep);
-            budget
-                .check_single_string_len(Some(out.len() as u64), phase)
-                .map_err(to_error)?;
+    let value = match &mut state.phase {
+        BulkPhase::Join {
+            list,
+            sep,
+            next,
+            out,
+        } => {
+            let (start, start_len) = (*next, out.len());
+            while let Some(item) = list.get(*next) {
+                if *next - start >= BULK_CHUNK_ELEMENTS || out.len() - start_len >= BULK_CHUNK_BYTES
+                {
+                    return Ok(BulkStep::Continue);
+                }
+                // 要素と区切りを 1 つの buffer へ順に書き出し、書き足すたびに累積長を確かめる。
+                if *next > 0 {
+                    out.push_str(sep);
+                    budget
+                        .check_single_string_len(Some(out.len() as u64), phase)
+                        .map_err(to_error)?;
+                }
+                budget
+                    .render_display_append(out, item, phase)
+                    .map_err(to_error)?;
+                *next += 1;
+            }
+            Value::str_constant(std::mem::take(out))
         }
-        budget
-            .render_display_append(&mut out, v, phase)
-            .map_err(to_error)?;
+        BulkPhase::Contains { list, needle, next } => {
+            let start = *next;
+            while let Some(item) = list.get(*next) {
+                if *next - start >= BULK_CHUNK_ELEMENTS {
+                    return Ok(BulkStep::Continue);
+                }
+                let equal = budget.values_equal(item, needle, phase).map_err(to_error)?;
+                *next += 1;
+                if equal {
+                    state.phase = BulkPhase::Finished;
+                    return Ok(BulkStep::Done(Value::Bool(true)));
+                }
+            }
+            Value::Bool(false)
+        }
+        BulkPhase::SortScan { list, next } => {
+            // 要素数ぶんの走査課金（§17.8.5 の 1 / element）を chunk ごとに行う。
+            let end = list.len().min(*next + BULK_CHUNK_ELEMENTS);
+            while *next < end {
+                budget.charge_fuel(1, phase).map_err(to_error)?;
+                *next += 1;
+            }
+            if *next < list.len() {
+                return Ok(BulkStep::Continue);
+            }
+            state.phase = BulkPhase::SortCompare {
+                list: Rc::clone(list),
+            };
+            return Ok(BulkStep::Continue);
+        }
+        BulkPhase::SortCompare { list } => {
+            // REV-017: 全順序 TotalOrder で値どうしを直接比較する（描画キーを作らない）。
+            // `sort_by` の comparator は失敗を返せないため、最初に起きた `ControlStop` を捕捉して
+            // 以降は `Equal` を返し、ソート後に取り出して error へ写す。安定ソート（sort_by は
+            // stable）で同順位要素は元順序を保つ。
+            use std::cmp::Ordering;
+            let mut stop: Option<crate::budget::ControlStop> = None;
+            let mut sorted: Vec<Value> = (***list).clone();
+            sorted.sort_by(|a, b| {
+                if stop.is_some() {
+                    return Ordering::Equal;
+                }
+                match crate::value::TotalOrder::compare_budgeted(a, b, budget, phase) {
+                    Ok(ord) => ord,
+                    Err(s) => {
+                        stop = Some(s);
+                        Ordering::Equal
+                    }
+                }
+            });
+            if let Some(s) = stop {
+                return Err(to_error(s));
+            }
+            Value::List(Tracked::constant(sorted))
+        }
+        BulkPhase::SortKeys { list, next, keyed } => {
+            // revision <= 0.20: 各要素の描画キーを budget-aware に生成する（materialize 前に打ち切る）。
+            let end = list.len().min(*next + BULK_CHUNK_ELEMENTS);
+            while *next < end {
+                let v = &list[*next];
+                let key = budget.render_display(v, phase).map_err(to_error)?;
+                keyed.push((key, v.clone()));
+                *next += 1;
+            }
+            if *next < list.len() {
+                return Ok(BulkStep::Continue);
+            }
+            // 安定ソート（sort_by は stable）。キーが同じ要素は元の順序を保ち、
+            // sort_by_key(to_string) と完全に同一の並びになる。
+            let mut keyed = std::mem::take(keyed);
+            keyed.sort_by(|a, b| a.0.cmp(&b.0));
+            let sorted: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
+            Value::List(Tracked::constant(sorted))
+        }
+        BulkPhase::Ready(_) => match std::mem::replace(&mut state.phase, BulkPhase::Finished) {
+            BulkPhase::Ready(value) => value,
+            _ => {
+                return Err(TsumugiError::internal_control(line, "bulk ready state"));
+            }
+        },
+        BulkPhase::Finished => {
+            return Err(TsumugiError::internal_control(
+                line,
+                "bulk_step after completion",
+            ));
+        }
+    };
+    state.phase = BulkPhase::Finished;
+    Ok(BulkStep::Done(value))
+}
+
+/// [`bulk_step`] を完了まで回す（同期経路・VM の wrapper）。
+fn run_bulk_to_end(
+    mut state: BulkState,
+    budget: &mut crate::budget::BudgetLedger,
+) -> Result<Value, TsumugiError> {
+    loop {
+        if let BulkStep::Done(value) = bulk_step(&mut state, budget)? {
+            return Ok(value);
+        }
     }
-    Ok(Value::str_constant(out))
 }
 
 /// `to_str` の budget-aware 版（REV-001）。`to_string` の代わりに
@@ -2860,5 +3053,219 @@ mod aud_036_tests {
             error.message(),
             "to_int で Int に変換できません: i64 範囲外"
         );
+    }
+}
+
+/// fuel-bulk-chunk-yield の段階実行（BCY-AT-04 の unit 分）。
+#[cfg(test)]
+mod bulk_chunk_tests {
+    use super::*;
+    use crate::budget::{BudgetConfig, BudgetLedger};
+    use crate::embedding::LanguageRevision;
+
+    fn ledger(fuel: u64) -> BudgetLedger {
+        BudgetLedger::with_config(BudgetConfig::for_legacy(fuel, 1_000_000))
+    }
+
+    fn list(items: Vec<Value>) -> Value {
+        Value::List(Tracked::constant(items))
+    }
+
+    fn ints(n: usize) -> Value {
+        list((0..n as i64).rev().map(Value::Int).collect())
+    }
+
+    fn nested(n: usize) -> Value {
+        list((0..n as i64).map(|i| list(vec![Value::Int(i)])).collect())
+    }
+
+    /// `bulk_step` を 1 回ずつ回し、(結果, 台帳の commit 済み fuel, 段の数) を返す。
+    fn stepped(
+        name: &str,
+        args: &[Value],
+        revision: LanguageRevision,
+        fuel: u64,
+    ) -> (Result<Value, String>, u64, usize) {
+        let mut budget = ledger(fuel);
+        let mut steps = 0;
+        let result = (|| {
+            let mut state = bulk_start(name, args, revision, 1)?;
+            loop {
+                steps += 1;
+                if let BulkStep::Done(value) = bulk_step(&mut state, &mut budget)? {
+                    return Ok(value);
+                }
+            }
+        })();
+        (
+            result.map_err(|e: TsumugiError| format!("{e:?}")),
+            budget.committed_fuel(),
+            steps,
+        )
+    }
+
+    /// 同期経路の wrapper で 1 回実行し、(結果, 台帳の commit 済み fuel) を返す。
+    fn wrapped(
+        name: &str,
+        args: &[Value],
+        revision: LanguageRevision,
+        fuel: u64,
+    ) -> (Result<Value, String>, u64) {
+        let mut budget = ledger(fuel);
+        let result = match name {
+            "join" => builtin_join_budgeted(args, &mut budget, 1),
+            "contains" => builtin_contains_budgeted(args, &mut budget, 1),
+            "sort" => builtin_sort_budgeted(args, &mut budget, revision, 1),
+            _ => unreachable!(),
+        };
+        (
+            result.map_err(|e| format!("{e:?}")),
+            budget.committed_fuel(),
+        )
+    }
+
+    /// 段階実行と wrapper が同じ値・同じ fuel になることを確かめ、段の数を返す。
+    fn assert_same(name: &str, args: &[Value], revision: LanguageRevision, fuel: u64) -> usize {
+        let (value, used, steps) = stepped(name, args, revision, fuel);
+        let (expected, expected_used) = wrapped(name, args, revision, fuel);
+        assert_eq!(value, expected, "{name}");
+        assert_eq!(used, expected_used, "{name}");
+        steps
+    }
+
+    #[test]
+    fn bcy_at_04_join_chunks_match_wrapper() {
+        let sep = Value::str_constant(", ".to_string());
+        for (n, steps) in [(0, 1), (1, 1), (255, 1), (256, 1), (257, 2), (513, 3)] {
+            assert_eq!(
+                assert_same(
+                    "join",
+                    &[ints(n), sep.clone()],
+                    LanguageRevision::CURRENT,
+                    1_000_000
+                ),
+                steps,
+                "n = {n}"
+            );
+        }
+        assert_eq!(
+            assert_same(
+                "join",
+                &[nested(600), sep.clone()],
+                LanguageRevision::CURRENT,
+                1_000_000
+            ),
+            3
+        );
+        // 16 KiB の境目: 1 要素 8 KiB なら 2 要素（16 KiB + 区切り）で chunk を区切る。要素の途中では区切らない。
+        let big = Value::str_constant("x".repeat(BULK_CHUNK_BYTES / 2));
+        let five = list(vec![big.clone(); 5]);
+        assert_eq!(
+            assert_same(
+                "join",
+                &[five, sep.clone()],
+                LanguageRevision::CURRENT,
+                1_000_000
+            ),
+            3
+        );
+        let just_under = Value::str_constant("y".repeat(BULK_CHUNK_BYTES - 1));
+        let two = list(vec![just_under; 2]);
+        let empty = Value::str_constant(String::new());
+        assert_eq!(
+            assert_same("join", &[two, empty], LanguageRevision::CURRENT, 1_000_000),
+            1,
+            "16 KiB に届かない chunk は区切らない"
+        );
+        // エラー経路: 型違い・chunk の途中の fuel 切れ。
+        assert_same(
+            "join",
+            &[ints(3), Value::Int(1)],
+            LanguageRevision::CURRENT,
+            10,
+        );
+        assert_same(
+            "join",
+            &[Value::Int(3), sep.clone()],
+            LanguageRevision::CURRENT,
+            10,
+        );
+        assert_same("join", &[nested(600), sep], LanguageRevision::CURRENT, 400);
+    }
+
+    #[test]
+    fn bcy_at_04_contains_chunks_match_wrapper() {
+        let needle = list(vec![Value::Int(599)]);
+        assert_eq!(
+            assert_same(
+                "contains",
+                &[nested(600), needle.clone()],
+                LanguageRevision::CURRENT,
+                1_000_000
+            ),
+            3
+        );
+        let early = list(vec![Value::Int(10)]);
+        assert_eq!(
+            assert_same(
+                "contains",
+                &[nested(600), early],
+                LanguageRevision::CURRENT,
+                1_000_000
+            ),
+            1
+        );
+        let missing = list(vec![Value::Int(-1)]);
+        assert_same(
+            "contains",
+            &[nested(512), missing.clone()],
+            LanguageRevision::CURRENT,
+            1_000_000,
+        );
+        assert_same(
+            "contains",
+            &[nested(600), missing],
+            LanguageRevision::CURRENT,
+            300,
+        );
+        let text = Value::str_constant("abc".to_string());
+        let b = Value::str_constant("b".to_string());
+        assert_eq!(
+            assert_same("contains", &[text, b], LanguageRevision::CURRENT, 10),
+            1
+        );
+        assert_same(
+            "contains",
+            &[Value::Int(1), needle],
+            LanguageRevision::CURRENT,
+            10,
+        );
+    }
+
+    #[test]
+    fn bcy_at_04_sort_chunks_match_wrapper() {
+        // 0.21: 走査課金の chunk（256 要素ごと）のあとに比較の段が 1 つ。
+        for (n, steps) in [(0, 2), (256, 2), (257, 3), (600, 4)] {
+            assert_eq!(
+                assert_same("sort", &[ints(n)], LanguageRevision::CURRENT, 1_000_000),
+                steps,
+                "n = {n}"
+            );
+        }
+        assert_same("sort", &[nested(600)], LanguageRevision::CURRENT, 1_000_000);
+        // 0.20: 描画キーの chunk の最後の段で並べる。
+        for (n, steps) in [(0, 1), (256, 1), (257, 2), (600, 3)] {
+            assert_eq!(
+                assert_same("sort", &[ints(n)], LanguageRevision::V0_20, 1_000_000),
+                steps,
+                "n = {n}"
+            );
+        }
+        assert_same("sort", &[nested(600)], LanguageRevision::V0_20, 1_000_000);
+        // エラー経路: 走査の途中・比較の段・描画キーの途中の fuel 切れと型違い。
+        assert_same("sort", &[ints(600)], LanguageRevision::CURRENT, 300);
+        assert_same("sort", &[ints(600)], LanguageRevision::CURRENT, 700);
+        assert_same("sort", &[nested(600)], LanguageRevision::V0_20, 300);
+        assert_same("sort", &[Value::Int(1)], LanguageRevision::CURRENT, 10);
     }
 }
