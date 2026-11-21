@@ -3084,10 +3084,8 @@ print(zs, outer)
             let text = format!("{E2B_PRELUDE}{body}");
             assert_matches_sync(&text);
         }
-        // 結果の要素数が `max_collection_elements` を超える（既定上限は 1_000_000 より小さい範囲を
-        // 使うため、range で作った List を map する script の同期実行との一致で確かめる）。
-        let text = format!("{E2B_PRELUDE}let r = map(range(0, 20), fn(x) x end)\nprint(len(r))\n");
-        assert_matches_sync(&text);
+        // 結果の要素数が `max_collection_elements` を超える経路は、上限を絞れる `src/eval.rs` の
+        // `e4_collection_limit_matches_sync_path` で確かめる。
     }
 
     /// TEC-AT-01（全体）: e1〜e4 の yield 可能点を 1 つの script の中で跨ぐ組み合わせ（式の operand・

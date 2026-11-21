@@ -2801,10 +2801,11 @@ impl Evaluator {
     /// この式を式 frame で段階評価するか（tree-expr-continuation-e2a、yield 可能な driver だけ）。
     ///
     /// 呼び出しを含む call・二項・単項に限る。callee が識別子でその時点で user binding を持たない
-    /// call は、引数に呼び出しを含み、かつ `resolve_call_target` が引数を評価する builtin・
-    /// cooperative host function・登録 host function に解決するときだけ式 frame にする（e3）。
-    /// 引数に呼び出しが無い call、`input` / `args` / `now` / `pop` / `map` / `filter` / `each`・
-    /// 未定義名、e2a・e3 で段階評価しない式種は従来どおり `eval_expr` で 1 つの値として評価する。
+    /// call は、`resolve_frame_target` が `map` / `filter` / `each`（`CallTarget::Callback`）に解決する
+    /// ときは引数に呼び出しが無くても式 frame にし（e4）、引数を評価する builtin・cooperative host
+    /// function・登録 host function に解決するときは引数に呼び出しを含む場合だけ式 frame にする（e3）。
+    /// 引数に呼び出しが無いそれらの call、`input` / `args` / `now` / `pop`・未定義名、e2a・e3 で
+    /// 段階評価しない式種は従来どおり `eval_expr` で 1 つの値として評価する。
     fn needs_expr_frame(&self, expr: &Expr) -> bool {
         if !crate::ast::contains_call(expr) {
             return false;
@@ -5974,6 +5975,73 @@ mod tests {
             assert_eq!(f.peak_heap_bytes, s.peak_heap_bytes, "{body}");
             assert!(forced.frames.is_empty() && forced.call_stack.is_empty());
             assert_eq!(forced.env.scope_depth(), sync.env.scope_depth(), "{body}");
+        }
+    }
+
+    /// TEC-AT-07 のエラー経路: `map` / `filter` の結果の要素数が `max_collection_elements` を超えたとき、
+    /// 強制 yield の poll 経路が同期経路と同じエラー・行・trace・fuel になる（上限ちょうどでは成功する）。
+    ///
+    /// 言語の経路で作る List は常に上限以下なので、結果が上限を超える入力（3 要素。上限は 2）は
+    /// 評価器の env へ直接置く。
+    #[test]
+    fn e4_collection_limit_matches_sync_path() {
+        let cases = [
+            (format!("{E2B_FN}let a = map(xs, id)\n"), true),
+            (format!("{E2B_FN}let a = filter(xs, id)\n"), true),
+            (format!("{E2B_FN}let a = map(ys, id)\n"), false),
+            (
+                format!("{E2B_FN}let a = filter(xs, fn(x) x > 1 end)\n"),
+                false,
+            ),
+            (
+                format!(
+                    "{E2B_FN}try\n  let a = map(xs, id)\ncatch e\n  let a = e[\"type\"]\nend\n"
+                ),
+                // 予算超過は catch できない terminal。
+                true,
+            ),
+        ];
+        let prepare = || {
+            let mut eval = Evaluator::with_budget(BudgetConfig::for_legacy(1_000_000, 2));
+            let xs = Value::new_list(
+                vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+                &mut eval.budget,
+                ExecutionPhase::Run,
+            )
+            .expect("list");
+            let ys = Value::new_list(
+                vec![Value::Int(1), Value::Int(2)],
+                &mut eval.budget,
+                ExecutionPhase::Run,
+            )
+            .expect("list");
+            eval.env_set("xs", xs, 1).expect("xs");
+            eval.env_set("ys", ys, 1).expect("ys");
+            eval
+        };
+        for (src, must_fail) in cases {
+            let program = parse_program(&src);
+            let mut forced_eval = prepare();
+            forced_eval.force_yield_every_boundary = true;
+            forced_eval
+                .begin_execution(&program, src.len() as u64, false)
+                .expect("begin_execution");
+            let forced = loop {
+                if let SliceOutcome::Terminal(result) = forced_eval.run_slice(u64::MAX) {
+                    break result;
+                }
+            };
+            let mut sync_eval = prepare();
+            let sync = sync_eval.run(&program, src.len() as u64);
+            assert_eq!(forced.is_err(), must_fail, "{src}: {forced:?}");
+            assert_eq!(forced, sync, "{src}");
+            assert_eq!(
+                forced_eval.budget_usage().committed.fuel,
+                sync_eval.budget_usage().committed.fuel,
+                "{src}"
+            );
+            assert_eq!(forced_eval.env.get("a"), sync_eval.env.get("a"), "{src}");
+            assert!(forced_eval.frames.is_empty() && forced_eval.call_stack.is_empty());
         }
     }
 
