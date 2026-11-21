@@ -2262,7 +2262,7 @@ builtin・host のどれに解決されるかは静的には決まらない（us
 #### fuel-bulk-chunk-yield 実装スライス（callback なし bulk builtin の chunk 境界 slice yield）
 
 > 状態: **未実装**（設計のみ）。本小節は設計 PR を書いた時点の記録で、現在の状態は冒頭の逸脱一覧・未実装範囲を見る。
-> 判断の候補（Q1〜Q3）は設計 PR #468 に出し、判断役が Q1=A, Q2=A, Q3=A を選択した（下の「決定記録」）。下の記述はこの選択どおりである。
+> 判断の候補（Q1〜Q4）は設計 PR #468 に出し、判断役が Q1=A, Q2=A, Q3=A, Q4=A を選択した（下の「決定記録」）。下の記述はこの選択どおりである。
 
 tree-expr-continuation（e1〜e4）で呼び出しと反復は yield 可能点になったが、callback を取らない bulk builtin は
 1 段で完了まで実行する（e3 小節「builtin・host function の本体は 1 段で完了まで実行し、yield しない」）。加えて slice の
@@ -2276,7 +2276,12 @@ cancel/deadline を確認する」と §4.2 の「bulk work は chunk へ分割�
      この差分に置き換える（二重に数えない）。これで builtin の per-element 課金（`sort` の走査・比較、`join` の描画、`contains` の
      等価判定、index 代入・`pop` の深度の読み直し）も slice の使用量に入る。yield するのは従来どおり yield 可能点だけで、charge
      そのものは分割しない（§4.2「1 個の固定 charge を分割しない」）。
-  2. **chunk 境界を yield 可能点にする builtin（Q2 = A）**: 要素ループの中で台帳へ per-element の fuel を課金する次の 3 つ。
+  2. **chunk 境界を yield 可能点にする builtin（Q2 = A・Q4 = A）**: 要素ループの中で台帳へ fuel を課金しうる次の 3 つ。chunk 境界は
+     要素の種類によらず yield 可能点にするが、slice fuel で yield が起きるのは区間で fuel が積もるときだけである（Q4 = A）。現状の
+     課金で fuel が積もるのは、revision 0.21 以降の `sort` の走査（1 / element）と、List / Dict の要素の描画（`render_into`）・等価判定
+     （`values_equal`）の複合ノードごとの 1 である。スカラー要素（`Str` / `Int` / `Float` / `Bool` / `Null`）の描画・等価判定は fuel を
+     課金しないので、スカラー要素の List への `join` / `contains` と revision 0.20 以下の `sort` の描画キーは、chunk 境界があっても
+     slice fuel では区切れない（下の「範囲外」）。課金はこのスライスで変えない。
      - `join`: 要素ごとに区切りの追記と `render_display_append`。256 要素ごと、または chunk 内で buffer に追記した byte が 16 KiB
        （16,384 byte）に達したら chunk を区切る（要素の途中では区切らない）。
      - `contains`（第 1 引数が List のとき）: 要素ごとの `values_equal`。256 要素ごとに区切る。見つかった時点で終わる。
@@ -2303,19 +2308,25 @@ cancel/deadline を確認する」と §4.2 の「bulk work は chunk へ分割�
   - 1 つの値の描画（`to_str`、`join` の 1 要素）と `replace` / `path_join`: chunk の単位が要素でなく描画の node / byte になり、
     `render_display` の再帰を段階実行にする別の仕組みが要る。
   - VM（slice yield を持たない。Slice 6）。VM は wrapper を呼ぶので fuel・結果は変わらない。
+  - スカラー要素の `join` / `contains` と revision 0.20 以下の `sort` の描画キー（Q4 = A）: 要素の描画・等価判定が fuel を課金しない
+    ので、slice fuel で yield が起きず、1 回分を §4.2 の超過（collection / string 上限で有界）として扱う（現状から悪化しない）。
+    §4.1 の per-element（1 / element）・UTF-8 の copy（`ceil(bytes/64)`）の課金は F-2・`fuel-bulk-charge` の範囲で、その課金が入れば
+    本スライスの chunk 境界が追加の仕組みなしで slice yield に効く。
 - **観測挙動**: 同期経路（`Evaluator::run`・VM・terminal まで poll する `Engine::run`）の fuel 値・成否・エラー行・trace・stdout・
   exit code・heap は現状と一致させる。poll 経路で変わるのは yield の位置（poll の粒度）だけで、Q1 により builtin の fuel を含む
   slice は従来より早く yield する。既存のテストで poll の回数や yield の位置を固定しているものがこの変更で変わる場合は、実装 PR
   本文に一覧と理由（Q1 による意図的な差）を書く。それ以外の期待値の変更は止めて報告する。
 - **受入基準**（`tests/engine_api.rs` と `src/eval.rs`・`src/builtin_core.rs` の unit test）:
-  - **BCY-AT-01（slice の使用量）**: 2,000 要素の List を `sort` する文と `join` する文を並べた script を `PollSlice::max_fuel = 16` で
+  - **BCY-AT-01（slice の使用量）**: 2,000 要素の List を `sort` する文と、2,000 個の List を要素に持つ List を `join` する文を並べた script を `PollSlice::max_fuel = 16` で
     poll し、poll ごとの commit 済み fuel の増分が「max_fuel + chunk 1 つ分の fuel + `sort` の比較の段 1 回分」以内であることと、
     `sort` の文の直後の yield 可能点で `Yielded(SliceFuelExhausted)` になる（slice の使用量が builtin の fuel を数える）ことを見る。
     index 代入・`pop` の深度の読み直しを含む script でも同じ上限を見る。
-  - **BCY-AT-02（chunk 境界での yield）**: 10,000 要素の List への `join`・`contains`（最後の要素を探す）・`sort` の走査を
-    `max_fuel = 16` で poll し、builtin の途中で `ceil(10000 / 256) − 1` 回以上 yield すること、poll ごとの fuel の増分の上限
-    （BCY-AT-01 と同じ）、audit の `Yielded`/`Resumed` の対と順序を見る。`join` は 1 要素が 16 KiB 近い文字列の List でも、byte で
-    chunk が区切られることを見る。
+  - **BCY-AT-02（chunk 境界での yield）**: スカラー 10,000 要素の List への `sort`（revision 0.21 以降の走査）と、複合要素（各要素が
+    小さな List）10,000 個の List への `join`・`contains`（最後の要素と等しい List を探す）を `max_fuel = 16` で poll し、builtin の途中で
+    `ceil(10000 / 256) − 1` 回以上 yield すること、poll ごとの fuel の増分の上限（BCY-AT-01 と同じ）、audit の `Yielded`/`Resumed` の
+    対と順序を見る（Q4 = A）。byte の 16 KiB 境界（1 要素が 16 KiB 近い文字列の List への `join`）は fuel が積もらないので、強制 yield
+    フックで chunk 境界として区切られること（要素の途中では区切らないこと）を BCY-AT-03・04 で見る。スカラー要素の `join` /
+    `contains` では slice fuel による yield が builtin の途中で起きないこと（範囲外の記録どおり）も 1 件固定する。
   - **BCY-AT-03（同期経路・VM との一致）**: BCY-AT-01・02 の script と、エラー経路（`join` の途中で total fuel が尽きる、
     `max_single_string_bytes` を超える、第 1 引数・区切りの型違い、`contains` が途中で見つかる、revision 0.20 の `sort`）を、強制
     yield フックで全 chunk 境界で yield させた poll 経路・`Evaluator::run`・監査付きと sink 無しの `Engine::run`・VM で走らせ、
@@ -2328,9 +2339,10 @@ cancel/deadline を確認する」と §4.2 の「bulk work は chunk へ分割�
   - **BCY-AT-05（既定 slice の観測不変）**: 既存の `tests/`・unit test が、上の「観測挙動」に書いた poll の粒度の差を除いて
     無改変で緑。`sort` / `join` / `contains` の fuel 値を固定している既存テスト（tree と VM）が変わらないことを含む。
 - **逸脱一覧の更新（実装 PR で行う）**: 未実装範囲の fuel-bulk-chunk-yield の行を、上の「範囲外」の残り（per-element 課金の無い
-  bulk builtin と 1 つの値の描画）に書き直す。逸脱一覧の Slice 3 PR-d の行は、`sort` の比較の段だけが slice を超えうることに
+  bulk builtin、スカラー要素の `join` / `contains` と revision 0.20 以下の `sort` の描画キー〔Q4 = A。備考は F-2・`fuel-bulk-charge`〕、
+  1 つの値の描画）に書き直す。逸脱一覧の Slice 3 PR-d の行は、`sort` の比較の段だけが slice を超えうることに
   書き直す。
-- **決定記録（判断役が選択（PR #468）、Q1=A, Q2=A, Q3=A）**:
+- **決定記録（判断役が選択（PR #468）、Q1=A, Q2=A, Q3=A, Q4=A）**:
   - **Q1 = A（slice の使用量を台帳の commit 済み fuel の差分で数える）**: 理由: §4.2 の「slice 内で実際に commit した fuel」と
     同じ定義になり、数え方が 1 系統で済む（[マニフェスト](manifesto.md)原則 8）。builtin の fuel を数えない限り chunk 境界を足しても
     yield が起きず、原則 4（ホストへ定期的に制御を返す）と優先順位の表「制御可能な最悪時負荷」を満たせない。変わるのは poll 経路の
@@ -2352,6 +2364,19 @@ cancel/deadline を確認する」と §4.2 の「bulk work は chunk へ分割�
     （原則 5）はあるが、既存の `sort` の fuel 値という言語の観測値が変わり、fuel 会計の revision と合わせて扱う別の設計が要る。
     本スライスの「同期経路の観測を変えない」前提と規模を超える。C（`sort` を対象から外す）は前段の要素数ぶんの課金でも yield できず、
     A より原則 4 から遠い。
+  - **Q4 = A（課金は変えず、範囲と受入基準を実態に合わせて絞る）**: 設計レビューの指摘（PR #468）で、`values_equal` と
+    `render_into` は List / Dict のノードにだけ fuel を課金し、スカラー要素は無課金であることが分かった（`src/builtin_core.rs` の明示の
+    per-element 課金は revision 0.21 以降の `sort` の走査だけ）。理由: 同期経路・VM の fuel 値という言語の観測値を変えないので、
+    Q2 = A・Q3 = A と本小節の「観測挙動」の前提、F-2 小節・fix-contains-budgeted-equality 小節が per-element / `ceil(bytes/64)` の課金を
+    F-2・`fuel-bulk-charge` へ回した既存の決定と一貫する（原則 5、優先順位の表「一貫した意味論」）。触る仕組みは段階実行 1 つのままで
+    （原則 8）、BCY-AT-02 の入力を実際に満たせる形に直すので受入基準が再現可能な検証になる（原則 9）。スカラー要素が slice で区切れない
+    点は現状から悪化せず §4.2 の超過例外の範囲に残り、「範囲外」と未実装範囲の行に記録される（原則 1 の最悪値は有限のまま。原則 4 への
+    到達は §4.1 の課金が入る `fuel-bulk-charge` の後で、chunk 境界の仕組みはそのとき追加の機構なしで効く）。採らなかった案: B
+    （スカラー要素にも §4.1 の課金を入れる）は同期経路・VM の fuel 値と既存テストの期待値が変わり、fuel 会計の revision と既定
+    total_fuel の再測定（F-2・`fuel-bulk-charge` の範囲）を伴い、仕組みが 2 つになる。C（chunk 数・byte 数でも yield する）は目標の章
+    §4.2 の slice の定義と §9.1 の `YieldReason`・`PollSlice::max_fuel` の意味を変える設計が要り、fuel を使っていないのに
+    `SliceFuelExhausted` で止まると yield の理由と資源消費の対応が説明できなくなる（原則 5・7）。D（0.21 の `sort` の走査だけに絞る）は
+    複合要素の `join` / `contains` も区切れなくなり、Q2 = A を理由なく狭める。
 - **想定の変更規模**: おおむね 450 行（[開発ループ手順書](loop-runbook.md) §14.1 の 1000 行に収まる）。
   - `src/builtin_core.rs` 約 230 行: `BulkState` / `BulkStep` と `bulk_step` 30、`join` の chunk 化 60、`contains` の chunk 化 40、
     `sort` の走査・描画キーの chunk 化と比較の段の分離 70、wrapper 化 30。

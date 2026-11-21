@@ -505,7 +505,8 @@ order      = 24
 
 # 設計 PR で小節を書き ready にした（前段 tree-expr-continuation-e4 は done、PR #467）。対象は per-element の fuel を
 # 台帳へ課金する join / contains / sort（走査・描画キー）で、slice の使用量を台帳の commit 量で数える（Q1）。
-# sort の比較の段と、per-element 課金の無い bulk builtin（F-2・fuel-bulk-charge の後）は範囲外。
+# sort の比較の段、per-element 課金の無い bulk builtin、スカラー要素の join / contains と 0.20 の sort の描画キー
+# （fuel を課金しないので slice で区切れない。Q4=A、F-2・fuel-bulk-charge の後）は範囲外。
 # 見積もり: src/ 約 450 行、触る仕組みは callback なし bulk builtin の段階実行 1 つ、受入基準 5。
 [[slice]]
 id         = "F-2"
