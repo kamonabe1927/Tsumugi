@@ -2781,6 +2781,121 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   行う**（会計版と既定値を別 PR に割ると、中間状態で「新課金なのに旧既定上限」で代表 script が落ちる
   不整合が main に出るため）。分割する場合は `slices.toml` を更新し、本小節を割る。
 
+#### F-2 の sub-slice 分割（2026-11-21 の設計。判断待ち）
+
+> 状態: **未実装**（設計のみ。割り方は判断の候補として設計 PR に出しており、判断役の選択を待つ）。
+> 上の「F-2 実装スライス」小節（PR #241 の時点の記録）は、そのままでは [開発ループ手順書](loop-runbook.md)
+> §14.1 のスライスの大きさに収まらないため、`ready` にせず sub-slice に割る（documentation-guide「ready の
+> 条件」の 4）。課金点・課金値・観測挙動・延期する逸脱の内容は上の小節のとおりで、ここでは割り方・各
+> sub-slice の範囲・受入基準・想定の変更規模と、上の小節の記述を現状に合わせて読むための注記だけを書く。
+> 割り方が決まったら、選ばれた内容を本小節に記録し、`slices.toml` の F-2 を sub-slice のエントリに置き換える。
+
+**§14.1 に収まらない理由**（main 7d46a4f で確かめた）:
+
+- 受入基準が 9 個（F2-AT-01..08 と F2-AT-01b）で、上限の 5 個を超える。
+- 触る仕組みが 3 つある。(1) budget の config と監査の event（`fuel_accounting_revision` の field・config error・
+  `AuditEvent::ExecutionStarted` と strict CBOR の `BudgetConfig` の encode、`src/budget.rs`・`src/embedding.rs`・
+  `src/audit.rs`）、(2) VM の bytecode（`Charge` opcode・compiler の挿入・verifier・`unstable-bytecode` の公開面、
+  `src/opcode.rs`・`src/chunk.rs`・`src/compiler.rs`・`src/verifier.rs`・`src/vm.rs`）、(3) tree evaluator の課金点
+  （`src/eval.rs` の `eval_expr` の再帰と式 frame（`FrameKind::Expr`）の段階評価の両方、`src/builtin.rs`）。
+- 現状の課金点は tree の `count_step`（`src/eval.rs` に 7 か所、`src/builtin.rs` に 1 か所）と VM の `count_step`
+  （`src/vm.rs` に 3 か所）だけで、statement / expression / operation の課金点は両 engine に無い。式 frame
+  （tree-expr-continuation e2a〜e4 で入った）の上で expression / operation の課金順を `eval_expr` の再帰と VM の
+  両方に一致させる作業が加わるため、上の小節が想定した 1 PR の大きさを超える見込みである。
+
+**上の小節を現状に合わせて読むための注記**（上の小節は書き換えない）:
+
+- 依存の `tree-expr-continuation` は e1〜e4 に割られ、すべて done である（`slices.toml` の F-2 の `depends_on` は
+  e4）。callback なし bulk builtin の chunk 境界の yield は fuel-bulk-chunk-yield（done）で入った。
+- 式の途中の課金で slice 残量を使い切った場合の扱いは、§4.2「yield 可能点に挟まれた区間の slice 超過」に
+  従う。呼び出しも反復も含まない部分式は式 frame を積まないので、その区間の expression / operation の課金は
+  区間を抜けた最初の yield 可能点まで slice を超えてよい（区間の AST node 数で有界）。新しい yield 可能点は作らない。
+- 「List / Dict の深度の読み直し」（§4.1）は版 `1` に含まれる（§3.1）。F-2 はこの課金を変えない。
+- 上の小節の F2-AT-06 は旧版の拒否を `ConfigError::UnsupportedAccountingRevision` と書くが、同じ小節の変更箇所と
+  §3.1 は heap と fuel のどちらの版が不正かを区別できる形にするとする。区別の形は下の Q3 で決め、受入基準は
+  決まった形で書く。
+- `BudgetConfig` と `AuditEvent::ExecutionStarted` に field を足すと、strict CBOR（[決定性・監査仕様](determinism-and-audit.md)
+  §9.2、audit-strict-cbor-c1 で encoder 本体が done・未配線）の payload が変わる。同仕様は「unknown schema
+  field を末尾へ追加せず、schema version を上げる」とする。扱いは下の Q4 で決める。
+- 上の小節の F2-AT-01b の例（増やした 1 文の内訳 18）は、path 引数を「同一リテラル」と「変数参照」の両方で
+  書いている。どちらでも引数 1 つは expression 1 なので値は変わらないが、受入基準は選んだ script から §4.1 の
+  表で手計算した値をテストに定数で書く（上の小節の指示どおり）。
+
+**割り方の案（判断の候補 Q1 の推奨 A）**: 観測挙動を変えない土台を先に入れ、課金表の移行（版の bump と既定
+`total_fuel` の更新を含む）を最後の 1 本にまとめる。版の bump と既定 `total_fuel` の更新を同じ PR で行う
+上の小節の制約（「スライス分割の指針」）は F-2c で守る。依存は F-2a → F-2b → F-2c の直列。
+`fuel-bulk-charge` の `depends_on` は F-2c に付け替える。
+
+##### F-2a: 会計版の field と config error の区別（版は `1` のまま）
+
+- **範囲**: `BudgetConfig` に `fuel_accounting_revision: u32`（§3 の宣言順。`BudgetConfig::standard` は `1`）を
+  足し、`BudgetConfig::validate`（execution 作成前）で `1` 以外を拒否する。会計版の不正を heap と fuel で
+  区別できる config error にする（形は Q3）。`AuditEvent::ExecutionStarted` に `heap_accounting_revision` の
+  隣で `fuel_accounting_revision: u32` を足し（上の小節の決定どおり top-level の独立 field）、strict CBOR の
+  `BudgetConfig`・`ExecutionStarted` の encode と size pass を更新する（schema の扱いは Q4）。
+  [決定性・監査仕様](determinism-and-audit.md) §7.2 と §9.2 の該当の記述、`src/embedding.rs` の doc を合わせる。
+- **範囲外**: 課金点・課金値の変更（F-2c）、`FuelSchedule`・`Charge` opcode（F-2b）、既定 `total_fuel`。
+  fuel の値はどの script でも変わらない。
+- **受入基準**:
+  - **F2a-AT-01**: `BudgetConfig::standard` の `fuel_accounting_revision` は `1`。`1` を明示した実行と既定の実行が
+    同じ fuel・同じ成否になる。`language_revision` は変わらない（`src/budget.rs` の unit test と `tests/integration.rs`）。
+  - **F2a-AT-02**: `fuel_accounting_revision = 2`（未受理の版）と `heap_accounting_revision = 2` をそれぞれ
+    指定すると、execution 作成前に拒否され、返る error からどちらの field が不正かを区別できる。両方が不正な
+    ときにどちらを返すかは §3.1 の検査順で固定する（`src/budget.rs`・`src/embedding.rs` の unit test）。
+  - **F2a-AT-03**: 監査を有効にした実行の `ExecutionStarted` が `fuel_accounting_revision = 1` を持ち、strict CBOR
+    の golden（SC-AT-02 の該当分）が新しい field 順と schema の扱い（Q4）で一致する（`src/audit.rs` の unit test）。
+- **想定の変更規模**: `src/` 約 150 行（`#[cfg(test)]` を除く）、触る仕組みは budget の config と監査の event の
+  field 1 つ（同じ値を config と監査へ流す 1 つの経路として数える）、受入基準 3。
+
+##### F-2b: `FuelSchedule` と `Charge` opcode の土台（課金点・課金値は版 `1` のまま）
+
+- **範囲**: §4.1 の charge point の種別と課金値を一元に持つ共有 API `FuelSchedule`（`src/budget.rs`）を新設する。
+  版 `1` の課金（ループ反復 1・呼び出し 1・builtin callback 1）を `FuelSchedule` の種別で表し、tree の
+  `count_step`（`src/eval.rs`・`src/builtin.rs`）をこの API の呼び出しへ置き換える。VM は `Charge` opcode
+  （payload は charge 種別。`src/opcode.rs`・`src/chunk.rs`）を足し、F-1 で `OpCode::Loop`・`PrepareCall`・
+  `call_fn_value` に置いた `count_step` を外して、compiler が同じ位置に `Charge` を挿入する。verifier は payload
+  が既知の種別であることを検査する。`unstable-bytecode` の公開列挙を REV-006 の封印方針に沿って更新する。
+  instruction watchdog（§17.7）の tick は変えない。
+- **範囲外**: 課金点の追加・課金値の変更と版の bump（F-2c）。`Charge` の dispatch 自体は課金しない（§4.1）。
+- **受入基準**:
+  - **F2b-AT-01**: 既存の fuel の期待値（F1-AT-*・`tests/differential.rs` の `assert_fuel_parity`・integration の
+    境界）が無改変で緑。両 engine の必要 fuel・上限到達の line が F-2b の前後で変わらない。
+  - **F2b-AT-02**: compiler がループ反復・呼び出しの位置に `Charge` を出し、最適化で削除・併合しない。verifier は
+    未知の種別の `Charge` を拒否する（`src/compiler.rs`・`src/verifier.rs` の unit test）。
+  - **F2b-AT-03**: `tests/defensive_vm.rs` の停止性ケース（`Jump(0)` 自己ループ・後方 `Loop` 迂回・raw `Call`
+    再帰）が従来どおり有限停止する。
+- **想定の変更規模**: `src/` 約 350 行、触る仕組みは fuel の課金点 1 つ（両 engine の課金を同じ API へ寄せる）、
+  受入基準 3。
+
+##### F-2c: §4.1 の主要 charge point への移行・`fuel_accounting_revision` 1 → 2・既定 `total_fuel`
+
+- **範囲**: 上の小節の「課金点を §4.1 の主要 charge point どおりへ張り直す」「既定 `total_fuel` の見直し」
+  「`fuel_accounting_revision` を 1 → 2 へ bump する」のとおり。F-2b の `FuelSchedule` に statement 1・
+  expression 1・operation 1・invocation 5・loop iteration 2・host call 10 を載せ、tree（`eval_expr` の再帰と
+  式 frame の段階評価の両方）と VM（compiler の `Charge` 挿入）で同じ順序・同じ line で課金する。受理する版を
+  `2` だけにし、`BudgetConfig::standard` を `2` にする。既定 `total_fuel` は上の小節の代表 script 集合で測って
+  決め、§3.1 の表を更新する。
+- **範囲外**: 上の小節の「逸脱」のとおり（UTF-8 payload・AST node・`map` / `filter` / serialize の per-element は
+  `fuel-bulk-charge`、heap / string / count、`PollSlice::max_fuel`、VM の deadline・audit・cooperative）。
+- **受入基準**（上の小節の 9 個を 5 個にまとめる。Q2）:
+  - **F2c-AT-01**（旧 F2-AT-01・02・03）: §4.1 の表から手計算した必要 fuel と、両 engine の「成功する最小の
+    上限 N」（二分探索）が一致する。invocation は呼び出し回数だけが違う 2 本の N の差が 5、loop iteration は
+    反復回数だけが違う 2 本の差が反復数差 ×（2 + 1 反復分の condition / iterable と body の課金）になる。
+    `while` / `for` / 入れ子 / `continue` / `break` を含む（`tests/differential.rs`）。
+  - **F2c-AT-02**（旧 F2-AT-01b）: filesystem builtin の host call 1 回につき 10。許可・拒否・host error の 3 経路
+    それぞれで、呼ぶ文を 1 つ増やした 2 本の N の差から確かめる（tree 単独、`tests/integration.rs`）。
+  - **F2c-AT-03**（旧 F2-AT-04）: F2c-AT-01・02 の各 script で N は両 engine とも成功、N − 1 は両 engine とも上限で
+    失敗し、stdout・stderr（line・trace を含む）・exit code が一致する。
+  - **F2c-AT-04**（旧 F2-AT-05・06）: `BudgetConfig::standard` の `fuel_accounting_revision` は `2` で、`1` は
+    execution 作成前に F-2a の区別できる error で拒否される。新しい既定 `total_fuel` で代表 script 集合が両
+    engine で成功し、各 script の新しい消費 fuel を実装 PR 本文に記録する。`language_revision` は変わらない。
+  - **F2c-AT-05**（旧 F2-AT-07・08）: watchdog の停止性ケースが有限停止し、fuel 上限が watchdog 上限より先に
+    来る。fuel の期待値を持つ既存テスト（F1-AT-04/05 を含む）を新しい課金値へ更新し、両 engine で緑。期待値が
+    §4.1 の表で説明できない形で変わるなら実装を止めて報告する。
+- **想定の変更規模**: `src/` 約 550〜750 行（compiler の挿入 約 150、VM 約 50、tree の再帰と式 frame の両方の
+  課金点 約 300〜450、budget の既定値・版 約 50）、触る仕組みは fuel の課金点 1 つ、受入基準 5。
+  1000 行を超える見込みになったら、実装に入る前に止めて報告する（§14.1）。
+
 ### fix-contains-budgeted-equality 実装スライス（`contains` の等価判定を予算付き比較へ）
 
 issue #290 から作ったスライス（不具合の修正、`slices.toml` の `fix-contains-budgeted-equality`）。issue の仕分けで「受け入れ」とし、判断は要らないとした部分である（[言語仕様](language-spec.md)「等価比較」の「この規則は`contains`のように等価判定を使う組み込み関数でも共有する」で直し方が決まる）。
