@@ -2259,6 +2259,87 @@ builtin・host のどれに解決されるかは静的には決まらない（us
   - 触る仕組みは tree evaluator の call の評価 1 つ（e3 と同じく、`src/builtin.rs` は builtin の挙動を変えず、検査と結果の組み立ての
     境目を分けるだけ）。受入基準は 5 項目（PR #464 の Q1=A）。
 
+#### fuel-bulk-chunk-yield 実装スライス（callback なし bulk builtin の chunk 境界 slice yield）
+
+> 状態: **未実装**（設計のみ）。本小節は設計 PR を書いた時点の記録で、現在の状態は冒頭の逸脱一覧・未実装範囲を見る。
+> 判断の候補（Q1〜Q3）は設計 PR に出し、判断役の選択を本小節に反映する。下の記述は推奨案（各 Q の A）で書いている。
+
+tree-expr-continuation（e1〜e4）で呼び出しと反復は yield 可能点になったが、callback を取らない bulk builtin は
+1 段で完了まで実行する（e3 小節「builtin・host function の本体は 1 段で完了まで実行し、yield しない」）。加えて slice の
+使用量は `count_step` だけを数え、builtin が台帳へ直接課金する per-element fuel を数えない（冒頭の逸脱一覧の Slice 3 PR-d の行）。
+本スライスは §4.1 の「collection/string builtin は長い処理を最大 256 elements または 16 KiB ごとの小 chunk へ分け、chunk 前に fuel と
+cancel/deadline を確認する」と §4.2 の「bulk work は chunk へ分割する」を、tree evaluator の poll 経路で実効化する。
+
+- **実装範囲**:
+  1. **slice の使用量を台帳の commit 量で数える（Q1 = A）**: `run_slice` の開始時に台帳の commit 済み fuel（`BudgetLedger::committed_fuel`）を
+     控え、`slice_exhausted` は「現在の commit 済み fuel − 控えた値」を slice 上限と比べる。`count_step` の `slice_fuel_used` 加算は
+     この差分に置き換える（二重に数えない）。これで builtin の per-element 課金（`sort` の走査・比較、`join` の描画、`contains` の
+     等価判定、index 代入・`pop` の深度の読み直し）も slice の使用量に入る。yield するのは従来どおり yield 可能点だけで、charge
+     そのものは分割しない（§4.2「1 個の固定 charge を分割しない」）。
+  2. **chunk 境界を yield 可能点にする builtin（Q2 = A）**: 要素ループの中で台帳へ per-element の fuel を課金する次の 3 つ。
+     - `join`: 要素ごとに区切りの追記と `render_display_append`。256 要素ごと、または chunk 内で buffer に追記した byte が 16 KiB
+       （16,384 byte）に達したら chunk を区切る（要素の途中では区切らない）。
+     - `contains`（第 1 引数が List のとき）: 要素ごとの `values_equal`。256 要素ごとに区切る。見つかった時点で終わる。
+     - `sort`: 要素数ぶんの走査課金（revision 0.21 以降）と、描画キーの生成（revision 0.20 以下の `render_display`）を 256 要素
+       ごとに区切る。比較の段（`sort_by`）は 1 段のまま（Q3 = A、下の「範囲外」）。
+  3. **段階実行の形**: 上の 3 つを `src/builtin_core.rs` で「状態 + 1 chunk 進める関数」の形に分ける（例: `BulkState` と
+     `bulk_step(state, budget) -> Result<BulkStep, TsumugiError>`、`BulkStep` は `Continue` / `Done(Value)`）。既存の
+     `builtin_join_budgeted` / `builtin_contains_budgeted` / `builtin_sort_budgeted` は、この関数を完了まで回す薄い wrapper にして
+     名前・引数・戻り値を変えない。VM と同期経路（`can_yield = false`）はこの wrapper を呼ぶので、課金の順序・量・エラー点は現状と同じ。
+  4. **tree の poll 経路**: e3 の式 frame の call の段（`step_target_call`）で、対象の 3 builtin は dispatch の段で `BulkState` を作って
+     式 frame に保存し、1 段ごとに `bulk_step` を 1 回呼ぶ。`Continue` のあとの段の間が yield 可能点で、slice fuel の判定と強制 yield
+     フックだけを行う（e3 の引数境界と同じ。audit drain queue 上限と cancel / deadline の checkpoint は文/反復境界のまま）。
+     cancel / deadline は従来どおり各 charge の前（`reserve_all`）で確かめるので、chunk 境界に新しい checkpoint は足さない。
+- **yield を跨いで保存する状態**: 第 1 引数の List（`Rc` を共有。複製しない）、区切り文字列（`join`）、探す値（`contains`）、次の要素の
+  index、追記途中の buffer（`join`）、走査課金・描画キーの途中結果（`sort`）、revision。部分結果は同期経路と同じく完了まで
+  heap に課金しない（e4 の部分結果と同じ規律）。式 frame 自身の `heap_charge` は 0（e2a の Q1 = A の既定のまま）。
+- **範囲外（逸脱として残すもの）**:
+  - `sort` の比較の段（Q3 = A）: `sort_by` と比較ごとの `compare_budgeted` は 1 段で実行し、§4.2 の超過（1 回分を collection 上限で
+    有界な超過）として扱う。比較の段を中断可能なソートへ書き換えると比較回数・比較順が変わり fuel 値が変わるため、このスライスでは
+    書き換えない（e1〜e4 と同じく同期経路の観測を変えない）。逸脱一覧の Slice 3 PR-d の行は、この残りに絞って書き直す。
+  - per-element の fuel を課金しない bulk builtin（`range` / `keys` / `values` / `reverse` / `slice` / `split` / 文字列の繰り返し・連結 /
+    大きな collection のコピー等）: 課金しないので fuel の slice では区切りが生じない。これらへの per-element 課金は F-2 と
+    `fuel-bulk-charge` の範囲で、chunk 境界 yield はその課金が入った後に別スライスで扱う。
+  - 1 つの値の描画（`to_str`、`join` の 1 要素）と `replace` / `path_join`: chunk の単位が要素でなく描画の node / byte になり、
+    `render_display` の再帰を段階実行にする別の仕組みが要る。
+  - VM（slice yield を持たない。Slice 6）。VM は wrapper を呼ぶので fuel・結果は変わらない。
+- **観測挙動**: 同期経路（`Evaluator::run`・VM・terminal まで poll する `Engine::run`）の fuel 値・成否・エラー行・trace・stdout・
+  exit code・heap は現状と一致させる。poll 経路で変わるのは yield の位置（poll の粒度）だけで、Q1 により builtin の fuel を含む
+  slice は従来より早く yield する。既存のテストで poll の回数や yield の位置を固定しているものがこの変更で変わる場合は、実装 PR
+  本文に一覧と理由（Q1 による意図的な差）を書く。それ以外の期待値の変更は止めて報告する。
+- **受入基準**（`tests/engine_api.rs` と `src/eval.rs`・`src/builtin_core.rs` の unit test）:
+  - **BCY-AT-01（slice の使用量）**: 2,000 要素の List を `sort` する文と `join` する文を並べた script を `PollSlice::max_fuel = 16` で
+    poll し、poll ごとの commit 済み fuel の増分が「max_fuel + chunk 1 つ分の fuel + `sort` の比較の段 1 回分」以内であることと、
+    `sort` の文の直後の yield 可能点で `Yielded(SliceFuelExhausted)` になる（slice の使用量が builtin の fuel を数える）ことを見る。
+    index 代入・`pop` の深度の読み直しを含む script でも同じ上限を見る。
+  - **BCY-AT-02（chunk 境界での yield）**: 10,000 要素の List への `join`・`contains`（最後の要素を探す）・`sort` の走査を
+    `max_fuel = 16` で poll し、builtin の途中で `ceil(10000 / 256) − 1` 回以上 yield すること、poll ごとの fuel の増分の上限
+    （BCY-AT-01 と同じ）、audit の `Yielded`/`Resumed` の対と順序を見る。`join` は 1 要素が 16 KiB 近い文字列の List でも、byte で
+    chunk が区切られることを見る。
+  - **BCY-AT-03（同期経路・VM との一致）**: BCY-AT-01・02 の script と、エラー経路（`join` の途中で total fuel が尽きる、
+    `max_single_string_bytes` を超える、第 1 引数・区切りの型違い、`contains` が途中で見つかる、revision 0.20 の `sort`）を、強制
+    yield フックで全 chunk 境界で yield させた poll 経路・`Evaluator::run`・監査付きと sink 無しの `Engine::run`・VM で走らせ、
+    stdout・`committed.fuel`・terminal 種別・エラー行・trace・非 `Yielded`/`Resumed` の audit event 列・`live_heap` / `peak_heap`
+    （tree の経路どうし）を比べる。
+  - **BCY-AT-04（resume の忠実性と transaction）**: `src/builtin_core.rs` の unit test で、`bulk_step` を 1 回ずつ回した結果が
+    wrapper と同じ値・同じ fuel になること（chunk の大きさ 256 要素・16 KiB の境目を含む）を見る。`tests/engine_api.rs` で、
+    context の変数へ書き込んだあと bulk builtin の途中で yield させ、yield を跨いで submission journal が保たれ、成功で commit・
+    失敗（chunk の途中の予算超過・cancel）で rollback されることを見る。
+  - **BCY-AT-05（既定 slice の観測不変）**: 既存の `tests/`・unit test が、上の「観測挙動」に書いた poll の粒度の差を除いて
+    無改変で緑。`sort` / `join` / `contains` の fuel 値を固定している既存テスト（tree と VM）が変わらないことを含む。
+- **逸脱一覧の更新（実装 PR で行う）**: 未実装範囲の fuel-bulk-chunk-yield の行を、上の「範囲外」の残り（per-element 課金の無い
+  bulk builtin と 1 つの値の描画）に書き直す。逸脱一覧の Slice 3 PR-d の行は、`sort` の比較の段だけが slice を超えうることに
+  書き直す。
+- **想定の変更規模**: おおむね 450 行（[開発ループ手順書](loop-runbook.md) §14.1 の 1000 行に収まる）。
+  - `src/builtin_core.rs` 約 230 行: `BulkState` / `BulkStep` と `bulk_step` 30、`join` の chunk 化 60、`contains` の chunk 化 40、
+    `sort` の走査・描画キーの chunk 化と比較の段の分離 70、wrapper 化 30。
+  - `src/eval.rs` 約 170 行: slice の使用量を commit 量の差分にする 30、式 frame の bulk の状態と `step_target_call` の bulk の段 100、
+    強制 yield・前進の条件の配線 40。
+  - `src/builtin.rs` 約 50 行: 3 builtin の dispatch を wrapper と段階実行で共有する形に分ける。
+  - e2b は見積もりに対し約 1.3 倍の実績（PR #280）だった。同じ比率で上振れしても約 590 行で収まる。
+  - 触る仕組みは callback なし bulk builtin の段階実行 1 つ（slice の使用量の数え方はその判定の入力で、`run_slice` と
+    `slice_exhausted` だけを変える）。受入基準は 5 項目。
+
 ### Slice 4: cancellation・pause・transaction
 
 - `CancellationToken`、pause/resume、checkpointを実装

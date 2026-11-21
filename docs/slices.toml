@@ -494,15 +494,18 @@ order      = 20
 [[slice]]
 id         = "fuel-bulk-chunk-yield"
 title      = "callback なし bulk builtin の chunk 境界 slice yield（§4.1 chunk・§4.2）"
-status     = "todo"
+status     = "ready"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 3"
+spec       = { doc = "docs/execution-control.md", section = "fuel-bulk-chunk-yield 実装スライス（callback なし bulk builtin の chunk 境界 slice yield）" }
+acceptance = ["BCY-AT-01..05"]
 depends_on = ["tree-expr-continuation-e4"]
 order      = 24
 
-# 設計は PR #241 で確定済みだが、前段 tree-expr-continuation（e1〜e4、最後は e4）が done になるまで着手不可。
-# DoR 3（depends_on がすべて done）を満たさないため status は todo のまま置き、
-# 前段が done になった時点で状態整理 PR で todo → ready にする（documentation-guide の運用どおり）。
+# 設計 PR で小節を書き ready にした（前段 tree-expr-continuation-e4 は done、PR #467）。対象は per-element の fuel を
+# 台帳へ課金する join / contains / sort（走査・描画キー）で、slice の使用量を台帳の commit 量で数える（Q1）。
+# sort の比較の段と、per-element 課金の無い bulk builtin（F-2・fuel-bulk-charge の後）は範囲外。
+# 見積もり: src/ 約 450 行、触る仕組みは callback なし bulk builtin の段階実行 1 つ、受入基準 5。
 [[slice]]
 id         = "F-2"
 title      = "§4.1 課金表の主要 charge point への移行（既定 total_fuel 見直し・fuel 会計 revision bump）"
