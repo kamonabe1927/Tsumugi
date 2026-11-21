@@ -500,6 +500,7 @@ spec_slice = "exec-control Slice 3"
 spec       = { doc = "docs/execution-control.md", section = "fuel-bulk-chunk-yield 実装スライス（callback なし bulk builtin の chunk 境界 slice yield）" }
 acceptance = ["BCY-AT-01..05"]
 depends_on = ["tree-expr-continuation-e4"]
+design_pr  = 468
 order      = 24
 
 # 設計 PR で小節を書き ready にした（前段 tree-expr-continuation-e4 は done、PR #467）。対象は per-element の fuel を
