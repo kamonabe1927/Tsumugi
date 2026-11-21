@@ -1437,6 +1437,61 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
     案 C（`std::io` の module を取り込む `use` を違反として数える）は、マニフェストには反しないが、`use std::io;` は `io::Error`・`io::Result` や trait のためだけにも書かれ、ambient な呼びが無いファイルまで違反になって
     理由付きの許可が増え、許可リストの意味が薄まる（原則 8・9）ため採らない。
 
+### fix-dangling-final-symlink-write 実装スライス（root 外を指す dangling final symlink への `write_file` / `append_file` の拒否を試験で固定し、文書を試験の範囲に合わせる）
+
+loop:drift #429 の D-124 の扱いを、kamonabe の判断（issue #433 の (a)、2026-11-17）のとおり反映する。D-124 は、[設計書](design.md)「未対応の既知の制約」の
+「dangling final symlink を通じた `write_file` / `append_file` は許可範囲外の target を作成し得る」という文が、final entry を open 前に lstat して symlink なら拒否する
+今の OS adapter（`src/capability.rs` の `os_secure::open_file`。§8.3 契約 4・5）と食い違うというずれである。文を消す修正（PR #432）は審査で
+原則 9 と優先順位の表「再現可能な検証 ＞ 根拠のない安全性の主張」への疑いが出た（dangling final symlink と write / append を組み合わせた試験が無いまま、既知の制約を消すことになる）。
+
+- **判断（kamonabe が選択（issue #433）の (a)）**: 試験を先に足し、その試験が合格する PR の中で文書の文を直す。文書には試験で裏付けられる範囲だけを書く。
+  試験の PR がマージされるまで、文書の文は今のまま残す（危険側を多めに書いているだけで、誤った安全の主張にはならない）。採らなかった案は、
+  (b) 文は残したまま「コードは拒否するが試験で未固定」と書き直す、(c) D-124 を取り下げる。
+- **判断役が選択（PR #472）の Q1=A**（試験は Unix だけ〔`#[cfg(unix)]`〕で走らせ、Windows は範囲外として残す）。理由: Unix の試験は走れば必ず確かめ、合格の意味が環境で変わらない。
+  Windows で symlink を作れなかった回を黙って合格にする形（既存の `windows_dir_symlink_and_junction_remove_use_remove_dir`・`windows_file_symlink_remove_uses_remove_file` の
+  `if symlink_*(…).is_ok() { … }`）は、何も確かめずに合格になる回が混ざり裏付けにならない（[マニフェスト](manifesto.md) 原則 9、優先順位の表「再現可能な検証 ＞ 根拠のない安全性の主張」）。
+  symlink を生成する OS adapter の試験を `#[cfg(unix)]` に置くのは `src/capability.rs` の試験 module の既存の方針で、§8.3 契約 4・5 と §19 CAP-AT-11 が求める policy の網羅は
+  DSW-AT-01 が 3 種の `SymlinkPolicy` で満たす。OS の網羅は CAP-AT-11 の残り（Phase 7、AUD-020 は 🟡 のまま）として追跡が残る。`open_file` の final entry の lstat は
+  `os_secure`（`#[cfg(any(unix, windows))]`）で Unix と Windows が同じコードだが、これは Windows の試験の代わりにならないので、文書には裏付けとして書かない。
+  採らなかった案 B（Windows でも `symlink_file` で走らせ、作成に失敗したら飛ばす）は、飛ばした回が合格と区別できず、Windows も裏付けたという文書の主張だけが残りうるため採らない。
+  A が原則 9 に反しないのは、文書を試験で裏付けた範囲だけで書くとき（上の判断 (a)）に限る。そのため実装範囲 3・5 と DSW-AT-04 の文は、裏付けが Unix の試験であり Windows は未検証であることが読める形にする。
+- **実装範囲**:
+  1. **OS adapter の試験**（Unix）: root 内に、root 外の存在しない path を指す symlink を作り、`OsDirectoryHandle` の `SymlinkPolicy` 3 種
+     （`DenyAll`・`FollowWithinRoot`・`OperateOnFinalEntry`）それぞれで、`open_file` を `OpenFileRequest::Upsert { mode: WriteMode::Truncate }`（`write_file` の要求）と
+     `Upsert { mode: WriteMode::Append }`（`append_file` の要求）で呼ぶ試験を足す（契約 4 は Write / Create の final symlink を policy によらず拒否すると定める）。
+  2. **builtin 経由の試験**（Unix、tree と `--vm` の両方）: CLI の safe profile（`--fs-root` / `--fs-op`）と legacy profile（`TSUMUGI_SANDBOX`）のそれぞれで、
+     同じ形の dangling final symlink に `write_file` と `append_file` を行う試験を足す。tree と VM は `dispatch_fs`（`src/builtin_core.rs`）を共有するが、両方を走らせて確かめる。
+  3. **文書の書き直し**（上の試験が合格する同じ PR で）: [設計書](design.md)「未対応の既知の制約」の「シンボリックリンクとsandbox制約」と、
+     [言語仕様](language-spec.md) の legacy profile の節の dangling final symlink の行を、「final entry を open 前に lstat し、dangling を含む final symlink は拒否する。
+     lstat と open の間の差し替え race は防がない（AUD-020）」の趣旨へ書き直す。拒否を試験で確かめたのは Unix だけで、Windows は未検証であることも同じ文に書く
+     （OS を限定しない「拒否する」だけの文にしない。Q1=A）。設計書の同じ項目にある check と実 I/O の間の race・存在情報の観測の文は、
+     この書き直しの外（D-124 の範囲外）なので変えない。
+  4. **コメントを実装に合わせる**: `src/capability.rs` の OS adapter の説明コメント（「final entry の open は `O_NOFOLLOW` を付けて」「`O_NOFOLLOW` と lstat による symlink 検出」
+     「lstat→種別判定→`O_NOFOLLOW` open」）と、試験 `deny_all_rejects_final_symlink_open` のコメント（「`O_NOFOLLOW`」「`O_NOFOLLOW` により host error」）を、
+     open 前の lstat で検出して拒否するという実装（`os_secure` の module コメント・`open_file` の doc と同じ）に合わせる。コードは変えない。
+  5. **脅威モデルの追跡**: `tests/threat_model_traceability.rs` の TM-AT-03 に足した試験を挙げ、`Partial` の理由の文を、今回の試験を反映した文
+     （dangling final symlink と write / append は Unix の OS adapter と builtin で確かめた。deterministic fake adapter での試験〔[脅威モデル](threat-model.md) の TM-AT-03 の基準〕と、Windows での試験と、lstat と open の間の差し替え race の試験は無い、など）へ直す。TM-AT-03 は `Partial` のままにする。
+- **範囲外**: lstat と open の間の差し替え race（AUD-020 の TOCTOU。CAP-AT-11 の stress gate、Phase 7）、`OpenFileRequest::CreateNew` / `WriteExisting` / `ReadExisting`
+  （`write_file` / `append_file` が使うのは `Upsert` だけ）、Windows での試験（判断役が選択（PR #472）の Q1=A。Windows は未検証として文書と TM-AT-03 に残す）、OS adapter・`dispatch_fs` のコードの変更、
+  AUD-020 の完了（[ロードマップ](roadmap.md) の AUD-020 は 🟡 のまま）、TM-AT-03 の `Covered` への変更。
+- **観測される変化**: 無い（挙動は変えず、試験・コメント・文書だけを足して直す）。
+- **受入基準（fix-dangling-final-symlink-write）**:
+  - **DSW-AT-01**（OS adapter）: root 外の存在しない path を指す root 内の symlink に対し、3 種の `SymlinkPolicy` × `Upsert`（`Truncate`・`Append`）の 6 組すべてで
+    `open_file` が `AdapterError::Host` を返し、root 外の target が作られず（`exists()` が偽）、symlink は symlink のまま残る（`symlink_metadata` で確かめる）。
+    確かめ方: `src/capability.rs` の OS adapter の `#[cfg(unix)]` の unit test。
+  - **DSW-AT-02**（builtin、safe profile）: `--fs-root data=<root>` と `--fs-op data=write,create`（`Upsert` が事前要求する Write＋Create。§8.4）で、`write_file("@data/<link>", "x")` と
+    `append_file("@data/<link>", "x")` が catch 可能な `host` error（未捕捉なら exit 非 0）で止まり、root 外の target が作られない。tree と `--vm` の両方。
+    確かめ方: `tests/cli_safe_profile.rs` と同じ形の subprocess test（`#[cfg(unix)]`）。
+  - **DSW-AT-03**（builtin、legacy profile）: `TSUMUGI_SANDBOX=<root>` で、`write_file` と `append_file` に symlink の絶対 path を渡すと DSW-AT-02 と同じく止まり、
+    root 外の target が作られない。tree と `--vm` の両方。確かめ方: `tests/cli_legacy_profile.rs` と同じ形の subprocess test（`#[cfg(unix)]`）。
+  - **DSW-AT-04**（文書の範囲）: 設計書と言語仕様の dangling final symlink の文が実装範囲 3 の趣旨になり、「許可範囲外の target を作成し得る」「targetの場所を認可できない」の
+    記述が残らない。書き直した文から、拒否の裏付けが Unix の試験で Windows は未検証であることが読める。TM-AT-03 は `Partial` のまま、理由の文に deterministic fake adapter での試験と、Windows での試験と、
+    lstat と open の間の race の試験が無いことが書かれ、DSW-AT-01〜03 の試験が挙がる。
+    確かめ方: `cargo test --test threat_model_traceability`（挙げた試験の名前が実在することを検査する）と、レビューでの文書の照合。
+- **想定の変更規模**: `src/` の本体はコメントだけで ±10 行程度（コードの変更 0 行）。試験は +120〜220 行程度（OS adapter の unit test、safe・legacy の subprocess test）。
+  文書は設計書・言語仕様で ±4 行、`tests/threat_model_traceability.rs` で ±5 行。触る仕組みは OS adapter の final symlink の扱い 1 つ（試験で固定するだけ）、受入基準は 4 項目。
+  逸脱一覧の行は足さず消さない（目標の §8.3 契約 4・5 と実装は一致しており、足りなかったのは試験と設計書・言語仕様の記述である）。
+
 ## 19. 受入基準
 
 | ID | Phase | 基準 |
