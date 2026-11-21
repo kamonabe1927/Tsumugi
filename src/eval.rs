@@ -2811,8 +2811,10 @@ impl Evaluator {
             return false;
         }
         match expr {
-            // callee が識別子でその時点で user binding を持たない call は、引数に呼び出しを含み、かつ
-            // 引数を評価する builtin・host function に解決されるときだけ式 frame にする（e3）。
+            // callee が識別子でその時点で user binding を持たない call は、`map` / `filter` / `each`
+            // なら常に（e4）、引数を評価する builtin・host function なら引数に呼び出しを含むときだけ
+            // （e3）式 frame にする。user binding を持つ callee や識別子でない callee はユーザー関数の
+            // call として式 frame にする（e2a）。
             Expr::Call { callee, args } => match callee.as_ref() {
                 Expr::Ident(name) if self.env.get_cell(name).is_none() => {
                     // `map` / `filter` / `each` は引数に呼び出しが無くても要素ごとに callback を
@@ -2836,8 +2838,9 @@ impl Evaluator {
     }
 
     /// 識別子 callee（user binding なし）の解決先（tree-expr-continuation-e3）。同期経路の `prepare_call`
-    /// と同じ優先順。引数を評価しない builtin（`input` / `args` / `now` / `pop`）と `map` / `filter` /
-    /// `each` は式 frame の対象にしない（`None`）。
+    /// と同じ優先順。引数を評価しない builtin（`input` / `args` / `now` / `pop`）は式 frame の対象に
+    /// しない（`None`）。`map` / `filter` / `each` もここでは `None` のままで、式 frame の解決は
+    /// [`Self::resolve_frame_target`]（e4）が `CallTarget::Callback` として行う。
     fn resolve_call_target(&self, name: &str) -> Option<CallTarget> {
         match name {
             "print" | "exit" | "env" | "push" => return Some(CallTarget::Builtin),
