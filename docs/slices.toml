@@ -411,8 +411,10 @@ order      = 9
 # 残さない。「tree-expr-continuation が done」は e1〜e4 がすべて done を意味する。
 # acceptance は各スライスが担当する受入基準の ID。複数スライスにまたがる基準（TEC-AT-01 等）の
 # どの部分を満たせば完了かは、各スライスの spec 小節「受入基準（eN が満たす部分）」に書く。
-# e1〜e3 は done。e4 は設計確定済みで depends_on もすべて done になったが、e3 の実装で小節の前提が
-# 変わっていないかを確かめる設計の更新を設計 PR で行ってから todo → ready にする（e2b・e3 と同じ運用）。
+# e1〜e3 は done。e4 は分割の PR #250 で設計し、e3 が done になったあと設計 PR（design_pr）で e2a〜e3 の実装に合わせて
+# 小節を具体化して ready にした。そのとき #250 の受入基準 6 項目（TEC-AT-01..03・05..07）が loop-runbook §14.1 の
+# 5 項目を超えるため、TEC-AT-03 を acceptance から外し、全 sub-slice 共通の完了条件（e4 の done の条件のまま）として
+# 満たすことにした（判断役が選択（PR #464）、Q1=A）。
 [[slice]]
 id         = "tree-expr-continuation-e1"
 title      = "tree evaluator の式レベル continuation e1：文レベルのユーザー関数呼び出しを driver 上で実行し関数本体の文/反復境界で slice yield（強制 yield フック）"
@@ -475,13 +477,13 @@ order      = 15
 [[slice]]
 id         = "tree-expr-continuation-e4"
 title      = "tree evaluator の式レベル continuation e4：map / filter / each の要素ループを明示反復にし callback 本体・要素境界を yield 可能に"
-status     = "todo"
+status     = "ready"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 3"
 spec       = { doc = "docs/execution-control.md", section = "tree-expr-continuation-e4 実装スライス（`map` / `filter` / `each` の段階実行）" }
-acceptance = ["TEC-AT-01..03", "TEC-AT-05..07"]
+acceptance = ["TEC-AT-01..02", "TEC-AT-05..07"]
 depends_on = ["tree-expr-continuation-e3"]
-design_pr  = 250
+design_pr  = 464
 order      = 20
 
 # tree-expr-continuation が呼び出し・反復を必ず yield 可能点にした後、callback なし bulk builtin

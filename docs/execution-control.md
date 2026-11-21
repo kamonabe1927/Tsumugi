@@ -2117,6 +2117,14 @@ builtin・host のどれに解決されるかは静的には決まらない（us
 
 ##### tree-expr-continuation-e4 実装スライス（`map` / `filter` / `each` の段階実行）
 
+> **設計の更新（e4 を `ready` にした設計 PR）**: 下の「範囲」と、範囲外（`sort`・VM・callback 本体の中の host-call Pending）は
+> 分割の設計 PR #250 のまま変えていない。e2a〜e3 の実装 PR #268・#280・#296 で式 frame の形が決まった（`ExprFrame` が文の
+> 式スロットから子の位置の経路でノードを辿る、1 段ずつ進める、`CallDest::Operand` / `ExprResult`、callee の解決先
+> `CallTarget` を最初の段で 1 回だけ決める）。それに合わせて、下の「具体化（e4 を ready にした設計 PR）」に、対象の呼び出しの
+> 決め方、同期経路と同じ順序、保存する状態、yield 可能点、終了経路、受入基準の確かめ方、「想定の変更規模」を書き足した。
+> e3 の設計 PR #287 が残した「`map` / `filter` / `each` 自身の引数の段階評価」もここで決めた。受入基準の ID の数は、
+> 判断役が Q1=A を選んだ（PR #464）。内容と理由は下の「受入基準の ID の数」。
+
 - **範囲**:
   - poll 経路で、`map` / `filter` / `each` の要素ループを明示 frame の反復に載せる（上の小節
     「callback builtin の段階実行化」）。frame には callback 反復状態（処理済み要素・次の要素 index・部分結果）を
@@ -2143,6 +2151,114 @@ builtin・host のどれに解決されるかは静的には決まらない（us
   - **TEC-AT-03（e4 分）**: 既存テスト無改変で緑。
 - **検証**: 全 sub-slice 共通の完了条件。テストは `tests/engine_api.rs`（TEC-AT-01/02/05/06/07）、callback
   反復状態の不変条件は `src/builtin*.rs` の unit test。
+
+**具体化（e4 を ready にした設計 PR）**:
+
+- **対象の呼び出し**: poll 経路（`can_yield_ctx`）で式 frame を使う位置（e2a の 4 位置・e2b の式スロット・それらの部分式・
+  e3 の builtin / host function の引数）と、e1 の形の文（文の値の位置の式がそれ自体 call で、callee と全引数が呼び出しを
+  含まないもの）に現れる call のうち、callee が識別子で、その時点で user binding を持たず、名前が `map` / `filter` / `each` の
+  もの。e3 までは `resolve_call_target` がこの 3 つを `None` にし、`needs_expr_frame` も e1 の文の経路（`prepare_call` →
+  `CallPrep::Done`）も call 全体を従来の `eval_expr` で評価していた。e4 はこの 3 つに新しい解決先（仮称 `CallTarget::Callback`）を
+  与え、**引数が呼び出しを含むかに依らず**式 frame で段階評価する（call 自身が要素ごとに callback を呼ぶので、引数に呼び出しが
+  無くても反復を含む）。e1 の形の文に現れた場合も、`prepare_call` へ渡さずに根の式 frame を積む。
+  - `map` / `filter` / `each` に user binding があれば従来どおりユーザー関数の call（e2a の経路）で、e4 の対象ではない。
+- **同期経路と同じ順序**（`builtin_collection` と `call_fn_value`、`src/builtin.rs`）。式 frame の段は次の順に進める。
+  1. 最初の段: `validate_context_builtin_call`（3 つとも arity 2 の `check_arity_count`）。引数の評価より前。builtin なので
+     `count_step` はせず、call trace も積まない（同期経路と同じ）。同じ段の中で第 1 引数の評価に進む（e3 と同じ。前処理と
+     第 1 引数の間に yield 可能点を置かない）。
+  2. 第 1 引数（List）→ 第 2 引数（callback）を左から評価する。呼び出しを含む引数は子の式 frame（`begin_expr_child`）、
+     含まない引数は `eval_expr`。
+  3. 第 1 引数の型検査（List でなければ `builtin_arg_type(line, <名前>, 1, "List", …)`）。callback の検査はここでは行わない
+     （同期経路と同じく、空の List なら callback が呼べない値でもエラーにならない）。
+  4. 要素 i ごとに: `count_step` → 深度検査（`MAX_USER_CALL_DEPTH`、`call_depth_limit`）→ callable 検査
+     （`callback_not_callable`）→ arity 検査（`callback_arity`。callback は常に 1 引数）→ `push_call_frame` → captured /
+     self-binding / 引数の束縛 → call trace の push → callback 本体を driver 上の Call frame（e1 の機構）で実行する。束縛までは
+     e2a の `begin_user_call` / `bind_user_call` と同じ段だが、callable / arity のエラーは callback 専用の message なので、
+     `call_fn_value` と共有する検査の関数に分ける（同期経路の順序とエラーを変えない）。
+  5. callback の戻り値の受け渡し先は新しい `CallDest`（仮称 `CallDest::Callback`）で、最上位の式 frame（この call）へ値を届ける。
+     本体が `break` / `continue` で抜けたら、同期経路と同じくその文の行で「ループ外」のエラーにする。届いた値で、
+     `map` は `check_collection(len + 1)` → 部分結果へ push、`filter` は truthy なら `check_collection(len + 1)` → 要素を
+     部分結果へ push、`each` は値を捨てる。
+  6. 全要素の後: `map` は `check_elements_depth` → `Value::new_list`、`filter` は `Value::new_list`、`each` は `Null` で
+     式 frame を完了する（`finish_expr_frame`）。結果の組み立ては `builtin_collection` と共有する関数に分ける。
+- **式 frame に保存する状態の追加**（上の小節「callback builtin の反復状態」の具体化）。どれも同期経路では
+  `builtin_collection` のローカル変数（`list`・`func`・ループの位置・`result`）が持っていたもので、新しい値は作らない。
+  heap は e2a と同じく課金しない（`heap_charge` 0）。部分結果の `Vec<Value>` は同期経路と同じく `new_list` まで課金せず、
+  反復元の List は `Rc` 共有の backing を保持するだけで複製しない（同期経路と同じ寿命・同じ `live_heap`）。
+  - 反復元の List（評価済みの第 1 引数）と callback（評価済みの第 2 引数）。
+  - 次に処理する要素の index。
+  - 部分結果（`map` は callback の戻り値、`filter` は残す要素）。
+  - `filter`: callback へ渡した要素（戻り値を受け取ってから部分結果へ push するため）。
+- **yield 可能点**: e2a と同じく式 frame の段の間で、slice fuel の判定と強制 yield フックだけを行う。具体的には、引数の
+  評価の境界（第 1 引数の評価後・第 2 引数の評価前、両方の評価後・型検査の前）、各要素の callback 呼び出しの前（要素 i の
+  `count_step` の前）と戻り値を受け取った後（要素 i+1 の前・全要素の後の結果の組み立ての前）、callback 本体の文/反復境界
+  （driver 上の Call frame。e1 と同じ）。強制 yield フックの前進の条件は e2a の `expr_progress` のまま。audit drain queue 上限と
+  cancel / deadline の checkpoint は従来どおり文/反復境界だけ（callback 本体の文/反復境界を含む）。
+- **cooperative host-call**: callback 本体の中は driver 上の Call frame の中なので `may_yield = false` のまま（Pending は
+  catch 不能 `InternalControl`。範囲外のまま）。`map` / `filter` / `each` の引数の中の cooperative host function がトップレベルで
+  Pending を返した場合は e3 と同じく文の式 frame をすべて畳んで文を評価し直す。同じ文の他の位置の `map` の callback が先に
+  実行されていれば、評価し直しで再び実行される（同期経路の poll で文を `eval_expr` で評価し直す現行の観測と同じ）。
+- **終了経路**: 引数の評価・型検査・callback の検査・callback 本体・部分結果の検査で起きたエラーは、e2a と同じく
+  `handle_error` が Call frame と式 frame を畳んで最も近い `try` へ渡す（callback 本体の中の `try` も含む）。エラー行・trace は
+  同期経路と同じ。予算超過は従来どおり catch 不能 terminal として伝播する。
+- **TEC-AT-04 を持たない理由**: callback の深度検査は上の 4 の段で `call_fn_value` と同じ関数・同じ順序で行い、callback 本体は
+  e1 が TEC-AT-04 を固定した driver 上の Call frame で実行する。深度の上限を超える入れ子の callback は、下の TEC-AT-01（全体）の
+  エラー経路の script（callback の中から同じ `map` を呼んで `call_depth_limit` に達する）で同期経路との一致として確かめる。
+- **受入基準の ID の数（判断役が選択（PR #464）、Q1=A）**: #250 の割り当て（TEC-AT-01〜03・05〜07 の 6 項目）は
+  [開発ループ手順書](loop-runbook.md) §14.1 の「受入基準は 5 項目以内」を超える。e4 は 1 スライスのまま、TEC-AT-03（e4 分。
+  既存テスト無改変で緑）を `acceptance` の ID から外し、全 sub-slice 共通の完了条件で満たす。
+  - **e4 の done の条件として効き続けること**: TEC-AT-03 の ID を外しても、全 sub-slice 共通の完了条件（`cargo fmt --check`・
+    `cargo clippy --all-targets --all-features -- -D warnings`・`cargo test --all-features` が緑で既存テストは無改変、同期経路の
+    コードパスを変えず、同期経路と terminal まで poll する入口の fuel・heap・エラー行・trace・stdout・exit code が現状と一致）は
+    e4 の done の条件のままである。e4 の実装 PR は、既存の `tests/`・unit test を 1 つも変えずに緑であることを確かめて PR 本文に
+    書く。上の「受入基準（e4 が満たす部分）」の TEC-AT-03（e4 分）は、この共通の完了条件として満たす。観測値の一致は、加えて
+    下の TEC-AT-01（全体）の `live_heap` / `peak_heap` の比較でも確かめる。
+  - **理由**: TEC-AT-03 の本文は共通の完了条件の第 1・第 2 項（「TEC-AT-03 のその sub-slice 分」と明記）と同じ内容で、ID を
+    外しても確かめる内容は減らず、CI と TEC-AT-01（全体）の比較で再現可能に裏付けられる（マニフェスト原則 9）。e4 に固有の
+    検証（TEC-AT-01・02・05・06・07）はすべて残り、callback 途中の yield を跨ぐ transaction 不変（TEC-AT-05、原則 6）も e4 で
+    確かめる。約 400 行・仕組み 1 つの変更を 1 スライスに保ち、機構と組み合わせテストが同じ PR で入る（原則 8、手順書 §14.1）。
+  - **採らなかった案**: e4a / e4b への分割（B）は、e4b がテストだけのスライスになり、e4a の done の時点で e1〜e4 を跨ぐ組み合わせが
+    未検証のまま機構だけが入るうえ、設計・実装の往復が 2 組かかる。TEC-AT-05 を外す案（C）は、TEC-AT-05 本文が明示する「callback
+    途中」の yield を確かめるスライスが無いまま tree-expr-continuation が done になりうるため、マニフェスト（原則 6・9）に反しうる
+    （e3 が TEC-AT-05 を外せたのは式 frame が e2a と同じ frame 種別だったからで、e4 は新しい反復の状態と受け渡し先を足す）。
+- **受入基準の確かめ方（e4 が満たす部分）**:
+  - **TEC-AT-07**: `tests/engine_api.rs` に `map` / `filter` / `each` それぞれの script（callback 本体が `print` と `while` を持つ、
+    callback が lambda・名前付き関数・captured を使う closure のもの）を置き、強制 yield フックで要素の境界と callback 本体の
+    文/反復境界の両方で yield させ、e1 以来の比べ方（強制 yield ありの poll 経路と `can_yield = false` の `Evaluator::run`、
+    監査付きと sink 無しの `Engine::run`）で stdout・`committed.fuel`・terminal 種別・非 `Yielded`/`Resumed` の audit event 列を
+    比べる。エラー経路（第 1 引数が List でない、callback が呼べない値〔空の List ではエラーにならないことを含む〕、callback の
+    arity 違反、callback 本体の実行時エラーを callback の中と外の `try` で捕まえる、callback 本体の `break`、`map` の結果の要素数が
+    `max_collection_elements` を超える）の種別・行・trace も一致させる。
+  - **TEC-AT-01（全体）**: 同じ比べ方で、e1〜e4 の yield 可能点を 1 つの script の中で跨ぐ組み合わせを置く。例: `print(len(map(xs, f)))`、
+    `let ys = map(xs, f) + filter(xs, g)`、`map(map(xs, f), g)`、`map(f(), g)`（引数に呼び出し）、callback の中の入れ子の
+    ユーザー関数呼び出し・`while`・`each`、`if len(filter(xs, g)) > 0`、`for y in map(xs, f)`、index 代入の値の `map`、e1 の形の文
+    （`each(xs, f)`・`let ys = map(xs, f)`・`return filter(xs, g)`）。上の「TEC-AT-04 を持たない理由」の深度上限の script も置く。
+    `src/eval.rs` の unit test で、これらの poll 経路の `live_heap` / `peak_heap` が `Evaluator::run` と一致することを見る。
+  - **TEC-AT-02（e4 分）**: `src/eval.rs` の unit test で、反復元の List・callback・次の要素の index・部分結果・`filter` の渡した
+    要素が yield を跨いで保存されることを固定する。`tests/engine_api.rs` で、各要素の callback が副作用（`print`）を持つ script を
+    強制 yield フックで 1 境界ずつ yield させ、resume 後の値と出力順が同期経路と一致することを見る（各 callback が 1 回だけ
+    実行されることを含む）。
+  - **TEC-AT-05（e4 分）**: `tests/engine_api.rs` の PR-d・e1 の transaction のテストと同じ形で、callback 本体が context の変数へ
+    書き込み・`push` する script を callback の途中で yield させ、yield を跨いでも submission journal が保持され、成功の terminal で
+    commit・失敗の terminal で rollback されることを見る。
+  - **TEC-AT-06（全体）**: callback 本体にループを持つ `map` / `filter` / `each` と、それを関数本体・builtin の引数・別の callback の
+    中に入れ子にした script を `PollSlice::max_fuel = 16` で poll し、poll ごとの fuel 増分が「slice + 区間内の callback なし bulk
+    builtin 1 回分の単独実測 fuel」以内であることと、audit の `Yielded`/`Resumed` の対と順序を見る（e1 の TEC-AT-06 と同じ測り方）。
+- **逸脱一覧の更新（e4 の実装 PR で行う）**: 「未実装範囲」の e4 の行（`map` / `filter` / `each` の要素境界と callback 本体の
+  yield、引数の呼び出し）を削除する。「関数本体・callback 本体の中での cooperative host-call の Pending yield と audit drain queue
+  上限の yield」の行は範囲外なので残す。
+- **想定の変更規模**: おおむね 400 行（[開発ループ手順書](loop-runbook.md) §14.1 の 1000 行に収まる）。関数へ移して字下げが
+  変わる行は追加と削除の両方に数えた。
+  - `src/eval.rs` 約 280 行: `resolve_call_target`・`needs_expr_frame`・e1 の形の文の振り分け 25、`CallTarget` と `ExprFrame` の
+    追加の状態 20、`step_target_call` の callback builtin の段（最初の段、引数、型検査、要素ごとの前処理と Call frame の push、
+    結果の組み立て）140、`CallDest` の追加と戻り値の受け渡し（`break` / `continue` のエラー化を含む）60、強制 yield・前進の条件の
+    配線 35。
+  - `src/builtin.rs` 約 120 行: callback の callable / arity 検査を `call_fn_value` と共有する関数に分ける 40、`map` / `filter` /
+    `each` の部分結果の push と結果の組み立てを `builtin_collection` と共有する関数に分ける 80。
+  - e2b は見積もり約 385 行に対し実績 491 行（PR #280）、e3 は約 650 行に対し 691 行（PR #296）だった。e2b の比率で上振れしても
+    約 510 行で 1000 行に収まる。
+  - 触る仕組みは tree evaluator の call の評価 1 つ（e3 と同じく、`src/builtin.rs` は builtin の挙動を変えず、検査と結果の組み立ての
+    境目を分けるだけ）。受入基準は 5 項目（PR #464 の Q1=A）。
 
 ### Slice 4: cancellation・pause・transaction
 
