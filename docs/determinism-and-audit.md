@@ -48,6 +48,7 @@ host call 開始前に `BudgetCharged` を flush しない行（loop:drift #342 
 
 | 未実装範囲 | 対象の節(§) | 備考 |
 |---|---|---|
+| audit の schema version 2（§7.1）。`AuditEnvelope.schema_version` は `1` のままで、`ExecutionStarted` と `BudgetConfig`（`src/budget.rs`・`src/audit.rs`）に `fuel_accounting_revision` が無い | §7.1/§7.2/§9.2 | F-2a（[実行予算・協調実行仕様](execution-control.md) §14） |
 | sink 必須化（§1.1、`ConfigError::AuditSinkRequired`。opt-in を既定から外す） | §1.1 | CLI 側の sink 構築が整う後続スライスへ延期 |
 | 監査設定の公開 setter（`EngineBuilder::audit_redaction_policy` / `EngineBuilder::audit_budget`）と `ConfigError` への `AuditConfigError` 接続。現状は `#[doc(hidden)]` のテスト用 shim（`audit_redaction_policy_for_test` / `audit_budget_for_test`、不正 budget は panic）だけ | §1.1/§9.1/§10.2 | sink 必須化スライスへ延期 |
 | strict deterministic CBOR。現 `encoded_bytes` は naive 推定で後で差し替え可能に隔離 | §9.2 | — |
@@ -371,11 +372,11 @@ pub struct ReplayEntry {
 
 ### 7.1 envelope
 
-field名、型、意味をschema version 1として固定する。
+field名、型、意味をschema version 2として固定する。version 1との違いは、`ExecutionStarted`と`BudgetConfig`が`heap_accounting_revision`の直後に`fuel_accounting_revision: u32`を持つことだけである（[実行予算・協調実行仕様](execution-control.md) §14「F-2 の sub-slice 分割」の判断Q4=A。判断役が選択（PR #470））。理由: field の追加は§9.2のとおりschema versionを上げ、同じ版で field の並びが違う記録を出さない（[マニフェスト](manifesto.md) 原則 7・5）。
 
 ```rust
 pub struct AuditEnvelope {
-    pub schema_version: u16,          // 常に1
+    pub schema_version: u16,          // 常に2
     pub execution_id: ExecutionId,   // host供給128-bit ID
     pub source_hash: [u8; 32],        // root source SHA-256
     pub language_revision: String,
@@ -412,6 +413,7 @@ pub enum AuditEvent {
         backend: Backend,                 // productionはTree
         rules_revision: u32,
         heap_accounting_revision: u32,
+        fuel_accounting_revision: u32,
         budget: BudgetConfig,
         capability_policy_hash: [u8; 32],
         redaction_policy_id: String,
@@ -666,7 +668,7 @@ error messageはpath、argument、host responseを含み得るため、auditで�
 
 ### 9.2 Canonical encodingとrequest fingerprint
 
-schema version 1のbyte表現はRFC 8949 deterministic CBORの次のsubsetへ固定する。
+schema version 2（§7.1）のbyte表現はRFC 8949 deterministic CBORの次のsubsetへ固定する。
 
 - structはRust field宣言順のCBOR array、enumは`[u16 tag, field0, ...]`、`Option`は`[0]`または`[1, value]`でencodeする。mapとしてfield名をencodeしない。
 - unsigned/signed integerは値を表せる最短幅、Stringは正規化しないUTF-8 text、byte列はCBOR byte string、bool/nullは標準primitiveとする。Rustの符号なし整数（u8〜u64）はmajor type 0、符号付き整数（i64）は0以上ならmajor type 0、負ならmajor type 1とし、宣言型の幅ではなく値で最短幅を選ぶ。array・text・byte stringは常に定長（definite length）で、indefinite-length encodingを使わない。CBOR tag（major type 6）は使わない。
@@ -2286,4 +2288,4 @@ Phase 5/6実装完了には次をすべて自動化する。
 
 Phase 5は、treeが唯一のproduction backendとなり、すべてのambient inputがHostBoundaryへ移り、DeterminismInputとbackend非依存規則が自動検証され、VMのproduction化に差分0件gateが設定された時点で完了とする。
 
-Phase 6は、schema version 1の全event、redaction、bounded journal、fail-closed sink、host call correlation、budget集約、Started/Terminal完全性、record/replay連携が全terminal pathで検証された時点で完了とする。
+Phase 6は、schema version 2（§7.1）の全event、redaction、bounded journal、fail-closed sink、host call correlation、budget集約、Started/Terminal完全性、record/replay連携が全terminal pathで検証された時点で完了とする。
