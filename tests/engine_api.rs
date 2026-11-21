@@ -3439,21 +3439,37 @@ print(a, b)
             polls.len() - base.len()
         );
 
-        // index 代入・`pop` の深度の読み直しを含む script でも同じ上限。
-        let text = "\
-let m = [[[0]], [[1]]]
-let d = {\"a\": [[1]]}
-for i in range(0, 300)
-  m[0] = [[i], [[i]]]
-  d[\"a\"] = [[i], [i]]
-  push(m, [[i]])
-  let p = pop(m)
+        // index 代入・`pop` の深度の読み直しを含む script: ただ 1 つの最も深い子を浅い値で置き換える・
+        // 外すたびに、残りの子 500 個を読み直す fuel が 1 文の中で課金される（semantic-decisions §21.3）。
+        // 読み直しも slice の使用量に入るので、1 poll の増分は `16 + 1 文の読み直し分` 以内に収まる
+        // （main の数え方〔count_step だけ〕では読み直しを含む文を 1 slice に何文も続けて超える）。
+        let children = 500;
+        let iterations = 20;
+        let text = format!(
+            "\
+let xs = range(0, {children})
+for i in range(0, {iterations})
+  xs[0] = [[i]]
+  xs[0] = 0
+  push(xs, [[i]])
+  let p = pop(xs)
 end
-";
-        let (polls, outcome) = bcy_poll(text);
+"
+        );
+        let (polls, outcome) = bcy_poll(&text);
         assert_eq!(outcome, tsumugi::ExecutionOutcome::Completed);
+        let total: u64 = polls.iter().map(|(increment, _)| increment).sum();
+        // 反復 1 回につき index 代入で 500、`pop` で 500 の読み直し。
+        assert!(
+            total >= (iterations * 2 * children) as u64,
+            "読み直しが課金されている: {total}"
+        );
+        let reread_bound = 16 + children as u64 + 1;
         for (increment, _) in &polls {
-            assert!(*increment <= bound, "1 poll の fuel {increment} > {bound}");
+            assert!(
+                *increment <= reread_bound,
+                "1 poll の fuel {increment} > {reread_bound}"
+            );
         }
     }
 
@@ -3664,20 +3680,19 @@ end
             // 強制 yield は builtin の途中の chunk 境界（1,000 要素なら 3 つ以上）でも yield する。
             assert!(bcy_assert_matches(&text) >= base + 3, "{text}");
         }
-        // 1 要素が 16 KiB 近い文字列の List への join: 強制 yield で 16 KiB の chunk 境界ごとに区切る。
-        let big = "\
-let s = \"x\"
-for i in range(0, 13)
-  s = s + s
-end
-let bigs = [s, s, s, s, s, s, s, s]
-";
-        let base = bcy_assert_matches(big);
-        let joined = format!("{big}let j = join(bigs, \"\")\nprint(len(j))\n");
-        assert!(
-            bcy_assert_matches(&joined) >= base + 4,
-            "16 KiB ごとに区切る"
-        );
+        // 1 要素が 8 KiB の文字列の List への join: 強制 yield で 16 KiB の chunk 境界ごとに区切る。
+        // 8 要素なら 2 要素（16 KiB）ごとの 4 chunk で、1 要素のとき（chunk 1 つ）より builtin の途中の
+        // yield がちょうど 3 回多い（要素の途中では区切らない）。
+        let join_yields = |elements: usize| {
+            let prelude = format!(
+                "let s = \"x\"\nfor i in range(0, 13)\n  s = s + s\nend\nlet bigs = [{}]\n",
+                vec!["s"; elements].join(", ")
+            );
+            let base = bcy_assert_matches(&prelude);
+            let joined = format!("{prelude}let j = join(bigs, \"\")\nprint(len(j))\n");
+            bcy_assert_matches(&joined) - base
+        };
+        assert_eq!(join_yields(8), join_yields(1) + 3, "16 KiB ごとに区切る");
 
         // エラー経路。
         let dag = "let a = [1]\nfor i in range(0, 9)\n  a = [a, a]\nend\nlet zs = []\nfor i in range(0, 3000)\n  push(zs, a)\nend\n";
