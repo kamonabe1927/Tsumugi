@@ -2964,6 +2964,358 @@ print(f())
         assert!(matches!(outcome, EmbeddingOutcome::Completed { .. }));
         assert_eq!(stdout, "[1, 2]\n[1, 2]\n");
     }
+
+    // ---------------------------------------------------------------------
+    // tree-expr-continuation-e4: map / filter / each の段階実行
+    // ---------------------------------------------------------------------
+
+    /// e4 の script が使う関数（`f` / `g` / `step` は E2B_PRELUDE のもの）。
+    const E4_PRELUDE: &str = "\
+fn noisy(x)
+  print(x)
+  let i = 0
+  while i < 2
+    i = i + 1
+  end
+  return x * 2
+end
+fn odd(x)
+  return x % 2 == 1
+end
+fn pair(x)
+  return [x, x]
+end
+";
+
+    /// TEC-AT-07: `map` / `filter` / `each`（callback が lambda・名前付き関数・captured を使う closure、
+    /// 本体に `print` と `while` を持つ）を全境界（要素の途中・callback 本体の途中）で yield させても、
+    /// 結果・出力順・fuel・terminal・audit event 列が同期実行と一致する。
+    #[test]
+    fn tec_at_07_map_filter_each_match_sync_path() {
+        let body = "\
+let xs = [1, 2, 3, 4]
+let a = map(xs, noisy)
+print(a)
+let b = filter(xs, odd)
+print(b)
+each(xs, noisy)
+let k = 10
+fn adder(x)
+  let i = 0
+  while i < 1
+    i = i + 1
+  end
+  return x + k
+end
+print(map(xs, adder))
+print(map(xs, fn(x) x * x end))
+print(filter(xs, fn(x) x > k - 8 end))
+let r = each(xs, fn(x) print(x + k) end)
+print(r)
+print(map([], noisy), filter([], odd), each([], noisy))
+print(map([], 5))
+let ys = map(xs, fn(x)
+  if x == 2
+    return \"two\"
+  end
+  let t = 0
+  for j in [1, 2]
+    t = t + j
+  end
+  return t
+end)
+print(ys)
+let outer = 0
+let zs = map([1, 2], fn(x)
+  outer = outer + x
+  return outer
+end)
+print(zs, outer)
+";
+        let text = format!("{E2B_PRELUDE}{E4_PRELUDE}{body}");
+        let yields = assert_matches_sync(&text);
+        assert!(
+            yields > 150,
+            "要素と callback 本体の境界で yield している: {yields}"
+        );
+        let (observed, _) = run_audited(&text, true);
+        assert!(
+            matches!(observed.outcome, EmbeddingOutcome::Completed { .. }),
+            "{:?}\n{}",
+            observed.outcome,
+            observed.stdout
+        );
+        assert!(
+            observed.stdout.ends_with("[1, 3] 3\n"),
+            "{}",
+            observed.stdout
+        );
+    }
+
+    /// TEC-AT-07 のエラー経路: 第 1 引数が List でない・callback が呼べない値（空の List では
+    /// エラーにならない）・arity 違反・callback 本体の実行時エラー（callback の中と外の `try`）・
+    /// callback 本体の `break` / `continue`・`map` の結果の要素数上限の種別・行・trace・fuel が
+    /// 同期実行と一致する。
+    #[test]
+    fn tec_at_07_error_paths_match_sync_path() {
+        let cases = [
+            "map(1, f)\n",
+            "filter(\"abc\", f)\n",
+            "each(f(1), f)\n",
+            "map([1], 5)\n",
+            "map([], 5)\nprint(\"ok\")\n",
+            "filter([1], nope)\n",
+            "try\n  each([1], 3)\ncatch e\n  print(e[\"type\"])\nend\n",
+            "map([1], fn(a, b) a end)\n",
+            "try\n  filter([1], fn() 1 end)\ncatch e\n  print(e[\"message\"])\nend\n",
+            "map([1, 2], fn(x) x / 0 end)\n",
+            "let r = map([1, 2], fn(x)\n  print(x)\n  return x / 0\nend)\n",
+            "try\n  map([1, 2], fn(x) x / 0 end)\ncatch e\n  print(e[\"type\"])\nend\nprint(\"after\")\n",
+            "let r = map([1, 2], fn(x)\n  try\n    return x / 0\n  catch e\n    return -1\n  end\nend)\nprint(r)\n",
+            "fn brk(x)\n  break\nend\neach([1], brk)\n",
+            "fn cont(x)\n  continue\nend\ntry\n  each([1], cont)\ncatch e\n  print(e[\"type\"])\nend\n",
+            "for i in [1, 2]\n  each([1], fn(x)\n    break\n  end)\nend\n",
+            "let r = map(f([1]), 5)\n",
+            "let r = map(f([1]), f(5))\n",
+            "map([1], f, 3)\n",
+            "map([1])\n",
+        ];
+        for body in cases {
+            let text = format!("{E2B_PRELUDE}{body}");
+            assert_matches_sync(&text);
+        }
+        // 結果の要素数が `max_collection_elements` を超える（既定上限は 1_000_000 より小さい範囲を
+        // 使うため、range で作った List を map する script の同期実行との一致で確かめる）。
+        let text = format!("{E2B_PRELUDE}let r = map(range(0, 20), fn(x) x end)\nprint(len(r))\n");
+        assert_matches_sync(&text);
+    }
+
+    /// TEC-AT-01（全体）: e1〜e4 の yield 可能点を 1 つの script の中で跨ぐ組み合わせ（式の operand・
+    /// builtin の引数・`if` / `for` / index 代入・e1 の形の文に置いた `map` / `filter` / `each`、引数に
+    /// 呼び出し、callback の中の入れ子のユーザー関数呼び出し・`while`・`each`・`map`）が同期実行と一致する。
+    #[test]
+    fn tec_at_01_e4_combined_yield_points_match_sync_path() {
+        let body = "\
+let xs = [1, 2, 3]
+print(len(map(xs, noisy)))
+let ys = len(map(xs, noisy)) + len(filter(xs, odd))
+print(ys)
+print(map(map(xs, noisy), noisy))
+print(map(f(xs), g))
+print(map(pair(2), f))
+if len(filter(xs, odd)) > 0
+  print(\"has odd\")
+end
+for y in map(xs, noisy)
+  print(y)
+end
+let zs = [0, 0, 0]
+zs[f(1)] = len(map(xs, f))
+print(zs)
+each(xs, noisy)
+let w = map(xs, f)
+fn viaret()
+  return filter(xs, odd)
+end
+print(viaret())
+print(map(xs, fn(x)
+  let acc = 0
+  each([1, 2], fn(j) print(j) end)
+  let m = map([x, x], fn(v) f(v) + 1 end)
+  while acc < 2
+    acc = acc + 1
+  end
+  return noisy(x) + acc + len(m)
+end))
+print(sort(map(xs, fn(x) 0 - x end)), join(map(xs, fn(x) to_str(x) end), \"-\"))
+let d = {\"k\": map(xs, f), \"n\": len(filter(xs, odd))}
+print(d)
+print(f\"{map(xs, f)} and {len(filter(xs, odd))}\")
+let t = map(xs, f)[f(1)]
+print(t)
+let flag = len(map(xs, f)) > 2 and len(filter(xs, odd)) == 2
+print(flag)
+";
+        let text = format!("{E2B_PRELUDE}{E4_PRELUDE}{body}");
+        let yields = assert_matches_sync(&text);
+        assert!(yields > 100, "e1〜e4 の境界で yield している: {yields}");
+        let (observed, _) = run_audited(&text, true);
+        assert!(
+            matches!(observed.outcome, EmbeddingOutcome::Completed { .. }),
+            "{:?}\n{}",
+            observed.outcome,
+            observed.stdout
+        );
+        assert!(observed.stdout.ends_with("true\n"), "{}", observed.stdout);
+
+        // callback の中から同じ `map` を呼んで `call_depth_limit` に達する（TEC-AT-04 を持たない理由）。
+        assert_matches_sync(&format!(
+            "{E2B_PRELUDE}fn deep(n)\n  return map([n], fn(v) deep(v + 1) end)\nend\nlet r = deep(0)\n"
+        ));
+        assert_matches_sync(&format!(
+            "{E2B_PRELUDE}fn deep(n)\n  return map([n], fn(v) deep(v + 1) end)\nend\ntry\n  deep(0)\ncatch e\n  print(e[\"type\"])\nend\n"
+        ));
+    }
+
+    /// TEC-AT-02（e4 分）: 各要素の callback が副作用（`print`）を持つ `map` / `filter` / `each` を
+    /// 1 境界ずつ yield させても、反復元・次の要素・部分結果が保存され、各 callback は 1 回だけ実行され、
+    /// 出力順が同期実行と一致する。
+    #[test]
+    fn tec_at_02_e4_resume_mid_iteration_matches_sync_path() {
+        let text = "\
+fn say(x)
+  print(x)
+  let i = 0
+  while i < 1
+    i = i + 1
+  end
+  return x
+end
+let a = map([1, 2, 3], say)
+let b = filter([4, 5, 6], fn(x) say(x) % 2 == 0 end)
+each([7, 8], say)
+print(a, b)
+";
+        let yields = assert_matches_sync(text);
+        assert!(yields > 30, "要素の途中で yield している: {yields}");
+        let (observed, _) = run_audited(text, true);
+        assert_eq!(
+            observed.stdout,
+            "1\n2\n3\n4\n5\n6\n7\n8\n[1, 2, 3] [4, 6]\n"
+        );
+    }
+
+    /// TEC-AT-05（e4 分）: callback 本体が context の変数へ書き込み・`push` する script を callback の
+    /// 途中で yield させても submission journal が保持され、成功の terminal で commit・失敗の terminal で
+    /// rollback される。
+    #[test]
+    fn tec_at_05_e4_transaction_spans_yields_inside_callback() {
+        let engine = EmbeddingEngine::builder().build().expect("build");
+        let mut ctx = EmbeddingContext::new(&engine);
+        ctx.force_yield_at_every_boundary_for_test(true);
+        let run = |ctx: &mut EmbeddingContext, text: &str| {
+            let linked = link(&engine, text);
+            engine.run(&linked, ctx, request(CapabilitySet::empty()))
+        };
+        let cb = "fn bump(x)\n  let i = 0\n  while i < 3\n    i = i + 1\n  end\n  total = total + x\n  push(log, x)\n  return x\nend\n";
+
+        let ok = format!("let total = 0\nlet log = []\n{cb}let got = map([1, 2, 3], bump)\n");
+        assert!(matches!(
+            run(&mut ctx, &ok),
+            EmbeddingOutcome::Completed { .. }
+        ));
+        assert!(matches!(
+            run(
+                &mut ctx,
+                "if total != 6 or len(log) != 3\n  nope\nend\nlet probe = got\n"
+            ),
+            EmbeddingOutcome::Completed { .. }
+        ));
+
+        // 失敗: callback の途中の yield の後で未捕捉エラーになると、yield より前の書き込みも rollback。
+        let bad = format!(
+            "total = 100\nlet later = 2\n{cb}each([1, 2], bump)\nlet n = map([1], fn(x) missing end)\n"
+        );
+        assert!(matches!(
+            run(&mut ctx, &bad),
+            EmbeddingOutcome::RuntimeError { .. }
+        ));
+        assert!(matches!(
+            run(&mut ctx, "let probe = later\n"),
+            EmbeddingOutcome::RuntimeError { .. }
+        ));
+        assert!(matches!(
+            run(&mut ctx, "if total != 6 or len(log) != 3\n  nope\nend\n"),
+            EmbeddingOutcome::Completed { .. }
+        ));
+    }
+
+    /// TEC-AT-06（全体）: callback 本体にループを持つ `map` / `filter` / `each` と、それを関数本体・
+    /// builtin の引数・別の callback の中に入れ子にした script を最小 slice（16）で poll したとき、
+    /// 1 poll の実行 fuel が上限以内で、Yielded / Resumed が対になり順序が単調。
+    #[test]
+    fn tec_at_06_e4_poll_fuel_is_bounded_in_callbacks() {
+        let engine = Engine::new();
+        let work =
+            "fn work(n)\n  let i = 0\n  while i < n\n    i = i + 1\n  end\n  return i\nend\n";
+        let scripts = [
+            "let r = map([200], work)\n",
+            "let r = filter([200, 1], fn(x) work(x) > 0 end)\n",
+            "each([200], work)\n",
+            "fn outer()\n  return map([100, 100], work)\nend\nlet r = outer()\n",
+            "let n = len(map([200], work))\n",
+            "let r = map([1], fn(x) each([200], work) end)\n",
+            "let r = map([100], fn(x) map([100], work) end)\n",
+            "let r = each([100], fn(x)\n  each([100], fn(y)\n    work(y)\n  end)\nend)\n",
+        ];
+        for body in scripts {
+            let text = format!("{work}{body}");
+            let script = engine.compile(&text).expect("compile");
+            let mut ctx = ExecutionContext::new();
+            let mut handle = engine
+                .create_execution(&script, &mut ctx, ExecutionRequest::new())
+                .expect("admit");
+            let mut previous = 0;
+            let mut polls = 0;
+            loop {
+                let result = handle.poll(PollSlice { max_fuel: 16 }).expect("poll");
+                let fuel = handle.usage().committed.fuel;
+                assert!(
+                    fuel - previous <= 16,
+                    "1 poll の実行 fuel が上限を超えた: {} > 16\n{body}",
+                    fuel - previous
+                );
+                previous = fuel;
+                polls += 1;
+                if let PollResult::Terminal { outcome, .. } = result {
+                    assert_eq!(outcome, tsumugi::ExecutionOutcome::Completed, "{body}");
+                    break;
+                }
+            }
+            assert!(
+                polls > 100 / 16,
+                "callback 本体のループの途中で yield している: {polls}\n{body}"
+            );
+        }
+
+        let sink = Arc::new(InMemoryAuditSink::new());
+        let audited = EmbeddingEngine::builder()
+            .audit_sink(sink.clone() as Arc<dyn AuditSink>)
+            .audit_slice_fuel(16)
+            .build()
+            .expect("build");
+        let text = format!("{work}let r = map([100, 100], fn(x) filter([x], work) end)\n");
+        let linked = link(&audited, &text);
+        let mut ctx = EmbeddingContext::new(&audited);
+        let outcome = audited.run_audited(&linked, &mut ctx, request(CapabilitySet::empty()));
+        assert!(matches!(
+            outcome.outcome(),
+            Some(EmbeddingOutcome::Completed { .. })
+        ));
+        let mut pending: Option<u64> = None;
+        let mut last: Option<u64> = None;
+        let mut pairs = 0;
+        for envelope in sink.snapshot() {
+            match envelope.event {
+                AuditEvent::Yielded { poll_index, .. } => {
+                    assert!(pending.is_none(), "Yielded が連続した");
+                    assert!(
+                        last.is_none_or(|prev| poll_index > prev),
+                        "poll_index が単調でない"
+                    );
+                    pending = Some(poll_index);
+                    last = Some(poll_index);
+                }
+                AuditEvent::Resumed { poll_index, .. } => {
+                    assert_eq!(pending.take(), Some(poll_index), "Resumed が対にならない");
+                    pairs += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(pending.is_none());
+        assert!(pairs >= 200 / 16, "callback 本体で yield している: {pairs}");
+    }
 }
 
 // =============================================================================

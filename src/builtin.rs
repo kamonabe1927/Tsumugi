@@ -12,14 +12,16 @@ use crate::value::Value;
 use super::Evaluator;
 
 impl Evaluator {
-    /// Value::Fn を呼び出すヘルパー（map/filter/each 用）
-    fn call_fn_value(
+    /// callback 呼び出しの前処理: `count_step` → 深度検査 → callable 検査 → arity 検査
+    /// （同期経路の `call_fn_value` と式 frame の段階評価で共有する、tree-expr-continuation-e4）。
+    /// callback は常に `arg_count` 個の引数で呼ぶため、arity 不一致は callback 専用 message で報告する。
+    pub(super) fn callback_precheck(
         &mut self,
         builtin: &str,
         func: &Value,
-        arg_values: Vec<Value>,
+        arg_count: usize,
         line: usize,
-    ) -> Result<Value, TsumugiError> {
+    ) -> Result<(), TsumugiError> {
         // 再帰制限チェック（通常の関数呼び出しと同じガードを適用）
         self.count_step(line)?;
         if self.call_stack.len() >= super::MAX_USER_CALL_DEPTH {
@@ -29,6 +31,67 @@ impl Evaluator {
             ));
         }
         match func {
+            Value::Fn { def, .. } if def.params.len() != arg_count => Err(
+                TsumugiError::callback_arity(line, builtin, def.params.len()),
+            ),
+            Value::Fn { .. } => Ok(()),
+            _ => Err(TsumugiError::callback_not_callable(line, builtin, func)),
+        }
+    }
+
+    /// callback の戻り値 `value` を部分結果へ入れる（`map` は戻り値、`filter` は truthy なら要素 `item`、
+    /// `each` は捨てる）。同期経路と式 frame で共有する（tree-expr-continuation-e4）。
+    pub(super) fn collect_callback_value(
+        &mut self,
+        builtin: &str,
+        result: &mut Vec<Value>,
+        item: Option<Value>,
+        value: Value,
+        line: usize,
+    ) -> Result<(), TsumugiError> {
+        match builtin {
+            "map" => {
+                self.check_collection(result.len().saturating_add(1), line)?;
+                result.push(value);
+            }
+            "filter" if value.is_truthy() => {
+                self.check_collection(result.len().saturating_add(1), line)?;
+                result.push(item.expect("filter keeps the element"));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// 全要素の後の結果の組み立て（`map` は深度検査 → List、`filter` は List、`each` は `Null`）。
+    /// 同期経路と式 frame で共有する（tree-expr-continuation-e4）。
+    pub(super) fn finish_callback_collection(
+        &mut self,
+        builtin: &str,
+        result: Vec<Value>,
+        line: usize,
+    ) -> Result<Value, TsumugiError> {
+        match builtin {
+            "map" => {
+                Value::check_elements_depth(result.iter(), line)?;
+            }
+            "filter" => {}
+            _ => return Ok(Value::Null),
+        }
+        Value::new_list(result, &mut self.budget, ExecutionPhase::Run)
+            .map_err(|stop| self.control_stop_to_error(stop, line))
+    }
+
+    /// Value::Fn を呼び出すヘルパー（map/filter/each 用）
+    fn call_fn_value(
+        &mut self,
+        builtin: &str,
+        func: &Value,
+        arg_values: Vec<Value>,
+        line: usize,
+    ) -> Result<Value, TsumugiError> {
+        self.callback_precheck(builtin, func, arg_values.len(), line)?;
+        match func {
             Value::Fn { def, captured, .. } => {
                 // Rcを複製して以降の借用から切り離す（値の複製は起きない）
                 let def = std::rc::Rc::clone(def);
@@ -36,10 +99,6 @@ impl Evaluator {
                 let name = def.name.as_str();
                 let params = &def.params;
 
-                // callbackは常に1引数で呼ぶため、arity不一致はcallback専用messageで報告する。
-                if arg_values.len() != params.len() {
-                    return Err(TsumugiError::callback_arity(line, builtin, params.len()));
-                }
                 let saved_scopes = self.env.push_call_frame();
                 for (k, cell) in captured.iter() {
                     // journal entry の課金超過でも call frame を解放してから返す（REV-015 PR-d）。
@@ -583,13 +642,10 @@ impl Evaluator {
                 let mut result = Vec::new();
                 for item in list.iter().cloned() {
                     let val = self.call_fn_value("map", &func, vec![item], line)?;
-                    self.check_collection(result.len().saturating_add(1), line)?;
-                    result.push(val);
+                    self.collect_callback_value("map", &mut result, None, val, line)?;
                 }
-                Value::check_elements_depth(result.iter(), line)?;
-                let listed = Value::new_list(result, &mut self.budget, ExecutionPhase::Run)
-                    .map_err(|stop| self.control_stop_to_error(stop, line))?;
-                Ok(Some(listed))
+                self.finish_callback_collection("map", result, line)
+                    .map(Some)
             }
             "filter" => {
                 let list_value = self.eval_expr(&args[0], line)?;
@@ -605,14 +661,10 @@ impl Evaluator {
                 let mut result = Vec::new();
                 for item in list.iter().cloned() {
                     let val = self.call_fn_value("filter", &func, vec![item.clone()], line)?;
-                    if val.is_truthy() {
-                        self.check_collection(result.len().saturating_add(1), line)?;
-                        result.push(item);
-                    }
+                    self.collect_callback_value("filter", &mut result, Some(item), val, line)?;
                 }
-                let listed = Value::new_list(result, &mut self.budget, ExecutionPhase::Run)
-                    .map_err(|stop| self.control_stop_to_error(stop, line))?;
-                Ok(Some(listed))
+                self.finish_callback_collection("filter", result, line)
+                    .map(Some)
             }
             "each" => {
                 let list_value = self.eval_expr(&args[0], line)?;

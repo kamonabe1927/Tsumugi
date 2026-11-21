@@ -333,6 +333,8 @@ struct ExprFrame {
     cell: Option<SharedValue>,
     /// `push` の第 1 引数を第 2 引数の評価より前に読んだ値。
     snapshot: Option<Value>,
+    /// `map` / `filter` / `each`: 要素ループの反復状態（e4。引数の評価と型検査を終えてから持つ）。
+    callback: Option<Box<CallbackIter>>,
     /// 値の受け渡し先（親の式 frame の operand stack、または根なら文の受け渡し先）。
     dest: CallDest,
 }
@@ -347,6 +349,29 @@ enum CallTarget {
     Cooperative,
     /// 登録 host function。
     Host,
+    /// `map` / `filter` / `each`（tree-expr-continuation-e4）。要素ごとに callback 本体を driver 上の
+    /// Call frame で実行する。[`Evaluator::resolve_call_target`] は従来どおりこの 3 つを `None` にし、
+    /// 式 frame の解決は [`Evaluator::resolve_frame_target`] が行う。
+    Callback,
+}
+
+/// `map` / `filter` / `each` の要素ループの反復状態（tree-expr-continuation-e4）。
+///
+/// 同期経路の `builtin_collection` のローカル変数（`list`・`func`・ループの位置・`result`）を
+/// 式 frame へ移したもの。新しい値は作らない（`list` は `Rc` 共有の backing を保持するだけ）。
+struct CallbackIter {
+    /// 反復元の List（評価済みの第 1 引数）。
+    list: Rc<crate::value::TrackedList>,
+    /// callback（評価済みの第 2 引数）。
+    func: Value,
+    /// 次に処理する要素の index。
+    index: usize,
+    /// 部分結果（`map` は callback の戻り値、`filter` は残す要素。`each` は空のまま）。
+    result: Vec<Value>,
+    /// `filter`: callback へ渡した要素（戻り値を受け取ってから部分結果へ push するため）。
+    item: Option<Value>,
+    /// callback 本体を実行中（戻り値が operand stack へ届くのを待つ）。
+    running: bool,
 }
 
 /// driver 上で実行している文レベルのユーザー関数呼び出しの状態（tree-expr-continuation-e1）。
@@ -376,6 +401,9 @@ enum CallDest {
     /// 最上位の式 frame（call ノード）をこの値で完了する（tree-expr-continuation-e2a。式の中の
     /// ユーザー関数呼び出しの戻り値）。
     ExprResult,
+    /// 最上位の式 frame（`map` / `filter` / `each` の call）の operand stack へ callback の戻り値を
+    /// 積む（tree-expr-continuation-e4）。frame は戻り値を受け取って次の要素へ進む。
+    Callback,
     /// 以降は根の式 frame だけが持つ、文の式スロットの受け渡し先（tree-expr-continuation-e2b）。
     /// `if` の条件: 真偽で分岐を選ぶ。
     IfCond,
@@ -2561,7 +2589,7 @@ impl Evaluator {
                 Ok(None)
             }
             CallDest::Return => Ok(Some(FlowSignal::Return(value))),
-            CallDest::Operand => {
+            CallDest::Operand | CallDest::Callback => {
                 self.expr_frame_mut().operands.push(value);
                 Ok(None)
             }
@@ -2786,8 +2814,13 @@ impl Evaluator {
             // 引数を評価する builtin・host function に解決されるときだけ式 frame にする（e3）。
             Expr::Call { callee, args } => match callee.as_ref() {
                 Expr::Ident(name) if self.env.get_cell(name).is_none() => {
-                    args.iter().any(crate::ast::contains_call)
-                        && self.resolve_call_target(name).is_some()
+                    // `map` / `filter` / `each` は引数に呼び出しが無くても要素ごとに callback を
+                    // 呼ぶので、常に式 frame にする（e4）。
+                    match self.resolve_frame_target(name) {
+                        Some(CallTarget::Callback) => true,
+                        Some(_) => args.iter().any(crate::ast::contains_call),
+                        None => false,
+                    }
                 }
                 _ => true,
             },
@@ -2818,6 +2851,15 @@ impl Evaluator {
             Some(CallTarget::Host)
         } else {
             None
+        }
+    }
+
+    /// 式 frame の call の解決先（tree-expr-continuation-e4）。`map` / `filter` / `each` を
+    /// [`CallTarget::Callback`] に、それ以外は [`Self::resolve_call_target`] に解決する。
+    fn resolve_frame_target(&self, name: &str) -> Option<CallTarget> {
+        match name {
+            "map" | "filter" | "each" => Some(CallTarget::Callback),
+            _ => self.resolve_call_target(name),
         }
     }
 
@@ -2852,6 +2894,7 @@ impl Evaluator {
                 parts: Vec::new(),
                 cell: None,
                 snapshot: None,
+                callback: None,
                 dest,
             })),
             scope_base: self.env.scope_depth(),
@@ -2914,7 +2957,7 @@ impl Evaluator {
                 if !self.expr_frame_mut().started
                     && let Expr::Ident(name) = callee.as_ref()
                     && self.env.get_cell(name).is_none()
-                    && let Some(target) = self.resolve_call_target(name)
+                    && let Some(target) = self.resolve_frame_target(name)
                 {
                     // callee の解決は 1 回だけ。以降の段は保存した解決先に従う（e3）。
                     self.expr_frame_mut().target = Some(target);
@@ -3136,6 +3179,9 @@ impl Evaluator {
         args: &[Expr],
         at: &ExprAt<'_>,
     ) -> Result<Option<FlowSignal>, TsumugiError> {
+        if target == CallTarget::Callback {
+            return self.step_callback_call(name, args, at);
+        }
         let line = at.line;
         let is_builtin = target == CallTarget::Builtin;
         if !self.expr_frame_mut().started {
@@ -3156,6 +3202,12 @@ impl Evaluator {
                         frame.cell = Some(cell);
                         frame.snapshot = Some(snapshot);
                     }
+                }
+                CallTarget::Callback => {
+                    return Err(TsumugiError::internal_control(
+                        line,
+                        "callback target in step_target_call",
+                    ));
                 }
                 CallTarget::Host => self.count_step(line)?,
                 CallTarget::Cooperative => {
@@ -3193,6 +3245,12 @@ impl Evaluator {
         }
         let mut operands = std::mem::take(&mut frame.operands);
         let value = match target {
+            CallTarget::Callback => {
+                return Err(TsumugiError::internal_control(
+                    line,
+                    "callback target in step_target_call",
+                ));
+            }
             CallTarget::Host => self.apply_host_call(name, &operands, line)?,
             CallTarget::Cooperative => self.start_cooperative_call(name, operands, line)?,
             CallTarget::Builtin => match name {
@@ -3216,6 +3274,134 @@ impl Evaluator {
             },
         };
         self.finish_expr_frame(value)
+    }
+
+    /// callee が識別子で user binding を持たず、`map` / `filter` / `each` に解決される call か
+    /// （tree-expr-continuation-e4）。
+    fn is_callback_call(&self, expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::Call { callee, .. }
+                if matches!(
+                    callee.as_ref(),
+                    Expr::Ident(name)
+                        if self.env.get_cell(name).is_none()
+                            && self.resolve_frame_target(name) == Some(CallTarget::Callback)
+                )
+        )
+    }
+
+    /// `map` / `filter` / `each` の式 frame を 1 段進める（tree-expr-continuation-e4）。
+    ///
+    /// 同期経路の `builtin_collection` / `call_fn_value` と同じ順序で進める: 前処理（arity）→ 第 1・第 2
+    /// 引数の評価 → 第 1 引数の型検査 → 要素ごとに `callback_precheck`・束縛・callback 本体（driver 上の
+    /// Call frame）→ 戻り値の受け取り → 全要素の後の結果の組み立て。段の間（引数の境界・要素の
+    /// callback 呼び出しの前後）が yield 可能点になる。
+    #[inline(never)]
+    fn step_callback_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        at: &ExprAt<'_>,
+    ) -> Result<Option<FlowSignal>, TsumugiError> {
+        let line = at.line;
+        if !self.expr_frame_mut().started {
+            self.expr_frame_mut().started = true;
+            crate::builtin_core::validate_context_builtin_call(
+                name,
+                args.len(),
+                matches!(args.first(), Some(Expr::Ident(_))),
+                line,
+            )?;
+        }
+        if self.expr_frame_mut().callback.is_none() {
+            let evaluated = self.expr_frame_mut().operands.len();
+            if evaluated < 2 {
+                // 第 1 引数（List）→ 第 2 引数（callback）を左から評価する（子 0 は callee）。
+                return self.begin_expr_child(
+                    at.owner,
+                    at.stmt_index,
+                    at.slot,
+                    at.path,
+                    evaluated + 1,
+                    line,
+                );
+            }
+            // 両方の評価後: 第 1 引数の型検査（callback の検査は要素ごと）。
+            let frame = self.expr_frame_mut();
+            let func = frame.operands.pop().expect("callback");
+            let list_value = frame.operands.pop().expect("list");
+            let list = match list_value {
+                Value::List(v) => v,
+                other => {
+                    return Err(TsumugiError::builtin_arg_type(
+                        line, name, 1, "List", &other,
+                    ));
+                }
+            };
+            frame.callback = Some(Box::new(CallbackIter {
+                list,
+                func,
+                index: 0,
+                result: Vec::new(),
+                item: None,
+                running: false,
+            }));
+            return Ok(None);
+        }
+        // callback の戻り値を受け取った: 部分結果へ入れて次の要素へ進む。
+        if self
+            .expr_frame_mut()
+            .callback
+            .as_ref()
+            .is_some_and(|c| c.running)
+        {
+            let frame = self.expr_frame_mut();
+            let value = frame.operands.pop().expect("callback result");
+            let mut state = frame.callback.take().expect("callback state");
+            let item = state.item.take();
+            let collected = self.collect_callback_value(name, &mut state.result, item, value, line);
+            state.running = false;
+            state.index += 1;
+            self.expr_frame_mut().callback = Some(state);
+            collected?;
+            return Ok(None);
+        }
+        let state = self
+            .expr_frame_mut()
+            .callback
+            .as_mut()
+            .expect("callback state");
+        if state.index >= state.list.len() {
+            // 全要素の後: 同期経路と共有する結果の組み立て（`list` / `func` はこの後に drop する）。
+            let result = std::mem::take(&mut state.result);
+            let value = self.finish_callback_collection(name, result, line)?;
+            self.expr_frame_mut().callback = None;
+            return self.finish_expr_frame(value);
+        }
+        // 要素 i の callback 呼び出し: 検査 → 束縛 → call trace → 本体を driver 上の Call frame で実行。
+        let item = state.list[state.index].clone();
+        let func = state.func.clone();
+        state.running = true;
+        if name == "filter" {
+            state.item = Some(item.clone());
+        }
+        self.callback_precheck(name, &func, 1, line)?;
+        let (def, saved_scopes) = self.bind_user_call(&func, vec![item], line)?;
+        self.frames.push(Frame {
+            stmts: def.body.clone(),
+            cursor: 0,
+            kind: FrameKind::Call {
+                saved_scopes,
+                driver: Some(DriverCall {
+                    dest: CallDest::Callback,
+                    _callee: func,
+                }),
+            },
+            scope_base: self.env.scope_depth(),
+            heap_charge: 0,
+        });
+        Ok(None)
     }
 
     /// 最上位の式 frame を 1 段進め、その結果で driver を遷移させる（tree-expr-continuation-e2a、
@@ -3652,7 +3838,7 @@ impl Evaluator {
             expr,
             Expr::Call { callee, args }
                 if !crate::ast::contains_call(callee) && !args.iter().any(crate::ast::contains_call)
-        );
+        ) && !self.is_callback_call(expr);
         if !e1_shape && !self.needs_expr_frame(expr) {
             return Ok(None);
         }
@@ -5687,6 +5873,138 @@ mod tests {
         assert!(eval.frames.is_empty() && eval.call_stack.is_empty());
         assert_eq!(eval.env.scope_depth(), depth_before);
         assert_eq!(eval.env.get("xs"), None, "transaction は rollback される");
+    }
+
+    /// TEC-AT-02（e4 分）: `map` / `filter` / `each` の反復元の List・callback・次の要素の index・部分結果・
+    /// `filter` の渡した要素が yield を跨いで式 frame に保存される。
+    #[test]
+    fn e4_callback_iteration_state_is_preserved_across_yields() {
+        let src = format!(
+            "{E2B_FN}let a = map([1, 2, 3], id)\n\
+             let b = filter([4, 5, 6], fn(x) id(x) % 2 == 0 end)\n\
+             each([7, 8], id)\n"
+        );
+        let program = parse_program(&src);
+        let mut eval = Evaluator::new();
+        eval.set_capabilities(ambient_test_capabilities());
+        eval.force_yield_every_boundary = true;
+        eval.begin_execution(&program, src.len() as u64, false)
+            .expect("begin_execution");
+        let (mut max_index, mut max_result, mut saw_item, mut saw_running) = (0, 0, false, false);
+        let (mut saw_list, mut saw_func) = (false, false);
+        let mut seen_indexes = std::collections::BTreeSet::new();
+        let result = loop {
+            match eval.run_slice(u64::MAX) {
+                SliceOutcome::Terminal(result) => break result,
+                _ => {
+                    for frame in &eval.frames {
+                        if let FrameKind::Expr(expr) = &frame.kind
+                            && let Some(state) = &expr.callback
+                        {
+                            saw_list |= state.list.len() >= 2;
+                            saw_func |= matches!(state.func, Value::Fn { .. });
+                            max_index = max_index.max(state.index);
+                            max_result = max_result.max(state.result.len());
+                            saw_item |= state.item.is_some();
+                            saw_running |= state.running;
+                            seen_indexes.insert(state.index);
+                        }
+                    }
+                }
+            }
+        };
+        assert!(result.is_ok(), "{result:?}");
+        assert!(saw_list && saw_func, "反復元と callback が保存される");
+        assert!(saw_running, "callback 本体の途中で yield している");
+        assert!(saw_item, "filter の渡した要素が保存される");
+        assert!(max_index >= 2, "次の要素の index が進む: {max_index}");
+        assert!(max_result >= 2, "部分結果が保存される: {max_result}");
+        assert!(seen_indexes.len() >= 3, "{seen_indexes:?}");
+        assert_eq!(
+            eval.env.get("a").map(|v| v.to_string()).as_deref(),
+            Some("[1, 2, 3]")
+        );
+        assert_eq!(
+            eval.env.get("b").map(|v| v.to_string()).as_deref(),
+            Some("[4, 6]")
+        );
+        assert!(eval.frames.is_empty() && eval.call_stack.is_empty());
+    }
+
+    /// TEC-AT-01（全体）: e4 の call を含む script の poll 経路の `live_heap` / `peak_heap` と fuel が
+    /// `Evaluator::run` と一致する（反復 frame は課金せず、部分結果は同期経路と同じ規律で作る）。
+    #[test]
+    fn e4_callback_calls_match_sync_heap_and_fuel() {
+        let cases = [
+            "let xs = [1, 2, 3]\nlet a = map(xs, id)\n",
+            "let xs = [1, 2, 3]\nlet a = filter(xs, fn(x) id(x) > 1 end)\n",
+            "let xs = [1, 2, 3]\nlet a = each(xs, id)\n",
+            "let a = len(map([1, 2], id)) + len(filter([1, 2], id))\n",
+            "let a = map(map([1, 2], id), fn(x) [x, id(x)] end)\n",
+            "let a = map(id([1, 2]), fn(x) f\"v{id(x)}\" end)\n",
+            "let xs = []\nfor y in map([1, 2], id)\n  push(xs, y)\nend\nlet a = len(xs)\n",
+            "let a = map([1, 2], fn(x) map([x, x], id) end)\n",
+            "let a = 0\nlet b = map([1, 2], fn(x)\n  a = a + x\n  return a\nend)\n",
+            "let a = map([\"a\", \"b\"], fn(s) s + id(\"!\") end)\n",
+            "let a = map([], id)\nlet b = filter([], id)\nlet c = each([], id)\n",
+        ];
+        for body in cases {
+            let src = format!("{E2B_FN}{body}");
+            let program = parse_program(&src);
+            let mut forced = Evaluator::new();
+            forced.set_capabilities(ambient_test_capabilities());
+            forced.force_yield_every_boundary = true;
+            forced
+                .begin_execution(&program, src.len() as u64, false)
+                .expect("begin_execution");
+            let forced_result = loop {
+                if let SliceOutcome::Terminal(result) = forced.run_slice(u64::MAX) {
+                    break result;
+                }
+            };
+            let mut sync = Evaluator::new();
+            sync.set_capabilities(ambient_test_capabilities());
+            let sync_result = sync.run(&program, src.len() as u64);
+            assert!(forced_result.is_ok(), "{body}: {forced_result:?}");
+            assert_eq!(forced_result, sync_result, "{body}");
+            assert_eq!(forced.env.get("a"), sync.env.get("a"), "{body}");
+            let (f, s) = (forced.budget_usage(), sync.budget_usage());
+            assert_eq!(f.committed.fuel, s.committed.fuel, "{body}");
+            assert_eq!(f.live_heap_bytes, s.live_heap_bytes, "{body}");
+            assert_eq!(f.peak_heap_bytes, s.peak_heap_bytes, "{body}");
+            assert!(forced.frames.is_empty() && forced.call_stack.is_empty());
+            assert_eq!(forced.env.scope_depth(), sync.env.scope_depth(), "{body}");
+        }
+    }
+
+    /// callback 本体の途中で yield した session を中断すると、式 frame と callback の Call frame が
+    /// 畳まれ、transaction が rollback される。
+    #[test]
+    fn e4_abort_inside_callback_restores_call_state() {
+        let src = format!("{E2B_FN}let ys = map([1, 2], id)\n");
+        let program = parse_program(&src);
+        let mut eval = Evaluator::new();
+        eval.force_yield_every_boundary = true;
+        let depth_before = eval.env.scope_depth();
+        eval.begin_execution(&program, src.len() as u64, true)
+            .expect("begin_execution");
+        let in_callback = |eval: &Evaluator| {
+            eval.in_driver_call()
+                && eval.frames.iter().any(|frame| {
+                    matches!(&frame.kind, FrameKind::Expr(expr)
+                        if expr.callback.as_ref().is_some_and(|c| c.running))
+                })
+        };
+        while !in_callback(&eval) {
+            assert!(!matches!(
+                eval.run_slice(u64::MAX),
+                SliceOutcome::Terminal(_)
+            ));
+        }
+        eval.abort_session();
+        assert!(eval.frames.is_empty() && eval.call_stack.is_empty());
+        assert_eq!(eval.env.scope_depth(), depth_before);
+        assert_eq!(eval.env.get("ys"), None, "transaction は rollback される");
     }
 
     #[test]
