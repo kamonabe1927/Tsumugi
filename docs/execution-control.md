@@ -2262,7 +2262,7 @@ builtin・host のどれに解決されるかは静的には決まらない（us
 #### fuel-bulk-chunk-yield 実装スライス（callback なし bulk builtin の chunk 境界 slice yield）
 
 > 状態: **未実装**（設計のみ）。本小節は設計 PR を書いた時点の記録で、現在の状態は冒頭の逸脱一覧・未実装範囲を見る。
-> 判断の候補（Q1〜Q3）は設計 PR に出し、判断役の選択を本小節に反映する。下の記述は推奨案（各 Q の A）で書いている。
+> 判断の候補（Q1〜Q3）は設計 PR #468 に出し、判断役が Q1=A, Q2=A, Q3=A を選択した（下の「決定記録」）。下の記述はこの選択どおりである。
 
 tree-expr-continuation（e1〜e4）で呼び出しと反復は yield 可能点になったが、callback を取らない bulk builtin は
 1 段で完了まで実行する（e3 小節「builtin・host function の本体は 1 段で完了まで実行し、yield しない」）。加えて slice の
@@ -2330,6 +2330,28 @@ cancel/deadline を確認する」と §4.2 の「bulk work は chunk へ分割�
 - **逸脱一覧の更新（実装 PR で行う）**: 未実装範囲の fuel-bulk-chunk-yield の行を、上の「範囲外」の残り（per-element 課金の無い
   bulk builtin と 1 つの値の描画）に書き直す。逸脱一覧の Slice 3 PR-d の行は、`sort` の比較の段だけが slice を超えうることに
   書き直す。
+- **決定記録（判断役が選択（PR #468）、Q1=A, Q2=A, Q3=A）**:
+  - **Q1 = A（slice の使用量を台帳の commit 済み fuel の差分で数える）**: 理由: §4.2 の「slice 内で実際に commit した fuel」と
+    同じ定義になり、数え方が 1 系統で済む（[マニフェスト](manifesto.md)原則 8）。builtin の fuel を数えない限り chunk 境界を足しても
+    yield が起きず、原則 4（ホストへ定期的に制御を返す）と優先順位の表「制御可能な最悪時負荷」を満たせない。変わるのは poll 経路の
+    yield の位置だけで、同期経路・VM の fuel 値と結果は変わらない（原則 5）。逸脱一覧の Slice 3 PR-d の行（index 代入・`pop` の
+    深度の読み直しを含む）も解け、e1 の Q2 = A の先送り（本スライスの設計範囲に含めるか needs-design issue）とも合う。
+    採らなかった案: B（chunk ループの中だけで数える）は chunk の外の builtin fuel を数えず逸脱が残り、数え方が 2 系統になって
+    検証しにくい（原則 8・9）。C（数え方を変えず別 issue に分ける）は chunk 境界の仕組みだけが入りホストへ制御が戻るまでの時間が
+    変わらないため原則 4 に反しうるうえ、受入基準を書けない。
+  - **Q2 = A（対象は `join` / `contains` / `sort` の走査・描画キーの 3 つ）**: 理由: fuel の slice で区切りが生じるのは今 per-element
+    fuel を台帳へ課金している builtin だけで（§4.1・§4.2）、仕組み 1 つ・約 450 行で [開発ループ手順書](loop-runbook.md) §14.1 に
+    収まる（原則 8）。残りは上の「範囲外」と未実装範囲の行に記録が残る（原則 9）。採らなかった案: B（`range` / `keys` 等も chunk 化）は
+    今 per-element fuel を課金しないので、同期経路・VM の fuel 値が変わる課金（F-2・`fuel-bulk-charge` の範囲）を先に入れる必要があり、
+    仕組みが 2 つになって規模も超えうる。C（`to_str` と `join` の 1 要素の描画も段階実行）は `render_display` の再帰を明示スタックに
+    する別の仕組みが要る。どちらもマニフェストには反しないが、後続スライスで扱える。
+  - **Q3 = A（`sort` の比較の段は 1 段のまま §4.2 の有界な超過として残す）**: 理由: 走査・描画キーは chunk 化するので現状より超過は
+    減り、残る超過は `max_collection_elements` で有界である（§4.2 の超過例外、原則 1 の最悪値は有限のまま）。同期経路・VM の `sort` の
+    fuel 値を変えないので e4 小節「`sort` は対象外」の決定と一貫し、BCY-AT-03・05 で検証できる（原則 5・9）。逸脱一覧の Slice 3 PR-d
+    の行はこの残りに絞る。採らなかった案: B（中断可能な安定マージソートへ置き換え）は比較回数が std の実装に依らなくなる利点
+    （原則 5）はあるが、既存の `sort` の fuel 値という言語の観測値が変わり、fuel 会計の revision と合わせて扱う別の設計が要る。
+    本スライスの「同期経路の観測を変えない」前提と規模を超える。C（`sort` を対象から外す）は前段の要素数ぶんの課金でも yield できず、
+    A より原則 4 から遠い。
 - **想定の変更規模**: おおむね 450 行（[開発ループ手順書](loop-runbook.md) §14.1 の 1000 行に収まる）。
   - `src/builtin_core.rs` 約 230 行: `BulkState` / `BulkStep` と `bulk_step` 30、`join` の chunk 化 60、`contains` の chunk 化 40、
     `sort` の走査・描画キーの chunk 化と比較の段の分離 70、wrapper 化 30。
