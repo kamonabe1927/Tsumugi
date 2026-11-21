@@ -410,3 +410,69 @@ fn empty_string_sandbox_stays_unrestricted_with_existing_warning() {
         assert_eq!(count(WARN_EMPTY_SANDBOX_LIST), 0);
     }
 }
+
+/// DSW-AT-03: legacy profile（`TSUMUGI_SANDBOX=<root>`）でも、root 外の存在しない path を指す
+/// dangling final symlink への `write_file` / `append_file` は止まり、root 外の target は作られない。
+/// tree-walk と VM の両方で確かめる。Unix だけ（Windows は未検証）。
+#[cfg(unix)]
+#[test]
+fn legacy_dangling_final_symlink_write_and_append_are_denied() {
+    for use_vm in [false, true] {
+        for func in ["write_file", "append_file"] {
+            let outside = TestDir::new("dsw-outside");
+            let dir = TestDir::new("dsw-root");
+            let target = outside.path.join("created.txt");
+            let link = dir.path.join("link.txt");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let link_str = link.to_str().unwrap();
+            let envs = [
+                ("TSUMUGI_SANDBOX", dir.as_str()),
+                ("TSUMUGI_ENV_ALLOW", "*"),
+            ];
+
+            // 未捕捉なら exit 非 0。
+            let r = run_legacy(
+                use_vm,
+                &dir.path,
+                &format!("{func}(\"{link_str}\", \"x\")"),
+                &envs,
+            );
+            assert!(
+                !r.status_ok,
+                "{func}: dangling final symlink は拒否 [vm={use_vm}]: {}",
+                r.stdout
+            );
+            assert!(
+                !target.exists(),
+                "{func}: root 外の target が作られない [vm={use_vm}]"
+            );
+
+            // catch 可能な host error。
+            let script = format!(
+                "try\n    {func}(\"{link_str}\", \"x\")\n    print(\"written\")\ncatch e\n    print(e)\nend"
+            );
+            let r = run_legacy(use_vm, &dir.path, &script, &envs);
+            assert!(
+                r.status_ok,
+                "{func}: catch できる [vm={use_vm}]: {}",
+                r.stderr
+            );
+            assert!(
+                r.stdout.contains("host function") && !r.stdout.contains("written"),
+                "{func}: host error [vm={use_vm}]: {}",
+                r.stdout
+            );
+            assert!(
+                !target.exists(),
+                "{func}: root 外の target が作られない（catch 後）[vm={use_vm}]"
+            );
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{func}: symlink は symlink のまま [vm={use_vm}]"
+            );
+        }
+    }
+}

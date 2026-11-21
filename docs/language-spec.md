@@ -996,7 +996,7 @@ CLI の既定（safe profile）では、ファイル操作の範囲は `--fs-roo
 - 許可パスのプレフィックスに合致しないアクセスはサンドボックス違反エラー
 - 読み書き・metadataは、解決可能なfinal symlinkではtargetを認可対象とする
 - `remove` / `remove_dir` / `remove_tree` / `rename`は中間symlinkを解決したうえでfinal directory entryを認可対象とし、final symlinkのtargetは操作しない
-- targetが未作成のdangling final symlinkを通じた`write_file` / `append_file`は、targetの場所を認可できない既知の制約がある（AUD-020）
+- targetが未作成のdangling final symlinkを含むfinal symlinkは、final entryをopen前にlstatして拒否する。root外を指すdangling final symlinkへの`write_file` / `append_file`の拒否はUnixの試験で確かめており、Windowsは未検証。lstatとopenの間の差し替えraceは防がない（AUD-020）
 - 検査と実I/Oの間のsymlink差し替えraceまでは防止しない
 - 未設定時は制限なし（全パス許可）。このとき起動時に標準エラーへ警告を1件出す。値が空文字列のときも未設定と同じ
 - 値が区切り文字（カンマ）と空白だけ（`,`・` , ` など）のときは、許可するパスが 0 個の設定として扱い、形式の正しいパスのファイル操作をすべてサンドボックス違反エラーにする。形式の誤ったパス（空・NUL を含む・component に `:` を含む）は、許可が無くてもサンドボックス違反でなく引数エラー（`argument`）になる。このとき起動時に標準エラーへ警告を1件出す（[Capability Model仕様](capability-model.md) §8.5・§14.3）

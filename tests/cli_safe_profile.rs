@@ -760,3 +760,65 @@ fn fps_at_02_syntax_error_matches_with_and_without_grant() {
         assert_eq!(r.stdout, "host", "[vm={use_vm}] root 内の not-found");
     }
 }
+
+/// DSW-AT-02: root 外の存在しない path を指す dangling final symlink への `write_file` /
+/// `append_file` は、safe profile（`--fs-op data=write,create`）でも catch 可能な host error で
+/// 止まり、root 外の target は作られない。tree-walk と VM の両方で確かめる。Unix だけ（Windows は未検証）。
+#[cfg(unix)]
+#[test]
+fn dangling_final_symlink_write_and_append_are_denied() {
+    for use_vm in [false, true] {
+        for func in ["write_file", "append_file"] {
+            let dir = TestDir::new("dsw-root");
+            let outside = TestDir::new("dsw-outside");
+            let target = outside.path.join("created.txt");
+            let link = dir.path.join("link.txt");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let root = format!("data={}", dir.as_str());
+            let extra = ["--fs-root", &root, "--fs-op", "data=write,create"];
+
+            // 未捕捉なら exit 非 0。
+            let r = run_safe(
+                use_vm,
+                &extra,
+                &format!("{func}(\"@data/link.txt\", \"x\")"),
+            );
+            assert!(
+                !r.status_ok,
+                "{func}: dangling final symlink は拒否 [vm={use_vm}]: {}",
+                r.stdout
+            );
+            assert!(
+                !target.exists(),
+                "{func}: root 外の target が作られない [vm={use_vm}]"
+            );
+
+            // catch 可能な host error。
+            let script = format!(
+                "try\n    {func}(\"@data/link.txt\", \"x\")\n    print(\"written\")\ncatch e\n    print(e)\nend"
+            );
+            let r = run_safe(use_vm, &extra, &script);
+            assert!(
+                r.status_ok,
+                "{func}: catch できる [vm={use_vm}]: {}",
+                r.stderr
+            );
+            assert!(
+                r.stdout.contains("host function") && !r.stdout.contains("written"),
+                "{func}: host error [vm={use_vm}]: {}",
+                r.stdout
+            );
+            assert!(
+                !target.exists(),
+                "{func}: root 外の target が作られない（catch 後）[vm={use_vm}]"
+            );
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{func}: symlink は symlink のまま [vm={use_vm}]"
+            );
+        }
+    }
+}

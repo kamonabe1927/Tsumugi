@@ -768,7 +768,7 @@ REPLの未捕捉エラーは、外部I/Oを含む完全なACID transactionでは
 ### 未対応の既知の制約
 
 - **caller所有ASTの破棄**: 公開AST APIのpreflightはCompiler/Evaluator自身の再帰走査を防ぐが、借用元がParserを使わず任意深度の再帰ASTを構築した場合、そのASTの通常Dropはcaller側のhost stackを使用する
-- **シンボリックリンクとsandbox制約**: 破壊的操作がfinal symlinkを決定論的にtargetへ置換する問題はAUD-032で修正した。ただしtargetが未作成のdangling final symlinkを通じた`write_file` / `append_file`は、fallback正規化がlink entryを許可範囲内と判定した後にOSが許可範囲外のtargetを作成し得る。またcheckと実I/Oの間のsymlink差し替えraceは防げず、許可外pathの存在情報がcanonicalize結果から観測できる場合もある（AUD-020）
+- **シンボリックリンクとsandbox制約**: 破壊的操作がfinal symlinkを決定論的にtargetへ置換する問題はAUD-032で修正した。OS adapterはfinal entryをopen前にlstatし、dangling final symlinkを含むfinal symlinkは拒否する（root外を指すdangling final symlinkへの`write_file` / `append_file`は、拒否とroot外のtargetが作られないことをUnixの試験で確かめた。Windowsは未検証）。ただしlstatとopenの間の差し替えraceは防げない。またcheckと実I/Oの間のsymlink差し替えraceは防げず、許可外pathの存在情報がcanonicalize結果から観測できる場合もある（AUD-020）
 - **総ヒープメモリは論理サイズで制限する**: 実行ごとのlive heapを `BudgetConfig::max_live_heap_bytes`（`BudgetResource::HeapBytes`）で制限し、超過は `ErrorKind::HeapLimit` になる（[実行予算・協調実行仕様](execution-control.md)第5節）。課金するのは同節の論理サイズ（`src/budget.rs` の `heap_size`。allocator・platform・Rust compilerに依存しない固定値）であり、プロセスが実際に確保するメモリ量そのものではない
 - **input() の無制限読み込み**: 改行なしの巨大入力でOOM、入力なしで無限ブロック
 
