@@ -2862,8 +2862,10 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
 - **範囲**: §4.1 の charge point の種別と課金値を一元に持つ共有 API `FuelSchedule`（`src/budget.rs`）を新設する。
   版 `1` の課金（ループ反復 1・呼び出し 1・builtin callback 1）を `FuelSchedule` の種別で表し、tree の
   `count_step`（`src/eval.rs`・`src/builtin.rs`）をこの API の呼び出しへ置き換える。VM は `Charge` opcode
-  （payload は charge 種別。`src/opcode.rs`・`src/chunk.rs`）を足し、F-1 で `OpCode::Loop`・`PrepareCall`・
-  `call_fn_value` に置いた `count_step` を外して、compiler が同じ位置に `Charge` を挿入する。verifier は payload
+  （payload は charge 種別。`src/opcode.rs`・`src/chunk.rs`）を足し、F-1 で `OpCode::Loop`・`PrepareCall` に置いた
+  `count_step` を外して、compiler が同じ位置に `Charge` を挿入する。builtin callback の課金（`Vm::call_fn_value`）は
+  `Charge` にせず、`call_fn_value` から `FuelSchedule` の callback 種別を直接呼ぶ。位置と、深度検査・callable 検査・
+  arity 検査より前に課金する順序は今と同じにする（Q5 = A。下の判断の記録）。verifier は payload
   が既知の種別であることを検査する。`unstable-bytecode` の公開列挙を REV-006 の封印方針に沿って更新する。
   instruction watchdog（§17.7）の tick は変えない。
 - **範囲外**: 課金点の追加・課金値の変更と版の bump（F-2c）。`Charge` の dispatch 自体は課金しない（§4.1）。
@@ -2906,7 +2908,7 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   課金点 約 300〜450、budget の既定値・版 約 50）、触る仕組みは fuel の課金点 1 つ、受入基準 5。
   1000 行を超える見込みになったら、実装に入る前に止めて報告する（§14.1）。
 
-**判断の記録**（設計 PR #470 の判断の候補。判断役が選択（PR #470）、Q1=A, Q2=A, Q3=A, Q4=A）:
+**判断の記録**（設計 PR #470 の判断の候補。判断役が選択（PR #470）、Q1〜Q5=A）:
 
 - **Q1 = A（3 つに割る。F-2a → F-2b → F-2c）**: 観測を変えない土台（F-2a・F-2b）を先に入れ、課金表の移行・版 1→2・
   既定 `total_fuel` を F-2c の 1 本にまとめる。F-2b は既存の fuel 期待値が無改変で緑であることで確かめられ、tree と VM の
@@ -2927,6 +2929,19 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   Q2 の決定記録と同じ向き）。`AuditEnvelope` は `schema_version: 1` で既に出ている（`src/embedding.rs`）。採らなかった案:
   B（v1 をその場で改める）は同じ版で field の並びが違う記録が出て読み手が区別できず、マニフェストに反しうる（原則 7・5）。
   決定性・監査仕様 §7.1・§7.2・§9.2 に反映した。
+- **Q5 = A（VM の builtin callback の課金は `Charge` にせず `FuelSchedule` を直接呼ぶ）**: 判断役が選択（PR #470）。
+  レビュー（dfe9e7e）で、F-2b の範囲の「`call_fn_value` に置いた `count_step` を外して、compiler が同じ位置に `Charge` を
+  挿入する」は実装できないと分かった。callback は builtin（Rust 側）から呼ばれるので、compiler が `Charge` を置ける
+  bytecode 上の点が無い。`Vm::call_fn_value` は `count_step` → 深度検査 → callable 検査 → arity 検査の順で進み、tree の
+  `src/builtin.rs` の callback 前処理も同じ順である。A は課金の位置・値・line と深度検査との順序を今のまま保つので、
+  F2b-AT-01 の観測不変を既存のテストが無改変で緑であることで確かめられる（原則 5・9）。課金値は tree と同じ共有
+  `FuelSchedule` から取るので、§4.1 の「tree evaluator は同じ共有 `FuelSchedule` API を呼ぶ」「VM `Charge` dispatch = 0」
+  と食い違わない。F-1 小節の (F3)（`Vm::call_fn_value` で深度検査より前に課金）もそのまま残る。F2b-AT-02（ループ反復・
+  呼び出しの位置の `Charge`）は変えない。文言はこの PR で F-2b の範囲を直した。採らなかった案: B（呼ばれる関数の入口に
+  callback 用の `Charge` を出す）は、課金が深度検査・callable 検査・arity 検査の後に移る。深度超過や callable でない値を
+  渡したときの fuel と、fuel 上限と深度上限が同時に効くときにどちらの error になるかが tree と食い違いうるので、
+  マニフェストに反しうる（原則 5）。`PrepareCall` 経由の呼び出しと区別する仕組みも増える（原則 8）。C（文言を F-2b を
+  ready にする回に回す）は、実装できない文言を正本に残し、その回で同じ判断をやり直すことになる（原則 9）。
 
 ### fix-contains-budgeted-equality 実装スライス（`contains` の等価判定を予算付き比較へ）
 
