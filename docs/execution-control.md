@@ -2882,8 +2882,8 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
 - **想定の変更規模**: `src/` 約 350 行、触る仕組みは fuel の課金点 1 つ（両 engine の課金を同じ API へ寄せる）、
   受入基準 3。
 
-**ready にする時点の注記**（F-2b の設計 PR。main d1c7d02 で確かめた。上の範囲・受入基準は変えず、実装で読み違え
-やすい点だけを補う）:
+**ready にする時点の注記**（F-2b の設計 PR #474。main d1c7d02 で確かめた。上の範囲は変えず、受入基準は F2b-AT-02
+だけを Q2 = A に合わせて書き直した。ほかは実装で読み違えやすい点だけを補う）:
 
 - 置き換える課金点は、tree が `src/eval.rs` の `count_step` 呼び出し 7 か所（`while` / `for` の反復 2・user function
   呼び出し 1（同期経路と式 frame が共有する `begin_user_call`）・host function 呼び出し 4（`prepare_call` の
@@ -2902,7 +2902,10 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
 - 文書: [次期意味論・実装決定](semantic-decisions.md) §17.7.3 の fuel の論理課金点 (F1)・(F2) の記述（`Loop` 命令・
   `PrepareCall` で課金）を「直前の `Charge`」に合わせ、本仕様 §4.1 の後の段落・`src/vm.rs` の `count_step` の doc を
   合わせる。逸脱一覧の §4.1 の行は F-2c まで残す（F-2b の後も課金は版 `1` のまま）。
-- `Charge` の payload は `FuelSchedule` と共有する Rust の enum にする（Q2 = A。下の判断の記録）。
+- `Charge` の payload は `FuelSchedule` と共有する Rust の enum にする（Q2 = A。下の判断の記録）。上の範囲の
+  「verifier は payload が既知の種別であることを検査する」は、Q2 = A の enum では既知であることが型で決まるため、
+  F2b-AT-02 と同じく「bytecode に出てよい種別（ループ反復・user function 呼び出し）以外の `Charge`（builtin
+  callback・host function 呼び出し）を拒否する」と読む。
 
 **判断の記録**（F-2b の設計 PR #474 の判断の候補。判断役が選択（PR #474）、Q1・Q2=A）:
 
