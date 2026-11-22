@@ -745,8 +745,10 @@ order      = 17
 [[slice]]
 id         = "fix-windows-legacy-lexical-colon"
 title      = "Windows の legacy profile の lexical 検査が component 内の `:` を取りこぼさないようにし、platform 差のテストを足す（capability-model §8.2・§14.3、loop:drift #352 D-57）"
-status     = "todo"
+status     = "ready"
 parent     = "AUD-020"
+spec       = { doc = "docs/capability-model.md", section = "fix-windows-legacy-lexical-colon 実装スライス（Windows の legacy profile の lexical 検査が component 内の `:` を取りこぼさないようにする）" }
+acceptance = ["WLC-AT-01..04"]
 order      = 29
 
 [[slice]]

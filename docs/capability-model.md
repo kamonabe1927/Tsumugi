@@ -1493,6 +1493,68 @@ loop:drift #429 の D-124 の扱いを、kamonabe の判断（issue #433 の (a)
   文書は設計書・言語仕様で ±4 行、`tests/threat_model_traceability.rs` で ±5 行。触る仕組みは OS adapter の final symlink の扱い 1 つ（試験で固定するだけ）、受入基準は 4 項目。
   逸脱一覧の行は足さず消さない（目標の §8.3 契約 4・5 と実装は一致しており、足りなかったのは試験と設計書・言語仕様の記述である）。
 
+### fix-windows-legacy-lexical-colon 実装スライス（Windows の legacy profile の lexical 検査が component 内の `:` を取りこぼさないようにする）
+
+loop:drift #352 の D-57 を直す。目標（§8.2）は、legacy translator（`LegacyFsTranslator::translate` の Component::Normal）でも component 内の ASCII `:`
+（Windows ADS / stream 指定）を `PathError::ColonInComponent` で拒否し、host platform path へ変換する前に検証することである。§8.5 は、形式の誤りを
+capability の有無より先に catch 可能な `argument` error にする理由を「形式の誤りは script 自身の文字列だけで決まり host の状態に依らない」とする。
+実装（`src/capability.rs` の `legacy_lexical_check`）は、script path を CWD 基準で `absolutize_lexical` してから、絶対化後の Normal component に `:` が
+あるかを見る。Windows では `absolutize_lexical` の `PathBuf::push` が `<ASCII 1 文字>:` で始まる中間の component（`d/a:b` の `a:b`、`d/a:/x` の `a:`）を
+drive prefix と読んで path 全体を置き換えるので、`:` が `Component::Prefix` へ移って検査をすり抜ける（逸脱一覧の該当行。`d/a:b` は `argument` でなく
+`sandbox` になる）。置き換え後の path は drive-relative（root を持たない）なので、どの root にも route されず `sandbox` になり、権限は増えていない。
+fix-fs-path-syntax-before-grant 小節の「Windows の component 内の `:`」の決定（PR #341 の Q1=A）は、grant 済み経路の Windows の挙動を変えるこの修正を、
+spec の追記と platform 差のテストを持たせた別の fix スライスで扱うとした。このスライスがそれである。
+
+**判断の候補（PR の「判断の候補」に出し、判断役の選択を待つ）**: 次の 2 点は spec に書かれておらず、legacy profile の言語挙動（どの path が
+`argument` になるか）に影響する。下の実装範囲・受入基準は推奨案（Q1=A・Q2=A）で書いた。判断役が別の案を選んだら、設計役がこの小節と受入基準を直す。
+選ばれた内容は §14.3 にも 1 文で書く（legacy の形式検査を何に対して行うか）。
+
+- **Q1（`:` を検査する対象）**: 推奨案 A は、script の文字列そのものの component（`std::path::Path::new(script_path).components()` の Normal）を、
+  CWD 基準の絶対化より前に検査し、絶対化後の component 列（CWD の component を含む）は検査しない。B は絶対化前と後の両方を検査する。
+  C は `absolutize_lexical` の Normal component の積み方を prefix と読まないものに変え、今のとおり絶対化後の component 列だけを検査する。
+- **Q2（Windows の先頭の drive-relative）**: `a:b`・`C:x` のように先頭が drive prefix で、その後に root（`\`）が無い path は、Windows では
+  `Component::Prefix` と読まれて `:` の検査に掛からず、route 先が無く `sandbox` になる。Unix では同じ文字列が `:` の検査で `argument` になる。
+  推奨案 A はこれを Windows でも形式の誤り（`PathError::Absolute`。公開の error は `argument` の `ファイルパスの形式が不正です`）にする。
+  B は今のまま（Windows は `sandbox`）とし、platform 差としてテストに固定する。
+
+- **実装範囲**:
+  1. `src/capability.rs` の `legacy_lexical_check`: 空・NUL の検査の後、絶対化の前に、script の文字列の component を検査する。Normal component が `:` を
+     含めば `PathError::ColonInComponent`（Q1=A）。Windows で先頭の `Component::Prefix` の直後が `Component::RootDir` でなければ `PathError::Absolute`（Q2=A。
+     `Prefix` の種類は `Disk` に限らず、root を伴わない prefix を拒否する）。絶対化後の component 列の `:` 検査は外す（Q1=A）。
+     `translate` は今のとおりこの関数を使うので、grant の有無の両方の経路（`translate` と `fs_syntax_before_grant`）に同じ検査が効く。
+     tree と VM は `dispatch_fs`（`src/builtin_core.rs`）を共有しているので両方に効く。
+  2. `absolutize_lexical`（`src/capability.rs`）は変えない（1 の検査を通った path では、中間の component が prefix と読まれることは無い）。
+  3. 既存の `legacy_translate_rejects_colon_component_ads` と FPS-AT-03 の試験（`src/eval.rs` の `fps_at_03_tree_legacy_mark_without_grant`、
+     `src/vm.rs` の `fps_at_03_vm_legacy_mark_without_grant`）に、中間の `<ASCII 1 文字>:` の component（`d/a:b`）の確認を足し、
+     「`a:b` の穴は別 slice の範囲」のコメントを外す。
+- **範囲外**: safe profile と埋め込み host の `FilesystemTarget::parse`（§8.2 のとおり既に `:` と drive prefix を拒否する）、
+  CLI の root の設定値（`TSUMUGI_SANDBOX`・`--fs-root` の host path。`src/cli_capability.rs` の `absolutize_lexical`。script の文字列ではない）、
+  Windows の UNC・verbatim（`\\server\share`・`\\?\C:\`）の prefix の扱い（root を伴うので今のまま）、legacy の root 選択と symlink の扱い、
+  link 層の import specifier（§10、legacy の translator を通らない）。
+- **観測される変化**（legacy profile の script の filesystem builtin。grant の有無を問わない。tree と VM で同じ）:
+  - Windows: 中間に `<ASCII 1 文字>:` の component を持つ path（`d/a:b`・`d/a:/x`・`C:\root\a:b`）が、`sandbox` でなく catch 可能な `argument` error になる。
+    先頭の drive-relative（`a:b`・`C:x`）も `sandbox` でなく `argument` になる（Q2=A）。
+  - すべての OS: `..` で打ち消される component の `:`（`d/a:b/../x`）も、script の文字列に `:` 入りの component があるので `argument` になる（今は Unix で通る。Q1=A）。
+  - Unix: CWD の component に `:` があっても、`:` を含まない相対 path は `argument` にならない（今は CWD の `:` で相対 path がすべて `argument` になる。Q1=A）。
+- **受入基準（fix-windows-legacy-lexical-colon）**:
+  - **WLC-AT-01**（中間の component、全 OS）: `legacy_lexical_check` と root の無い `LegacyFsTranslator::translate` が、`d/a:b`・`d/a:/x`・`d/a:b/../x`・
+    絶対 path の中間に `a:b` を持つ path（Unix は `/base/a:b/x`、Windows は `C:\base\a:b\x`）・`d/foo.txt:stream` のすべてで `PathError::ColonInComponent` を返す。
+    確かめ方: `src/capability.rs` の `#[cfg(test)]` の unit test（`#[cfg]` で OS を限らない。CI の windows-latest でも走る）。
+  - **WLC-AT-02**（先頭の drive-relative、platform 差）: `a:b` が Unix では `PathError::ColonInComponent`、Windows では `PathError::Absolute` を返し、
+    どちらも `Err` になる。Windows の `C:x` も `PathError::Absolute`、`C:\x`（root を伴う絶対 path）は `Ok` になる。
+    確かめ方: `src/capability.rs` の unit test（共通の `Err` の確認と、`#[cfg(unix)]`・`#[cfg(windows)]` で分けた variant の確認）。
+  - **WLC-AT-03**（builtin、tree と VM）: legacy の印を付けて filesystem を grant しない set で `read_file("d/a:b")` が `argument` になり（FPS-AT-03 の試験に足す）、
+    `TSUMUGI_SANDBOX=<root>` で filesystem を grant したとき `read_file("<root>/a:b")`（`<root>` は絶対 path）と `read_file("d/a:b")` が catch 可能な `argument` error
+    （`ファイルパスの形式が不正です`）になる。tree と `--vm` の両方。確かめ方: `src/eval.rs`・`src/vm.rs` の FPS-AT-03 の試験と、
+    `tests/cli_legacy_profile.rs` の subprocess test（`#[cfg]` で OS を限らない）。
+  - **WLC-AT-04**（CWD に依らない、Unix）: CWD を名前に `:` を含むディレクトリ（`x:y`）にし、`TSUMUGI_SANDBOX` をそのディレクトリにして、`read_file("f.txt")`（存在する）が
+    成功し、`read_file("a:b")` は `argument` になる。tree と `--vm` の両方。確かめ方: `tests/cli_legacy_profile.rs` の `#[cfg(unix)]` の subprocess test
+    （Windows はディレクトリ名に `:` を使えないので対象にしない）。
+- **想定の変更規模**: 本体（`#[cfg(test)]` を除く `src/`）は `src/capability.rs` の `legacy_lexical_check` だけで +15〜35 行程度（生の component の検査、
+  Windows の prefix の検査、絶対化後の検査の削除）。テストは +80〜150 行程度（unit test、FPS-AT-03 への追加、subprocess test）。
+  触る仕組みは legacy profile の path の lexical 検査 1 つ、受入基準は 4 項目で、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
+  done にする実装 PR で、逸脱一覧の「legacy profile の lexical 検査は、Windows では component 内の `:` を一部取りこぼす」の行を削除する。
+
 ## 19. 受入基準
 
 | ID | Phase | 基準 |
