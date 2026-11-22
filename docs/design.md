@@ -24,7 +24,7 @@ Tsumugiは、言語処理系の開発を入り口から理解するための個�
 
 これらは目標であり、現在のalpha実装に対する保証ではない。Phase 1 の最初の縦切りとして、`src/engine.rs` はツリーウォーク用の `Engine`、パース済み `CompiledScript`、状態保持用 `ExecutionContext`、`ExecutionOutcome` を crate root から公開する。compile は構文解析までで、import は context に依存するため、execute開始時に最初のscript文を実行する前に全件を解決する。この `Engine` の経路（scheduler の handle 経路）と REPL は評価器内蔵の `ModuleLoader` で解決し、CLI の file・stdin の実行は tree・VM とも、次段落の埋め込みAPIの link（resolver capability）が確かめた graph から展開する（[Capability Model仕様](capability-model.md)第10節）。実行は caller の同一スレッドで同期的に行われるため、context は十分なスタックを持つスレッド内で生成・利用する必要がある。
 
-埋め込みAPI（`src/embedding.rs`。crate rootでは `EmbeddingEngine` / `EmbeddingOutcome` などとして公開）は、実行単位のdeny-by-defaultな `CapabilitySet`（`src/capability.rs`。`ExecutionRequest` の既定は全authorityを拒否する `CapabilitySet::empty`）、論理サイズによるlive heap上限（`BudgetResource::HeapBytes`、超過は `ErrorKind::HeapLimit`）を含む実行予算（`BudgetConfig`、`src/budget.rs`）、host I/Oを注入するcapability adapter（`Input` / `Output` / `Clock` / filesystem / host function）、協調キャンセル（`CancellationToken`、`ErrorKind::Cancelled`）とdeadline（`ErrorKind::DeadlineExceeded`）、`exit()` を構造化terminalとして返す `ExecutionOutcome::Exited` を実装している。従来の環境変数（`TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`・`TSUMUGI_MAX_*`）による制限は、CLIが起動時に読む互換入口（legacy profileのcapability構築と上限の上書き。[実行予算・協調実行仕様](execution-control.md)第13節）と `ModuleLoader` のimport検査に残る。VM（`Backend::VmExperimental`）は埋め込みAPIのrun経路にまだ統合されていない（[組み込みAPI仕様](embedding-api.md)のE9）。領域ごとの逸脱・未実装範囲は各領域別正本の逸脱一覧、現在地と実現順序は[ロードマップ](roadmap.md)で管理する。
+埋め込みAPI（`src/embedding.rs`。crate rootでは `EmbeddingEngine` / `EmbeddingOutcome` などとして公開）は、実行単位のdeny-by-defaultな `CapabilitySet`（`src/capability.rs`。`ExecutionRequest` の既定は全authorityを拒否する `CapabilitySet::empty`）、論理サイズによるlive heap上限（`BudgetResource::HeapBytes`、超過は `ErrorKind::HeapLimit`）を含む実行予算（`BudgetConfig`、`src/budget.rs`）、host I/Oを注入するcapability adapter（`Input` / `Output` / `Clock` / filesystem / host function）、協調キャンセル（`CancellationToken`、`ErrorKind::Cancelled`）とdeadline（`ErrorKind::DeadlineExceeded`）、`exit()` を構造化terminalとして返す `ExecutionOutcome::Exited` を実装している。従来の環境変数（`TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`・`TSUMUGI_MAX_*`）による制限は、CLIが起動時に読む互換入口（legacy profileのcapability構築と上限の上書き。[実行予算・協調実行仕様](execution-control.md)第13節）に残る。VM（`Backend::VmExperimental`）は埋め込みAPIのrun経路にまだ統合されていない（[組み込みAPI仕様](embedding-api.md)のE9）。領域ごとの逸脱・未実装範囲は各領域別正本の逸脱一覧、現在地と実現順序は[ロードマップ](roadmap.md)で管理する。
 
 ## 日時変換の停止性
 
@@ -270,7 +270,6 @@ let result = filter(test, fn(item) item != "kani" end)
 | `eval.rs` | 算術・比較・論理、関数呼び出し、リスト/辞書操作、組み込み関数、エラーケース全般 |
 | `vm.rs` | 内部不変条件の破れをinternal errorとして返すこと（範囲外local slot、stack不足の`Call`、operand overflow、`PrepareCall`を経由しない呼び出しでの深度上限） |
 | `builtin_registry.rs` | `BuiltinSpec` 全 entry の名前・`BuiltinId` の一意性、name↔id 往復、context/pure 分類の整合、内部 prefix `__` の排除、`__pop_update` が public でないこと（AUD-049） |
-| `sandbox.rs` | `.` / `..` を含むパスの正規化 |
 
 `vm.rs` の単体テストは内部実装と一緒に読める最小ケースだけを置き、公開APIだけで書いた網羅ケースは `tests/defensive_vm.rs` に分ける（AUD-023）。
 
@@ -759,7 +758,7 @@ REPLの未捕捉エラーは、外部I/Oを含む完全なACID transactionでは
 ### 設計判断
 
 - **エラーにするか null を返すか**: filesystemの許可外の操作はcatch可能な`sandbox` error（意図せぬアクセスを即座に検出するため）。environment snapshotに無いキーの`env()`は null を返す（「存在しないキー」と同じ挙動にして、スクリプト側に漏洩情報を与えない）。Environment自体が未grantなら`capability` errorになる
-- **環境変数を読む時点**: legacy profileの`TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`と`TSUMUGI_MAX_*`は、CLI adapterが起動時に1回だけ読み、executionごとのcapabilityとconfigへ写す。プロセス全体の`OnceLock`に残るのは、REPL・schedulerのhandle経路のimportが使う`src/sandbox.rs`の許可パスリストだけである
+- **環境変数を読む時点**: legacy profileの`TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`と`TSUMUGI_MAX_*`は、CLI adapterが起動時に1回だけ読み、executionごとのcapabilityとconfigへ写す。importは`TSUMUGI_SANDBOX`を読まない（`src/sandbox.rs`は撤去した）
 - **import のサンドボックス対応（`ModuleLoader`経路）**: canonicalize 後に`sandbox::check_path`を呼ぶ。ファイルが存在しない場合は canonicalize が先に失敗するため、存在しないパスへの import は「ファイルが見つかりません」エラーになる（サンドボックス違反ではない）。file・stdinのimportはresolver capabilityが扱う（capability-model 第10節）
 - **破壊的操作のdirectory entry検査**: filesystem builtinはC10以降`sandbox.rs`を通らず、`FilesystemCapability`のroot拘束handleとsymlink policyで検査する（`src/builtin_core.rs`の`dispatch_fs`。capability-model 第8節）
 - 判断役が選択（issue #318 D-47 Q1=A）: 本節は、env変数中心・未設定時fail-openの記述から、safe profileが既定のcapabilityモデルの記録へ書き直した。詳細は capability-model 第14節・execution-control 第13節を参照させて再掲しない。理由: 本書は現行実装の正本であり、既定がfail-openと読める記述は現在の保証範囲を誤って伝える（[マニフェスト](manifesto.md) 原則2・原則9、documentation-guide「状態の正本は粒度ごとに1箇所だけ」）

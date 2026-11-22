@@ -1891,3 +1891,42 @@ fn hil_at_03_import_uses_resolver_not_filesystem() {
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+/// HIL-AT-03 の補足（REV-020）: import 先の構文エラーは、semantic-decisions §3.4 の「import先のparse失敗」の
+/// テンプレート（`{module}` を含む）で、parse 診断を cause として message に保持した terminal の LinkError になる。
+#[test]
+fn hil_at_03_invalid_module_keeps_module_and_parse_cause() {
+    let engine = Engine::new();
+    let script = engine.compile("import \"bad.tsg\"\nlet z = 1\n").unwrap();
+    let (resolver, _calls) = counting_resolver::CountingResolver::new(&[(
+        "@default/bad.tsg",
+        "let ok = 1\nlet b = @\n",
+    )]);
+    let mut context = ExecutionContext::new();
+    context.set_capabilities(resolver.capabilities());
+    let mut handle = engine
+        .create_execution(&script, &mut context, ExecutionRequest::new())
+        .expect("admit");
+    match handle.poll(PollSlice::default()).expect("poll") {
+        PollResult::Terminal {
+            outcome: ExecutionOutcome::LinkError { error },
+            usage,
+        } => {
+            assert_eq!(error.error_type(), "import");
+            let message = error.message();
+            assert!(
+                message.starts_with(
+                    "import に失敗しました: モジュールの構文が不正です: @default/bad.tsg"
+                ),
+                "{message}"
+            );
+            assert!(message.contains("2行目"), "原因の行番号: {message}");
+            assert!(
+                message.contains("想定外の文字: '@'"),
+                "原因の診断: {message}"
+            );
+            assert_eq!(usage.committed.fuel, 0);
+        }
+        other => panic!("LinkError を期待したが {other:?}"),
+    }
+}

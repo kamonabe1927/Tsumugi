@@ -316,8 +316,7 @@ src/
 ├── audit.rs            # 実行時監査（schema v1 の event・sink・監査予算、Phase 6）
 ├── determinism.rs      # Float / NaN の決定的な共有 helper
 ├── stable_error.rs     # backend 非依存の構造化 error（StableError）
-├── limits.rs           # 構造的上限（MAX_AST_DEPTH / MAX_IMPORT_DEPTH / MAX_USER_CALL_DEPTH）
-└── sandbox.rs          # import 展開用のパス検査（TSUMUGI_SANDBOX、ModuleLoader 経路専用）
+└── limits.rs           # 構造的上限（MAX_AST_DEPTH / MAX_IMPORT_DEPTH / MAX_USER_CALL_DEPTH）
 
 tests/
 ├── integration.rs                # 統合テスト（ゴールデンテスト + stdin駆動REPL）

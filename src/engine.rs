@@ -1101,9 +1101,9 @@ fn link_graph(
         evaluator.budget_config(),
     )
     .with_cancellation(evaluator.cancellation_token());
-    let linked = engine
-        .link(&compiled, request)
-        .map_err(|error| link_failure_outcome(error, &fail))?;
+    let linked = engine.link(&compiled, request).map_err(|error| {
+        link_failure_outcome(error, evaluator.budget_usage().committed.fuel, &fail)
+    })?;
     linked
         .graph_modules(&script.program)
         .map_err(|_| internal("link が確かめた graph と import が合いません"))
@@ -1115,6 +1115,7 @@ fn link_graph(
 /// message に host path・specifier 原文を含めない（capability-model §8.5）。
 fn link_failure_outcome(
     error: crate::embedding::LinkError,
+    committed_fuel: u64,
     fail: &dyn Fn(TsumugiError) -> ExecutionOutcome,
 ) -> ExecutionOutcome {
     use crate::embedding::LinkError;
@@ -1132,10 +1133,28 @@ fn link_failure_outcome(
                 host.code.as_str()
             ),
         ),
-        LinkError::InvalidModule { .. } => import_error(
-            message_id::IMPORT_SYNTAX,
-            "import に失敗しました: モジュールが不正です".to_string(),
-        ),
+        // semantic-decisions §3.4 の「import先のparse失敗」のテンプレート。parse の診断は cause として
+        // message の末尾に保持する（REV-020。先頭の診断を代表にする）。
+        LinkError::InvalidModule {
+            module,
+            diagnostics,
+        } => {
+            let cause = diagnostics
+                .diagnostics
+                .first()
+                .map(|d| match d.line {
+                    Some(line) => format!(" ({line}行目: {})", d.safe_message),
+                    None => format!(" ({})", d.safe_message),
+                })
+                .unwrap_or_default();
+            import_error(
+                message_id::IMPORT_SYNTAX,
+                format!(
+                    "import に失敗しました: モジュールの構文が不正です: {}{cause}",
+                    module.as_str()
+                ),
+            )
+        }
         LinkError::Cycle { .. } => import_error(
             message_id::IMPORT_UNREADABLE,
             "import に失敗しました: import が循環しています".to_string(),
@@ -1144,9 +1163,11 @@ fn link_failure_outcome(
             message_id::IMPORT_DEPTH,
             format!("import に失敗しました: import のネストが深すぎます (上限: {limit})"),
         ),
-        LinkError::BudgetExceeded(_) => import_error(
-            message_id::IMPORT_UNREADABLE,
-            "import に失敗しました: link の予算を超過しました".to_string(),
+        // 予算超過は alpha の慣例どおり budget 系の error にする（超過した resource を保つ）。
+        LinkError::BudgetExceeded(exceeded) => crate::budget::control_stop_to_error(
+            crate::budget::ControlStop::BudgetExceeded(exceeded),
+            committed_fuel,
+            0,
         ),
         other => TsumugiError::internal(0, format!("import の link に失敗しました: {other:?}")),
     };
