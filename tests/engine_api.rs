@@ -2669,10 +2669,10 @@ end
             loop {
                 let result = handle.poll(PollSlice { max_fuel: 16 }).expect("poll");
                 let fuel = handle.usage().committed.fuel;
-                // 式起因の超過は現行課金で 0（callback なし bulk builtin を含まない script）。
+                // 式起因の超過は、yield 可能点に挟まれた区間 1 つの課金まで（§4.2、F-2c）。
                 assert!(
-                    fuel - previous <= 16,
-                    "1 poll の実行 fuel が上限を超えた: {} > 16\n{body}",
+                    fuel - previous <= 16 + INTERVAL_FUEL_MAX,
+                    "1 poll の実行 fuel が上限を超えた: {} > 16 + {INTERVAL_FUEL_MAX}\n{body}",
                     fuel - previous
                 );
                 previous = fuel;
@@ -2944,8 +2944,8 @@ print(s)
                 let result = handle.poll(PollSlice { max_fuel: 16 }).expect("poll");
                 let fuel = handle.usage().committed.fuel;
                 assert!(
-                    fuel - previous <= 16,
-                    "1 poll の実行 fuel が上限を超えた: {} > 16\n{body}",
+                    fuel - previous <= 16 + INTERVAL_FUEL_MAX,
+                    "1 poll の実行 fuel が上限を超えた: {} > 16 + {INTERVAL_FUEL_MAX}\n{body}",
                     fuel - previous
                 );
                 previous = fuel;
@@ -3338,8 +3338,8 @@ print(a, b)
                 let result = handle.poll(PollSlice { max_fuel: 16 }).expect("poll");
                 let fuel = handle.usage().committed.fuel;
                 assert!(
-                    fuel - previous <= 16,
-                    "1 poll の実行 fuel が上限を超えた: {} > 16\n{body}",
+                    fuel - previous <= 16 + INTERVAL_FUEL_MAX,
+                    "1 poll の実行 fuel が上限を超えた: {} > 16 + {INTERVAL_FUEL_MAX}\n{body}",
                     fuel - previous
                 );
                 previous = fuel;
@@ -3473,6 +3473,12 @@ print(a, b)
     /// 1 chunk の fuel の上限（小さな List の要素の描画・等価判定と `sort` の走査は 1 / element）。
     const BCY_CHUNK_FUEL: u64 = 256;
 
+    /// yield 可能点に挟まれた区間 1 つの課金の上限（F-2c）。版 2 では statement / expression / operation /
+    /// invocation / host call attempt が区間の中で課金され、slice は区間を抜けた最初の yield 可能点で
+    /// 判定する（§4.2「yield 可能点に挟まれた区間の slice 超過」）。TEC-AT-06・BCY の script の区間は、
+    /// 最も重いもので invocation 5 と host call attempt 10 に式数個を足した程度で、16 を超えない。
+    const INTERVAL_FUEL_MAX: u64 = 16;
+
     /// BCY-AT-01: slice の使用量が builtin の fuel を数え、poll ごとの fuel の増分が
     /// `max_fuel + chunk 1 つ分 + sort の比較の段 1 回分` 以内で、`sort` の文の直後に
     /// `Yielded(SliceFuelExhausted)` になる。
@@ -3543,7 +3549,8 @@ end
             total >= (iterations * 2 * children) as u64,
             "読み直しが課金されている: {total}"
         );
-        let reread_bound = 16 + children as u64 + 1;
+        // F-2c: 区間 1 つ分の主要 charge point の課金（§4.2）も足す。
+        let reread_bound = 16 + children as u64 + 1 + INTERVAL_FUEL_MAX;
         for (increment, _) in &polls {
             assert!(
                 *increment <= reread_bound,
@@ -3845,52 +3852,77 @@ end
 
     /// BCY-AT-05: 同期経路（tree の `Evaluator::run` と VM）の `sort` / `join` / `contains` の fuel 値が
     /// 本スライスの前（main）と同じ。値は変更前の main で測った。
+    ///
+    /// F-2c の版 2 では文・式・invocation などの主要 charge point（§4.1）も課金するので、前置き（prelude）
+    /// だけの script の fuel と、builtin を呼ぶ文そのものの主要 charge point の課金（§4.1 の表から手計算）を
+    /// 引いた残りを、builtin 自体の fuel として変更前の値と比べる。
     #[test]
     fn bcy_at_05_sync_fuel_values_unchanged() {
         use tsumugi::embedding::LanguageRevision;
         let nested = bcy_nested("ys", 600);
-        let cases = [
+        // (前置き, builtin を呼ぶ文, 版, builtin 自体の fuel, 文の主要 charge point の課金)
+        // builtin 自体の fuel は、変更前の値（1799・1200・4000・1200・1208・0）から前置きの版 1 の課金
+        // （ループの反復 600 回、`BCY_SCALARS_2000` は 2,000 回）を引いたもの。
+        // `let s = sort(ys)`: 文 1・call 式 1・invocation 5・引数 1・assignment 1 = 9。
+        // `let j = join(ys, ",")`: 引数が 1 つ多く 10。`let c = contains(ys, [599])`: 引数 [599] が 2 で 11、2 文で 22。
+        // `let xs = range(0, 600)` 10・`let j = join(xs, ",")` 10・`let c = contains(xs, -1)`（`-1` は単項演算 3）12。
+        let cases: [(String, String, LanguageRevision, u64, u64); 6] = [
             (
-                format!("{nested}let s = sort(ys)\n"),
+                nested.clone(),
+                "let s = sort(ys)\n".to_string(),
                 LanguageRevision::CURRENT,
-                1799,
+                1799 - 600,
+                9,
             ),
             (
-                format!("{nested}let s = sort(ys)\n"),
+                nested.clone(),
+                "let s = sort(ys)\n".to_string(),
                 LanguageRevision::V0_20,
-                1200,
+                1200 - 600,
+                9,
             ),
             (
-                format!("{BCY_SCALARS_2000}let s = sort(xs)\n"),
+                BCY_SCALARS_2000.to_string(),
+                "let s = sort(xs)\n".to_string(),
                 LanguageRevision::CURRENT,
-                4000,
+                4000 - 2000,
+                9,
             ),
             (
-                format!("{nested}let j = join(ys, \",\")\n"),
+                nested.clone(),
+                "let j = join(ys, \",\")\n".to_string(),
                 LanguageRevision::CURRENT,
-                1200,
+                1200 - 600,
+                10,
             ),
             (
-                format!("{nested}let c = contains(ys, [599])\nlet d = contains(ys, [7])\n"),
+                nested.clone(),
+                "let c = contains(ys, [599])\nlet d = contains(ys, [7])\n".to_string(),
                 LanguageRevision::CURRENT,
-                1208,
+                1208 - 600,
+                22,
             ),
             (
+                String::new(),
                 "let xs = range(0, 600)\nlet j = join(xs, \",\")\nlet c = contains(xs, -1)\n"
                     .to_string(),
                 LanguageRevision::CURRENT,
                 0,
+                32,
             ),
         ];
         let mut got = Vec::new();
-        for (text, revision, _) in &cases {
+        for (prelude, stmt, revision, _, main_charge) in &cases {
             for vm in [false, true] {
-                let (result, _, fuel) = bcy_run_sync(text, vm, *revision);
+                let text = format!("{prelude}{stmt}");
+                let (result, _, fuel) = bcy_run_sync(&text, vm, *revision);
                 assert!(result.is_ok(), "{text}");
-                got.push(fuel);
+                let (base_result, _, base_fuel) = bcy_run_sync(prelude, vm, *revision);
+                assert!(base_result.is_ok(), "{prelude}");
+                got.push(fuel - base_fuel - main_charge);
             }
         }
-        let expected: Vec<u64> = cases.iter().flat_map(|c| [c.2, c.2]).collect();
+        let expected: Vec<u64> = cases.iter().flat_map(|c| [c.3, c.3]).collect();
         assert_eq!(got, expected);
     }
 

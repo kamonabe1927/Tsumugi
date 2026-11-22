@@ -770,7 +770,7 @@ fn user_call_depth_limit_applies_to_all_call_forms() {
 /// （FakeClock ユニットで担保済み）。
 #[test]
 fn cli_default_budget_is_finite_in_both_engines() {
-    // 1,000,000 fuel を確実に超える重いループ。
+    // 既定の 20,000,000 fuel を確実に超える重いループ（1 反復 12 fuel、F-2c）。
     let dir = TestDir::new("cli-option-b-heavy");
     let script = dir.path.join("heavy.tsg");
     std::fs::write(
@@ -793,7 +793,7 @@ fn cli_default_budget_is_finite_in_both_engines() {
         // 停止行は tree（loop 行）と VM（本体行）で異なり得るため、行番号を除いて比べる。
         assert!(
             stderr.lines().count() == 1
-                && stderr.ends_with("ステップ上限に達しました (上限: 1000000)"),
+                && stderr.ends_with("ステップ上限に達しました (上限: 20000000)"),
             "{context}: 既定上限で停止していないか、想定外の診断が出ています\n--- stderr ---\n{stderr}"
         );
     }
@@ -865,7 +865,7 @@ fn unparsable_legacy_budget_env_is_ignored_without_warning() {
         let stderr = normalize(&stderr_without_vm_warning(&output.stderr));
         assert!(
             stderr.lines().count() == 1
-                && stderr.ends_with("ステップ上限に達しました (上限: 1000000)"),
+                && stderr.ends_with("ステップ上限に達しました (上限: 20000000)"),
             "{context}: 不正値が無視されていないか warning が出ています\n--- stderr ---\n{stderr}"
         );
     }
@@ -1406,12 +1406,14 @@ fn windows_protected_env_keys_vm() {
 // =============================================================
 
 /// step 予算が尽きたとき、guard された callee 本体の副作用が観測されないこと（REV-006）と、
-/// user function 呼び出しがちょうど 1 fuel であること（F1-AT-05）。
+/// user function 呼び出しの invocation がちょうど 5 fuel であること（F1-AT-05 を F-2c の課金値へ更新）。
 ///
 /// REV-006 の per-instruction 課金で弱めていた「call = ちょうど 1 step」の検査を、F-1
-/// （execution-control §14）で fuel の課金点を tree と揃えたので復元する。上限 0 では呼び出し
-/// （`PrepareCall`）の課金で callee 評価より前に止まり、上限 1 では 1 回の呼び出しが成功する。
-/// 両 engine で stdout・stderr が一致する。
+/// （execution-control §14）で fuel の課金点を tree と揃えたので復元する。F-2c の版 2 では、try の
+/// submission は try 文 1・let 文 1・外側の call 式 1 の後に invocation 5 を払う（計 8）。上限 7 では
+/// invocation の課金で callee 評価より前に止まる。`print(once())` の submission はちょうど 43
+/// （文 1・print の call 式 1・invocation 5・once の call 式 1・invocation 5・本体の print 文 18・
+/// return 文 2・print の host call attempt 10）で成功する。両 engine で stdout・stderr が一致する。
 #[test]
 fn call_budget_is_checked_before_callee_in_both_engines() {
     let rejected_source = concat!(
@@ -1436,9 +1438,9 @@ fn call_budget_is_checked_before_callee_in_both_engines() {
     for use_vm in [false, true] {
         let mode = if use_vm { "VM" } else { "tree" };
 
-        // 予算 0: 呼び出しの課金で尽き、callee 本体は決して実行されない。fuel 超過は catch
-        // できないため、`limit` 診断は捕捉外（stderr）に出る。
-        let rejected = run_repl_process(rejected_source, use_vm, &[("TSUMUGI_MAX_STEPS", "0")]);
+        // 予算 7: 呼び出しの invocation の課金で尽き、callee 本体は決して実行されない。fuel 超過は
+        // catch できないため、`limit` 診断は捕捉外（stderr）に出る。fn 定義の submission は文 1 だけ。
+        let rejected = run_repl_process(rejected_source, use_vm, &[("TSUMUGI_MAX_STEPS", "7")]);
         let (rejected_stdout, rejected_stderr) = output_text(&rejected);
 
         assert!(
@@ -1455,12 +1457,12 @@ fn call_budget_is_checked_before_callee_in_both_engines() {
         );
         assert!(
             // REPL の行番号は submission（try ブロック）内の行で数える。
-            rejected_stderr.contains("エラー: 2行目: ステップ上限に達しました (上限: 0)"),
+            rejected_stderr.contains("エラー: 2行目: ステップ上限に達しました (上限: 7)"),
             "{mode}で呼び出し位置の limit 診断が観測されない: {rejected_stderr}"
         );
 
-        // 上限 1: once() の 1 回の呼び出しがちょうど 1 fuel で成功し、本体を 1 回だけ実行する。
-        let normal = run_repl_process(normal_source, use_vm, &[("TSUMUGI_MAX_STEPS", "1")]);
+        // 上限 43: `print(once())` の submission がちょうど 43 fuel で成功し、本体を 1 回だけ実行する。
+        let normal = run_repl_process(normal_source, use_vm, &[("TSUMUGI_MAX_STEPS", "43")]);
         let (normal_stdout, normal_stderr) = output_text(&normal);
         assert!(
             normal.status.success(),
@@ -1468,7 +1470,7 @@ fn call_budget_is_checked_before_callee_in_both_engines() {
         );
         assert!(
             !normal_stderr.contains("ステップ上限"),
-            "{mode}で呼び出しが 1 fuel を超えて課金された: {normal_stderr}"
+            "{mode}で呼び出しが §4.1 の表の値を超えて課金された: {normal_stderr}"
         );
         assert_eq!(
             normal_stdout.matches("once-body\n").count(),
@@ -2099,7 +2101,8 @@ fn tree_repl_resets_step_budget_per_submission() {
     let output = run_repl_process(
         "fn one()\n    return 1\nend\nprint(one())\nprint(one())\n",
         false,
-        &[("TSUMUGI_MAX_STEPS", "1")],
+        // `print(one())` の submission 1 回分（25 fuel、F-2c）。累積すれば 2 回目で超える。
+        &[("TSUMUGI_MAX_STEPS", "25")],
     );
     let (stdout, stderr) = output_text(&output);
 
@@ -3855,8 +3858,9 @@ fn heap_released_after_repl_rollback_in_both_engines() {
 // F-1: fuel parity（execution-control §14「F-1 実装スライス」）
 // =============================================================
 
-/// F1-AT-04: 既定上限（1,000,000）で、2 文ループ 1,000,000 反復は両 engine で成功し、
-/// 1,000,001 反復は両 engine で同じ診断で失敗する。fib(27) は両 engine で成功する。
+/// F1-AT-04（F2c-AT-04・05 で新しい既定値へ更新）: 既定上限（20,000,000）で、2 文ループ
+/// 1,111,109 反復（必要 fuel 18 × 1,111,109 + 29 = 19,999,991）は両 engine で成功し、1,111,110 反復
+/// （20,000,009）はループを終えた後の `print` で両 engine とも同じ診断で失敗する。fib(27) は両 engine で成功する。
 #[test]
 fn f1_default_fuel_limit_matches_in_both_engines() {
     let dir = TestDir::new("f1-default-limit");
@@ -3868,11 +3872,11 @@ fn f1_default_fuel_limit_matches_in_both_engines() {
     let fib = "fn fib(n)\n  if n < 2\n    return n\n  end\n  return fib(n - 1) + fib(n - 2)\nend\nprint(fib(27))\n";
 
     let cases: Vec<(&str, String, Result<&str, &str>)> = vec![
-        ("loop 1,000,000", loop_source(1_000_000), Ok("done")),
+        ("loop 1,111,109", loop_source(1_111_109), Ok("done")),
         (
-            "loop 1,000,001",
-            loop_source(1_000_001),
-            Err("3行目: ステップ上限に達しました (上限: 1000000)"),
+            "loop 1,111,110",
+            loop_source(1_111_110),
+            Err("7行目: ステップ上限に達しました (上限: 20000000)"),
         ),
         ("fib(27)", fib.to_string(), Ok("196418")),
     ];
@@ -3899,21 +3903,22 @@ fn f1_default_fuel_limit_matches_in_both_engines() {
 }
 
 /// F1-AT-08: REPL では submission ごとに fuel と instruction watchdog が reset され、tree と VM で
-/// 同じ入力列が同じ出力になる。上限 5 で 5 回呼び出す submission を 20 回続けても、watchdog が
-/// 累積しないので VM も止まらない（累積すれば 20 × 6 tick が上限 5 × 2 + 16 を超える）。
+/// 同じ入力列が同じ出力になる。上限 50（5 回呼び出す submission の必要 fuel。F-2c の版 2 で呼び出し 1 回
+/// 8・`+` 4 個の expression と operation 8・let 文 1・assignment 1）で、その submission を 20 回続けても
+/// watchdog が累積しないので VM も止まらない（累積すれば上限 50 × 2 + 16 を超える）。
 #[test]
 fn f1_repl_resets_fuel_and_watchdog_per_submission() {
     let mut source = String::from("fn f()\n  return 1\nend\n");
     for _ in 0..20 {
         source.push_str("let r = f() + f() + f() + f() + f()\n");
     }
-    // 6 回目の呼び出しで上限 5 を超える submission（両 engine で同じ診断）。
+    // 6 回呼ぶ submission（必要 60）は上限 50 を超える（両 engine で同じ診断）。
     source.push_str("let over = f() + f() + f() + f() + f() + f()\n");
     source.push_str("print(\"alive\")\n");
 
     let mut outputs = Vec::new();
     for use_vm in [false, true] {
-        let output = run_repl_process(&source, use_vm, &[("TSUMUGI_MAX_STEPS", "5")]);
+        let output = run_repl_process(&source, use_vm, &[("TSUMUGI_MAX_STEPS", "50")]);
         let (stdout, stderr) = output_text(&output);
         assert!(
             output.status.success(),
@@ -3924,7 +3929,9 @@ fn f1_repl_resets_fuel_and_watchdog_per_submission() {
             "[vm={use_vm}] 後続の入力が実行されない: {stdout}"
         );
         assert_eq!(
-            stderr.matches("ステップ上限に達しました (上限: 5)").count(),
+            stderr
+                .matches("ステップ上限に達しました (上限: 50)")
+                .count(),
             1,
             "[vm={use_vm}] 上限超過は 6 回呼ぶ submission の 1 回だけのはず: {stderr}"
         );
@@ -3960,7 +3967,7 @@ fn f1_fuel_limit_is_not_catchable_in_both_engines() {
             "{context}: catch された、または後続が実行された: {stdout}"
         );
         assert_eq!(
-            stderr, "2行目: ステップ上限に達しました (上限: 1000000)",
+            stderr, "2行目: ステップ上限に達しました (上限: 20000000)",
             "{context}: 診断が一致しません"
         );
     }
@@ -3970,11 +3977,12 @@ fn f1_fuel_limit_is_not_catchable_in_both_engines() {
 // F-2a: fuel_accounting_revision の field（execution-control §14「F-2a 実装スライス」）
 // =============================================================
 
-/// F2a-AT-01: `BudgetConfig::standard` の `fuel_accounting_revision` は 1 で、1 を明示した config は
-/// execution 作成の経路（`EmbeddingRequest::new`）で受理され、既定の実行と同じ fuel・同じ成否になる。
-/// 未受理の版（2）は同じ経路で拒否される。`language_revision` は変えない。
+/// F2a-AT-01（F2c-AT-04 で版 2 へ更新）: `BudgetConfig::standard` の `fuel_accounting_revision` は 2 で、
+/// 2 を明示した config は execution 作成の経路（`EmbeddingRequest::new`）で受理され、既定の実行と同じ
+/// fuel・同じ成否になる。旧版（1）は同じ経路で拒否される（旧課金で動くのではない）。`language_revision`
+/// は変えない。
 #[test]
-fn f2a_at_01_explicit_fuel_revision_1_matches_default() {
+fn f2c_at_04_explicit_fuel_revision_2_matches_default() {
     use tsumugi::eval::Evaluator;
     use tsumugi::lexer::Lexer;
     use tsumugi::parser::Parser;
@@ -3982,17 +3990,18 @@ fn f2a_at_01_explicit_fuel_revision_1_matches_default() {
     let clock: std::sync::Arc<dyn tsumugi::MonotonicClock> =
         std::sync::Arc::new(tsumugi::FakeClock::new());
     let standard = tsumugi::BudgetConfig::standard(clock.as_ref()).expect("standard budget");
-    assert_eq!(standard.fuel_accounting_revision, 1);
+    assert_eq!(standard.fuel_accounting_revision, 2);
+    assert_eq!(standard.total_fuel, 20_000_000);
 
     let mut explicit = standard;
-    explicit.fuel_accounting_revision = 1;
+    explicit.fuel_accounting_revision = 2;
     tsumugi::EmbeddingRequest::new(explicit, std::sync::Arc::clone(&clock))
-        .expect("明示した版 1 は execution 作成前の検証を通る");
+        .expect("明示した版 2 は execution 作成前の検証を通る");
     let mut unsupported = standard;
-    unsupported.fuel_accounting_revision = 2;
+    unsupported.fuel_accounting_revision = 1;
     assert_eq!(
         tsumugi::EmbeddingRequest::new(unsupported, std::sync::Arc::clone(&clock)).unwrap_err(),
-        tsumugi::BudgetConfigError::UnsupportedFuelAccountingRevision(2)
+        tsumugi::BudgetConfigError::UnsupportedFuelAccountingRevision(1)
     );
 
     let source = "let i = 0\nwhile i < 20\n  i = i + 1\nend\n";
@@ -4018,4 +4027,172 @@ fn f2a_at_01_explicit_fuel_revision_1_matches_default() {
         saw_err |= default_run.0.is_err();
     }
     assert!(saw_ok && saw_err, "上限の手前と上限の両方を確かめる");
+}
+
+// =============================================================
+// F-2c: §4.1 の主要 charge point（execution-control §14「F-2c 実装スライス」）
+// =============================================================
+
+/// CLI を fuel 上限 `fuel`（legacy の `TSUMUGI_MAX_STEPS`）で実行し、(成否, stdout, stderr) を返す。
+fn f2c_run_cli(
+    script: &std::path::Path,
+    use_vm: bool,
+    args: &[&str],
+    fuel: u64,
+) -> (bool, String, String, Option<i32>) {
+    let fuel = fuel.to_string();
+    let output = run_script_process_with_args(
+        script,
+        use_vm,
+        args,
+        &[("TSUMUGI_MAX_STEPS", fuel.as_str())],
+        "f2c",
+    );
+    (
+        output.status.success(),
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        normalize(&stderr_without_vm_warning(&output.stderr)),
+        output.status.code(),
+    )
+}
+
+/// 成功する最小の fuel 上限 N を両 engine で二分探索し、一致を確かめて返す（F2c-AT-03 の境界も検査する:
+/// N では両 engine とも成功、N − 1 では両 engine とも上限で失敗し、stdout・stderr・exit code が一致する）。
+fn f2c_min_fuel_cli(label: &str, source: &str, args: &[&str]) -> u64 {
+    let dir = TestDir::new("f2c");
+    let script = dir.path.join("s.tsg");
+    std::fs::write(&script, source).expect("スクリプトの作成に失敗");
+    let search = |use_vm: bool| {
+        let ok = |n: u64| f2c_run_cli(&script, use_vm, args, n).0;
+        let (mut lo, mut hi) = (0u64, 4096u64);
+        assert!(ok(hi), "[{label}] 4096 で成功しない");
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if ok(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
+    };
+    let tree = search(false);
+    let vm = search(true);
+    assert_eq!(tree, vm, "[{label}] 必要 fuel が tree/VM で違う");
+    let at_n: Vec<_> = [false, true]
+        .iter()
+        .map(|vm| f2c_run_cli(&script, *vm, args, tree))
+        .collect();
+    assert!(at_n[0].0 && at_n[1].0, "[{label}] N で失敗した");
+    assert_eq!(at_n[0], at_n[1], "[{label}] N の出力が tree/VM で違う");
+    let below: Vec<_> = [false, true]
+        .iter()
+        .map(|vm| f2c_run_cli(&script, *vm, args, tree - 1))
+        .collect();
+    assert!(!below[0].0 && !below[1].0, "[{label}] N − 1 で成功した");
+    assert!(
+        below[0].2.contains("ステップ上限に達しました"),
+        "[{label}] N − 1 が fuel の上限で止まっていない: {}",
+        below[0].2
+    );
+    assert_eq!(
+        below[0], below[1],
+        "[{label}] N − 1 の stdout・stderr（line を含む）・exit code が tree/VM で違う"
+    );
+    tree
+}
+
+/// F2c-AT-02: filesystem builtin の host call 1 回につき host call attempt 10。許可・拒否・host error の
+/// 3 経路それぞれで、呼ぶ文を 1 つ増やした 2 本の N の差から確かめる（両 engine）。F2c-AT-03 の境界も
+/// `f2c_min_fuel_cli` が確かめる。
+///
+/// 増やすのは `try` で囲んだ `read_file(p)` の文で、その内訳は try 文 1・式文 1・call 式 1・invocation 5・
+/// 引数 `p` 1・host call attempt 10 = 19（catch 本体は空）。差から host call attempt 以外を引いて 10 を得る。
+#[test]
+fn f2c_at_02_filesystem_host_call_attempt_is_10_on_every_path() {
+    let dir = TestDir::new("f2c-fs");
+    std::fs::write(dir.path.join("x.txt"), "hi").expect("ファイルの作成に失敗");
+    let root = format!("data={}", dir.path.display());
+    let granted: Vec<&str> = vec!["--fs-root", &root, "--fs-op", "data=read"];
+    let call = "try\n  read_file(p)\ncatch e\nend\n";
+    let paths: [(&str, &str, &[&str]); 3] = [
+        ("許可", "@data/x.txt", &granted),
+        ("拒否（grant なし）", "@data/x.txt", &[]),
+        (
+            "host error（存在しないファイル）",
+            "@data/missing.txt",
+            &granted,
+        ),
+    ];
+    for (label, path, args) in paths {
+        let prelude = format!("let p = \"{path}\"\n");
+        let one = f2c_min_fuel_cli(label, &format!("{prelude}{call}print(1)\n"), args);
+        let two = f2c_min_fuel_cli(label, &format!("{prelude}{call}{call}print(1)\n"), args);
+        let host_call_attempt = (two - one) - (1 + 1 + 1 + 5 + 1);
+        assert_eq!(host_call_attempt, 10, "[{label}] host call attempt");
+    }
+}
+
+/// F2c-AT-03: F2c-AT-01 の形の script（ループ・呼び出し・`continue` / `break`・出力）で、N は両 engine とも
+/// 成功、N − 1 は両 engine とも上限で失敗し、stdout・stderr（line・trace を含む）・exit code が一致する。
+#[test]
+fn f2c_at_03_boundary_output_matches_in_both_engines() {
+    let cases = [
+        "let i = 0\nwhile i < 3\n  print(i)\n  i = i + 1\nend\n",
+        "let n = 0\nfor x in [1, 2, 3, 4]\n  if x == 2\n    continue\n  end\n  if x == 4\n    break\n  end\n  print(x)\n  n = n + x\nend\nprint(n)\n",
+        "fn f(x)\n  print(x)\n  return x * 2\nend\nlet s = 0\nfor y in range(0, 3)\n  s = s + f(y)\nend\nprint(s)\n",
+        "fn g(n)\n  if n == 0\n    return 0\n  end\n  return g(n - 1) + 1\nend\nprint(map([1, 2], fn(x) g(x) end))\n",
+    ];
+    for source in cases {
+        f2c_min_fuel_cli(source, source, &[]);
+    }
+}
+
+/// F2c-AT-04: 新しい既定 total_fuel（20,000,000）で代表 script 集合（`examples/*.tsg`・`benches/interpreter.rs`
+/// の workload）が両 engine で成功する。F1-AT-04 相当の 2 文ループと `fib(27)` は
+/// `f1_default_fuel_limit_matches_in_both_engines` が確かめる。各 script の消費 fuel は実装 PR の本文に記録した。
+#[test]
+fn f2c_at_04_representative_scripts_succeed_with_default_fuel() {
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let import_root = format!("default={}", examples.display());
+    for name in ["hello.tsg", "math.tsg", "import_demo.tsg"] {
+        for use_vm in [false, true] {
+            let context = format!("{name} [vm={use_vm}]");
+            let output = run_script_process_with_args(
+                &examples.join(name),
+                use_vm,
+                &["--allow-import-root", &import_root],
+                &[],
+                &context,
+            );
+            assert!(
+                output.status.success(),
+                "{context}: {}",
+                stderr_without_vm_warning(&output.stderr)
+            );
+        }
+    }
+    let workloads = [
+        "fn fib(n)\n  if n < 2\n    return n\n  end\n  return fib(n - 1) + fib(n - 2)\nend\nlet result = fib(20)\n",
+        "let d = {}\nfor i in range(0, 500)\n  d[to_str(i)] = i * 2\nend\nlet total = 0\nfor k in d\n  total = total + d[k]\nend\n",
+        "let result = \"\"\nfor i in range(0, 300)\n  result = f\"{result}{i},\"\nend\n",
+        "let sum = 0\nfor i in range(0, 5000)\n  sum = sum + i\nend\n",
+        "let sum = 0\nlet i = 0\nwhile i < 5000\n  sum = sum + i\n  i = i + 1\nend\n",
+        "let nums = range(0, 200)\nlet doubled = map(nums, fn(x) return x * 2 end)\nlet evens = filter(doubled, fn(x) return x % 4 == 0 end)\n",
+        "let total = 0\nfor i in range(0, 200)\n  let f = fn(x) return x + i end\n  total = total + f(1)\nend\n",
+    ];
+    let dir = TestDir::new("f2c-workloads");
+    for (index, source) in workloads.iter().enumerate() {
+        let script = dir.path.join(format!("w{index}.tsg"));
+        std::fs::write(&script, source).expect("スクリプトの作成に失敗");
+        for use_vm in [false, true] {
+            let context = format!("workload {index} [vm={use_vm}]");
+            let output = run_script_process(&script, use_vm, &[], &context);
+            assert!(
+                output.status.success(),
+                "{context}: {}",
+                stderr_without_vm_warning(&output.stderr)
+            );
+        }
+    }
 }

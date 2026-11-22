@@ -197,10 +197,11 @@ fn twc_at_02_fuel_matches_and_boundary_agrees() {
         let src = format!("{prelude}let n = 0\nwhile f(n < {k})\n  n = n + 1\nend\n");
         assert_fuel_parity(&format!("k={k}"), &src);
     }
-    // `while f(n < 1)` は fuel 3 で成功し、2 で limit。
+    // `while f(n < 1)` は fuel 37 で成功し、36 で limit（F-2c の版 2: fn 文 1・let 3・while 文 1・条件の
+    // 評価 12 × 2（call 式 1・invocation 5・`n < 1` 4・本体の return 文 2）・反復 1 回 8（2 + 代入文 6））。
     let src = format!("{prelude}let n = 0\nwhile f(n < 1)\n  n = n + 1\nend\n");
-    assert_eq!(assert_fuel_parity("k=1 exact", &src), 3);
-    let two = run_tree(&src, 2);
+    assert_eq!(assert_fuel_parity("k=1 exact", &src), 37);
+    let two = run_tree(&src, 36);
     assert_eq!(
         two.1.as_ref().err().map(|e| e.0.as_str()),
         Some("Some(StepLimit)")
@@ -213,12 +214,14 @@ fn twc_at_02_fuel_matches_and_boundary_agrees() {
     let src =
         format!("{prelude}let n = 0\ntry\n  while f(n < 2)\n    n = n + 1\n  end\ncatch e\nend\n");
     assert_fuel_parity("in try", &src);
-    // 偽で始まる条件・呼び出しの無い条件は変わらない
+    // 偽で始まる条件・呼び出しの無い条件は変わらない（F-2c の版 2 の値。偽で始まる条件は fn 文 1・while 文 1・
+    // 条件 9（call 式 1・invocation 5・`false` 1・本体の return 文 2）。呼び出しの無い条件は let 3・while 文 1・
+    // 条件 4 × 2・反復 1 回 8）
     let src = format!("{prelude}while f(false)\n  let x = 1\nend\n");
-    assert_eq!(assert_fuel_parity("false first", &src), 1);
+    assert_eq!(assert_fuel_parity("false first", &src), 11);
     assert_eq!(
         assert_fuel_parity("no call", "let n = 0\nwhile n < 1\n  n = n + 1\nend\n"),
-        1
+        20
     );
 }
 

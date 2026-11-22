@@ -5747,11 +5747,12 @@ mod tests {
             BudgetConfigError::UnsupportedHeapAccountingRevision(2)
         );
         // F2a-AT-02: fuel の会計版は別の variant。両方不正なら heap を先に返す。
+        // F2c-AT-04: 現在版は 2 で、旧版 1 は拒否される。
         let mut budget = BudgetConfig::standard(clock.as_ref()).unwrap();
-        budget.fuel_accounting_revision = 2;
+        budget.fuel_accounting_revision = 1;
         assert_eq!(
             ExecutionRequest::new(budget, Arc::clone(&clock)).unwrap_err(),
-            BudgetConfigError::UnsupportedFuelAccountingRevision(2)
+            BudgetConfigError::UnsupportedFuelAccountingRevision(1)
         );
         budget.heap_accounting_revision = 2;
         assert_eq!(

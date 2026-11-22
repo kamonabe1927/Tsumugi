@@ -312,6 +312,7 @@ fn cbe_at_04_contains_charges_like_equality() {
     }
 }
 
-/// 変更前（`Vec::contains`）の実装で測った、スカラーだけの List への `contains` の最小 fuel
-/// （tree-walk, VM）。
-const SCALAR_CONTAINS_FUEL: (u64, u64) = (0, 0);
+/// スカラーだけの List への `contains` の最小 fuel（tree-walk, VM）。`contains` 自体の課金は変更前
+/// （`Vec::contains`）と同じく 0 で、F-2c の版 2 の課金（文 1・call 式 1・invocation 5・List 式 1・
+/// 要素 5・第 2 引数 1・assignment 1）だけ。
+const SCALAR_CONTAINS_FUEL: (u64, u64) = (15, 15);

@@ -749,8 +749,9 @@ impl Vm {
 
     /// ステップ（fuel）を [`FuelSchedule`] の種別の値で課金し、上限チェックする（REV-015 Slice 1・F-2b）。
     ///
-    /// 課金点は tree と同じ (F1) `Loop` の back-edge の直前の `Charge`・(F2) `PrepareCall` の直前の
-    /// `Charge`・(F3) callback（`call_fn_value` から直接。execution-control §14 F-1、F-2b Q5 = A）。
+    /// 課金点は tree と同じで、compiler が出す `Charge`（statement・expression・operation・invocation・
+    /// loop iteration）と、builtin の実行が直接課金する callback の invocation（`call_fn_value`、F-2b Q5 = A）・
+    /// host call attempt（`exec_builtin` と `Print`）。execution-control §14 F-1・F-2b・F-2c。
     fn charge(&mut self, kind: ChargeKind, line: usize) -> Result<(), TsumugiError> {
         self.surface_pending_heap_stop(line)?;
         self.budget
@@ -1408,13 +1409,13 @@ impl Vm {
                 }
             }
             OpCode::Charge(kind) => {
-                // (F1)(F2) fuel の論理課金点。compiler が `Loop` / `PrepareCall` の直前に出す。
+                // fuel の論理課金点。compiler が文・式・演算・呼び出し・反復の境界に出す（F-2c）。
                 // dispatch 自体は課金せず、種別の値だけを課金する（§4.1）。
                 self.charge(kind, line)?;
             }
             OpCode::Loop(target) => {
-                // (F1) ループの back-edge。fuel は直前の `Charge(LoopIteration)` が課金済みで、
-                // `Loop` 自体は課金しない。`Loop` は back-edge 専用（for の continue は前方 Jump）。
+                // (F1) ループの back-edge。fuel は反復の開始（body の先頭）の `Charge(LoopIteration)` が
+                // 課金済みで、`Loop` 自体は課金しない。`Loop` は back-edge 専用（for の continue は前方 Jump）。
                 self.set_ip(target, line)?;
             }
             OpCode::GetUpvalue(index) => {
@@ -1565,7 +1566,8 @@ impl Vm {
                 let payload = output.join(" ");
                 // output（stdio host call）を課金する（§6.1、REV-015 Slice 2、I-O accounting）。
                 // tree engine（builtin.rs の print）と同じ論理位置で payload を host へ渡す
-                // 前に課金する。
+                // 前に課金する。host call attempt（§4.1、F-2c Q1 = A）は回数の課金の直前。
+                self.charge(ChargeKind::HostCallAttempt, line)?;
                 self.budget
                     .charge_output(
                         crate::builtin_core::print_charge_bytes(&payload),
@@ -2121,6 +2123,8 @@ impl Vm {
             crate::builtin_core::render_fs_content_budgeted(name, &mut args, &mut self.budget)
                 .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
             let request_bytes = crate::builtin_core::host_call_request_bytes(name, &args);
+            // host call attempt（§4.1、F-2c Q1 = A）は回数の課金の直前。
+            self.charge(ChargeKind::HostCallAttempt, line)?;
             self.budget
                 .charge_host_call_request(request_bytes, ExecutionPhase::Run)
                 .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
@@ -2217,6 +2221,8 @@ impl Vm {
         match name {
             "input" => {
                 crate::builtin_core::check_arity(name, &args, 0, line)?;
+                // host call attempt（§4.1、F-2c Q1 = A）は capability 判定・host からの読み取りより前。
+                self.charge(ChargeKind::HostCallAttempt, line)?;
                 // C4（CAP-AT-07）: Stdin authority を consult する。tree engine と同じ共有
                 // ロジック（`resolve_input`）を通す。未 grant は catch 可能な `capability` error、
                 // EOF は null、host 失敗は catch 可能な `host` error。
@@ -2243,6 +2249,8 @@ impl Vm {
                         return Err(TsumugiError::builtin_arg_type(line, "env", 1, "Str", other));
                     }
                 };
+                // host call attempt（§4.1、F-2c Q1 = A）は capability 判定より前。
+                self.charge(ChargeKind::HostCallAttempt, line)?;
                 let value =
                     crate::builtin_core::resolve_env(self.capabilities.environment(), &key, line)?;
                 // env が生成した untracked String body を tracked 化しつつ heap 課金する。
@@ -2253,6 +2261,8 @@ impl Vm {
             "now" => {
                 // C3（CAP-AT-06）: Clock authority を consult する。system clock へは触れない。
                 crate::builtin_core::check_arity(name, &args, 0, line)?;
+                // host call attempt（§4.1、F-2c Q1 = A）は capability 判定より前。
+                self.charge(ChargeKind::HostCallAttempt, line)?;
                 crate::builtin_core::resolve_now(self.capabilities.clock(), line)
             }
             "exit" => {
@@ -2273,6 +2283,8 @@ impl Vm {
                         ));
                     }
                 };
+                // host call attempt（§4.1、F-2c Q1 = A）は capability 判定より前。
+                self.charge(ChargeKind::HostCallAttempt, line)?;
                 let has_exit = self.capabilities.process_exit().is_some();
                 let code = crate::builtin_core::resolve_exit(code, has_exit, line)?;
                 // pending_exit を載せ、catch 不可の ProcessExit 信号を返す。
@@ -2362,7 +2374,7 @@ impl Vm {
         line: usize,
     ) -> Result<Value, TsumugiError> {
         // (F3) builtin の callback 呼び出しで fuel を 1 課金する（tree と同じく深度検査の前）。
-        self.charge(ChargeKind::BuiltinCallback, line)?;
+        self.charge(ChargeKind::Invocation, line)?;
         if self.active_user_frame_count() >= MAX_USER_CALL_DEPTH {
             return Err(TsumugiError::call_depth_limit(line, MAX_USER_CALL_DEPTH));
         }

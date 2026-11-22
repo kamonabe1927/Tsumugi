@@ -132,7 +132,9 @@ fn fwr_at_01_shared_dag_without_grant_stops_in_bounded_time() {
             limit,
         );
         assert!(!printed.success, "[{mode}] print(a) が成功した");
-        let message = "ステップ上限に達しました";
+        // F-2c で既定 total_fuel が 20,000,000 になり、描画（複合ノード 1 つにつき fuel 1）は fuel より先に
+        // 1 個の文字列の上限（8 MiB）に達する。どちらで止まっても有界で、print と同じ診断で止まることを見る。
+        let message = "文字列の長さが上限を超えました";
         assert!(
             printed.stderr.contains(message),
             "[{mode}] {}",
@@ -150,7 +152,7 @@ fn fwr_at_01_shared_dag_without_grant_stops_in_bounded_time() {
             assert!(!r.success, "[{mode}] {builtin}: 成功してしまった");
             assert!(
                 r.stderr.contains(message),
-                "[{mode}] {builtin}: fuel 超過で止まっていない: {}",
+                "[{mode}] {builtin}: print(a) と同じ上限で止まっていない: {}",
                 r.stderr
             );
             assert!(r.elapsed < limit, "[{mode}] {builtin}: {:?}", r.elapsed);
@@ -268,8 +270,9 @@ const CONTENT_CASES: &[(&str, &str)] = &[
     ("\"hello\"", "hello"),
 ];
 
-/// 変更前の実装で測った、`write_file("@data/w.txt", "hello")` 1 回だけの script の fuel（tree, VM）。
-const STR_WRITE_FUEL: (u64, u64) = (0, 0);
+/// `write_file("@data/w.txt", "hello")` 1 回だけの script の fuel（tree, VM）。描画は Str なので 0 で、
+/// F-2c の版 2 の課金（文 1・call 式 1・invocation 5・引数の expression 2・host call attempt 10）だけ。
+const STR_WRITE_FUEL: (u64, u64) = (19, 19);
 
 /// FWR-AT-03: 予算内の内容の書き込み結果と committed の `host_request_bytes` は、変更前の
 /// `Display` の描画と同じ。`Str` の第 2 引数の fuel も変わらない。tree-walk 版と VM 版で同じ。
@@ -465,8 +468,11 @@ fn fwr_at_04_audit_body_and_render_fuel_position() {
     let base_envelopes = run_audited(baseline, &base_dir.path, reveal_policy());
     let (before, after) = fuel_split_at_started(&envelopes);
     let (base_before, base_after) = fuel_split_at_started(&base_envelopes);
+    // host call より前の差は、引数のリテラルの expression の数の差（8 − 1、F-2c の §4.1）だけで、
+    // 描画の fuel を含まない。
     assert_eq!(
-        before, base_before,
+        before - base_before,
+        7,
         "host call より前の消費が描画の fuel を含む"
     );
     assert_eq!(

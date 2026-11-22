@@ -203,19 +203,17 @@ struct LoopSite {
 
 /// `advance_frame` がループ frame の借用を落とした後に実行する動作（driver 内部用）。
 enum LoopAction {
-    /// `while` frame: 必要なら fuel 課金し、condition 評価で次反復 or 畳む。
+    /// `while` frame: condition 評価で次反復 or 畳む。
     While {
         site: LoopSite,
         body: Block,
         line: usize,
-        charge_step: bool,
     },
-    /// `for` frame: 必要なら fuel 課金し、次 item があれば本体を積む or 畳む。
+    /// `for` frame: 次 item があれば本体を積む or 畳む。
     For {
         site: LoopSite,
         body: Block,
         line: usize,
-        charge_step: bool,
         next_item: Option<Value>,
     },
     /// Block / Scoped / Try / Call: 文列を実行し切ったので frame を畳むだけ。
@@ -231,17 +229,14 @@ enum FrameKind {
     /// pop 時に `scope_base` まで巻き戻す。
     Scoped,
     /// `while` ループ。condition を毎回評価し、本体 1 反復を子 Block frame として実行する。
-    /// `pending_step` は「直前の反復本体を実行し終えた（次反復前に fuel 課金が要る）」状態。
     While {
         /// condition / line を読み出すための compound 文位置。
         site: LoopSite,
         /// 本体（`Rc<[Stmt]>` を所有）。反復ごとに clone（Rc bump）して Block frame にする。
         body: Block,
         line: usize,
-        pending_step: bool,
     },
     /// `for` ループ。開始時に materialize した items を 1 個ずつ束縛して本体を実行する。
-    /// `pending_step` は while と同じく反復完了後の fuel 課金待ちフラグ。
     For {
         /// ループ変数名 / line を読み出すための compound 文位置。
         site: LoopSite,
@@ -252,7 +247,6 @@ enum FrameKind {
         /// Dict・Str は課金済みの tracked な List（frame の drop で release される）。
         items: Rc<crate::value::TrackedList>,
         index: usize,
-        pending_step: bool,
         /// 反復元コレクション値を保持する。従来の tree 評価器は `for` の対象を局所変数
         /// `collection` としてループ実行中ずっと生かしていたため、その live heap 課金も
         /// ループ完了まで維持されていた。frame へ持たせて同じ寿命を保つ（挙動不変）。
@@ -301,6 +295,8 @@ struct ExprAt<'a> {
 /// AST は借用せず、所有する Block と文の index・文の値の式スロットから評価中のノードまでの子の
 /// 位置の経路（[`crate::ast::expr_child`] の index 列）でノードを辿る。
 struct ExprFrame {
+    /// この式の expression 1（§4.1）を課金済みか。最初の段で課金する（F-2c Q3 = A 規則 2、前順）。
+    charged: bool,
     /// 文の値の式スロット（式文・`let` / 再代入の右辺・`return` の値）を持つ文を含む Block。
     owner: Block,
     /// `owner` 内の文の index。
@@ -2183,26 +2179,14 @@ impl Evaluator {
             .last_mut()
             .expect("advance_frame requires a frame");
         let action = match &mut top.kind {
-            FrameKind::While {
-                site,
-                body,
-                line,
-                pending_step,
-            } => {
+            FrameKind::While { site, body, line } => {
                 let site = LoopSite {
                     owner: site.owner.clone(),
                     stmt_index: site.stmt_index,
                 };
                 let body = body.clone();
                 let line = *line;
-                let charge_step = *pending_step;
-                *pending_step = false;
-                LoopAction::While {
-                    site,
-                    body,
-                    line,
-                    charge_step,
-                }
+                LoopAction::While { site, body, line }
             }
             FrameKind::For {
                 site,
@@ -2210,7 +2194,6 @@ impl Evaluator {
                 line,
                 items,
                 index,
-                pending_step,
                 ..
             } => {
                 let site = LoopSite {
@@ -2219,8 +2202,6 @@ impl Evaluator {
                 };
                 let body = body.clone();
                 let line = *line;
-                let charge_step = *pending_step;
-                *pending_step = false;
                 let next_item = if *index < items.len() {
                     let item = items[*index].clone();
                     *index += 1;
@@ -2232,7 +2213,6 @@ impl Evaluator {
                     site,
                     body,
                     line,
-                    charge_step,
                     next_item,
                 }
             }
@@ -2240,17 +2220,7 @@ impl Evaluator {
         };
 
         match action {
-            LoopAction::While {
-                site,
-                body,
-                line,
-                charge_step,
-            } => {
-                // 直前反復の本体を実行し終えていれば、次反復判定の前に fuel を課金する
-                // （従来 while の末尾 charge と同じ順序・タイミング）。
-                if charge_step {
-                    self.charge(ChargeKind::LoopIteration, line)?;
-                }
+            LoopAction::While { site, body, line } => {
                 // condition は site.owner（clone した Block ローカル）越しに読む。この借用は
                 // self.frames ではなくローカル `site` に紐づくので、eval_expr（&mut self）を
                 // 呼べる。
@@ -2271,12 +2241,6 @@ impl Evaluator {
                 }
                 let cond = self.eval_expr(condition, line)?;
                 if cond.is_truthy() {
-                    // 次反復の本体を積む前に、この While frame の pending_step を立てる。
-                    if let FrameKind::While { pending_step, .. } =
-                        &mut self.frames.last_mut().expect("while frame present").kind
-                    {
-                        *pending_step = true;
-                    }
                     self.begin_loop_iteration(body, line)?;
                 } else {
                     self.pop_frame();
@@ -2286,23 +2250,13 @@ impl Evaluator {
                 site,
                 body,
                 line,
-                charge_step,
                 next_item,
             } => {
-                if charge_step {
-                    self.charge(ChargeKind::LoopIteration, line)?;
-                }
                 match next_item {
                     Some(item) => {
-                        // var は site.owner（clone した Block ローカル）越しに読む。次反復本体を
-                        // 積む前に pending_step を立てる。
+                        // var は site.owner（clone した Block ローカル）越しに読む。
                         let (var, _var_line) = site.for_parts();
                         let var = var.to_string();
-                        if let FrameKind::For { pending_step, .. } =
-                            &mut self.frames.last_mut().expect("for frame present").kind
-                        {
-                            *pending_step = true;
-                        }
                         self.begin_for_iteration(&var, item, body, line)?;
                     }
                     None => self.pop_frame(),
@@ -2499,10 +2453,13 @@ impl Evaluator {
         match dest {
             CallDest::Discard => Ok(None),
             CallDest::Let { name, line } => {
+                // assignment の operation（§4.1、F-2c Q3 = A 規則 3）: 格納の直前。
+                self.charge(ChargeKind::Operation, line)?;
                 self.env_set(&name, value, line)?;
                 Ok(None)
             }
             CallDest::Assign { name, line } => {
+                self.charge(ChargeKind::Operation, line)?;
                 self.assign_existing(&name, value, line)?;
                 Ok(None)
             }
@@ -2600,11 +2557,6 @@ impl Evaluator {
                     let Stmt::While { body, .. } = &owner[stmt_index] else {
                         unreachable!("WhileIter は Stmt::While を指す");
                     };
-                    if let FrameKind::While { pending_step, .. } =
-                        &mut self.frames.last_mut().expect("while frame present").kind
-                    {
-                        *pending_step = true;
-                    }
                     self.begin_loop_iteration(body.clone(), line)?;
                 } else {
                     self.pop_frame();
@@ -2665,6 +2617,8 @@ impl Evaluator {
         val: Value,
         line: usize,
     ) -> Result<(), TsumugiError> {
+        // assignment の operation（§4.1、F-2c Q3 = A 規則 3）: index と値の評価の後、格納の直前。
+        self.charge(ChargeKind::Operation, line)?;
         // REPL transaction のため、cellのin-place変更前に元値を記録する（AUD-024）。
         self.env
             .journal_cell(cell)
@@ -2805,6 +2759,7 @@ impl Evaluator {
             stmts: empty_block(),
             cursor: 0,
             kind: FrameKind::Expr(Box::new(ExprFrame {
+                charged: false,
                 owner,
                 stmt_index,
                 slot,
@@ -2880,6 +2835,11 @@ impl Evaluator {
             )
         };
         let node = expr_at(&owner, stmt_index, slot, &path);
+        if !self.expr_frame_mut().charged {
+            // expression へ入る（§4.1、F-2c Q3 = A 規則 2）。同期経路の `eval_expr` の入口と同じ。
+            self.expr_frame_mut().charged = true;
+            self.charge(ChargeKind::Expression, line)?;
+        }
         match node {
             Expr::Call { callee, args } => {
                 if !self.expr_frame_mut().started
@@ -2947,6 +2907,8 @@ impl Evaluator {
                 match (op, count) {
                     (_, 0) => self.begin_expr_child(&owner, stmt_index, slot, &path, 0, line),
                     (BinOpKind::And | BinOpKind::Or, 1) => {
+                        // 右を評価するかを決める前に operation 1（F-2c Q3 = A 規則 3）。
+                        self.charge(ChargeKind::Operation, line)?;
                         let truthy = self.expr_frame_mut().operands[0].is_truthy();
                         let short = match op {
                             BinOpKind::And => !truthy,
@@ -2965,6 +2927,7 @@ impl Evaluator {
                     }
                     (_, 1) => self.begin_expr_child(&owner, stmt_index, slot, &path, 1, line),
                     _ => {
+                        self.charge(ChargeKind::Operation, line)?;
                         let operands = std::mem::take(&mut self.expr_frame_mut().operands);
                         let result = self.eval_binop(&operands[0], op, &operands[1], line)?;
                         let value = self
@@ -2980,6 +2943,7 @@ impl Evaluator {
                 if self.expr_frame_mut().operands.is_empty() {
                     return self.begin_expr_child(&owner, stmt_index, slot, &path, 0, line);
                 }
+                self.charge(ChargeKind::Operation, line)?;
                 let operands = std::mem::take(&mut self.expr_frame_mut().operands);
                 let value = self.eval_unary(op, &operands[0], line)?;
                 drop(operands);
@@ -2989,6 +2953,7 @@ impl Evaluator {
                 0 => self.begin_expr_child(&owner, stmt_index, slot, &path, 0, line),
                 1 => self.begin_expr_child(&owner, stmt_index, slot, &path, 1, line),
                 _ => {
+                    self.charge(ChargeKind::Operation, line)?;
                     let operands = std::mem::take(&mut self.expr_frame_mut().operands);
                     let value = self.eval_index(&operands[0], &operands[1], line)?;
                     drop(operands);
@@ -3116,6 +3081,8 @@ impl Evaluator {
             self.expr_frame_mut().started = true;
             match target {
                 CallTarget::Builtin => {
+                    // invocation（§4.1、F-2c Q3 = A 規則 4）: 引数の評価より前。
+                    self.charge(ChargeKind::Invocation, line)?;
                     crate::builtin_core::validate_context_builtin_call(
                         name,
                         args.len(),
@@ -3126,6 +3093,8 @@ impl Evaluator {
                         crate::builtin_core::check_arity_count(name, args.len(), 1, line)?;
                     } else if name == "push" {
                         let (cell, snapshot) = self.push_target_cell(&args[0], line)?;
+                        // 第1引数の識別子の expression 1（同期経路と同じ位置）。
+                        self.charge(ChargeKind::Expression, line)?;
                         let frame = self.expr_frame_mut();
                         frame.cell = Some(cell);
                         frame.snapshot = Some(snapshot);
@@ -3137,14 +3106,14 @@ impl Evaluator {
                         "callback target in step_target_call",
                     ));
                 }
-                CallTarget::Host => self.charge(ChargeKind::HostCall, line)?,
+                CallTarget::Host => self.charge(ChargeKind::Invocation, line)?,
                 CallTarget::Cooperative => {
                     // resume 中の格納結果は charge と引数の評価より前に消費する（同期経路と同じ）。
                     if let Some((_call_id, result)) = self.resumed_host_call.take() {
                         let value = self.finish_cooperative_result(name, result, line)?;
                         return self.finish_expr_frame(value);
                     }
-                    self.charge(ChargeKind::HostCall, line)?;
+                    self.charge(ChargeKind::Invocation, line)?;
                 }
             }
         }
@@ -3292,6 +3261,8 @@ impl Evaluator {
         let line = at.line;
         if !self.expr_frame_mut().started {
             self.expr_frame_mut().started = true;
+            // invocation（§4.1、F-2c Q3 = A 規則 4）: 引数の評価より前。
+            self.charge(ChargeKind::Invocation, line)?;
             crate::builtin_core::validate_context_builtin_call(
                 name,
                 args.len(),
@@ -3517,6 +3488,8 @@ impl Evaluator {
     /// 従来の `while` は反復ごとに `push_scope` / `exec_block` / `pop_scope` していた。
     /// ここではスコープを push し continuation heap を課金してから本体 Block frame を積む。
     fn begin_loop_iteration(&mut self, body: Block, line: usize) -> Result<(), TsumugiError> {
+        // loop iteration 開始（§4.1、F-2c Q3 = A 規則 5）: condition が真と決まった後、body の直前。
+        self.charge(ChargeKind::LoopIteration, line)?;
         let scope_base = self.env.scope_depth();
         self.env.push_scope();
         let charge = crate::budget::heap_size::continuation_frame(0);
@@ -3542,6 +3515,8 @@ impl Evaluator {
         body: Block,
         line: usize,
     ) -> Result<(), TsumugiError> {
+        // loop iteration 開始（§4.1、F-2c Q3 = A 規則 5）: 次の要素があると決まった後、body の直前。
+        self.charge(ChargeKind::LoopIteration, line)?;
         let scope_base = self.env.scope_depth();
         self.env.push_scope();
         let charge = crate::budget::heap_size::continuation_frame(1);
@@ -3616,6 +3591,8 @@ impl Evaluator {
         owner: &Block,
         stmt_index: usize,
     ) -> Result<StmtStep, TsumugiError> {
+        // statement へ入る（§4.1、F-2c Q3 = A 規則 1）。ブロックは数えない。
+        self.charge(ChargeKind::Statement, stmt.line())?;
         // tree-expr-continuation-e1: yield 可能な driver では、文レベルのユーザー関数呼び出しを
         // driver 上で実行する。同期経路（`can_yield = false`）は従来の分岐だけを通る。
         if self.can_yield_ctx
@@ -3626,12 +3603,14 @@ impl Evaluator {
         match stmt {
             Stmt::Let { name, value, line } => {
                 let val = self.eval_expr(value, *line)?;
+                self.charge(ChargeKind::Operation, *line)?;
                 self.env_set(name, val, *line)?;
                 Ok(StmtStep::Val)
             }
 
             Stmt::Assign { name, value, line } => {
                 let val = self.eval_expr(value, *line)?;
+                self.charge(ChargeKind::Operation, *line)?;
                 self.assign_existing(name, val, *line)?;
                 Ok(StmtStep::Val)
             }
@@ -3851,6 +3830,8 @@ impl Evaluator {
                 dest,
             ))));
         };
+        // call 式の expression 1（同期経路の `eval_expr` の入口と同じ）。
+        self.charge(ChargeKind::Expression, line)?;
         match self.prepare_call(callee, args, line)? {
             CallPrep::Done(value) => Ok(Some(match self.deliver_call_result(dest, value)? {
                 Some(signal) => StmtStep::Flow(signal),
@@ -3955,22 +3936,17 @@ impl Evaluator {
     }
 
     /// 初回の条件が真だった `while` の While controller frame を積み、条件を評価し直さずに
-    /// 最初の反復の本体を積む（条件は反復ごとに 1 回だけ評価する。`advance_frame` が次反復で
-    /// 立てるのと同じく `pending_step` を立ててから `begin_loop_iteration` を呼ぶ）。
+    /// 最初の反復の本体を積む（条件は反復ごとに 1 回だけ評価する）。
     fn start_while(
         &mut self,
         owner: &Block,
         stmt_index: usize,
         line: usize,
     ) -> Result<(), TsumugiError> {
-        let mut frame = self.enter_while(owner, stmt_index, line)?;
-        let FrameKind::While {
-            body, pending_step, ..
-        } = &mut frame.kind
-        else {
+        let frame = self.enter_while(owner, stmt_index, line)?;
+        let FrameKind::While { body, .. } = &frame.kind else {
             unreachable!("enter_while は While frame を返す");
         };
-        *pending_step = true;
         let body = body.clone();
         self.frames.push(frame);
         self.begin_loop_iteration(body, line)
@@ -4003,7 +3979,6 @@ impl Evaluator {
                 },
                 body,
                 line,
-                pending_step: false,
             },
             scope_base: self.env.scope_depth(),
             heap_charge: 0,
@@ -4037,7 +4012,6 @@ impl Evaluator {
                 line,
                 items,
                 index: 0,
-                pending_step: false,
                 _collection: collection,
             },
             scope_base: self.env.scope_depth(),
@@ -4076,6 +4050,8 @@ impl Evaluator {
 
     /// 式を評価して値を返す（line は文の行番号をエラー表示に使う）
     pub(crate) fn eval_expr(&mut self, expr: &Expr, line: usize) -> Result<Value, TsumugiError> {
+        // expression へ入る（§4.1、F-2c Q3 = A 規則 2、前順）。
+        self.charge(ChargeKind::Expression, line)?;
         match expr {
             Expr::Int(n) => Ok(Value::Int(*n)),
             Expr::Float(f) => Ok(Value::Float(*f)),
@@ -4135,6 +4111,8 @@ impl Evaluator {
                 match op {
                     BinOpKind::And => {
                         let l = self.eval_expr(left, line)?;
+                        // 右を評価するかを決める前に operation 1（F-2c Q3 = A 規則 3）。
+                        self.charge(ChargeKind::Operation, line)?;
                         if !l.is_truthy() {
                             return Ok(l);
                         }
@@ -4142,6 +4120,7 @@ impl Evaluator {
                     }
                     BinOpKind::Or => {
                         let l = self.eval_expr(left, line)?;
+                        self.charge(ChargeKind::Operation, line)?;
                         if l.is_truthy() {
                             return Ok(l);
                         }
@@ -4150,6 +4129,7 @@ impl Evaluator {
                     _ => {
                         let l = self.eval_expr(left, line)?;
                         let r = self.eval_expr(right, line)?;
+                        self.charge(ChargeKind::Operation, line)?;
                         let result = self.eval_binop(&l, op, &r, line)?;
                         // 文字列結合（`+`）が新規生成する String body を課金する
                         // （REV-015 Slice 2）。track_result は untracked な String だけを
@@ -4164,6 +4144,7 @@ impl Evaluator {
 
             Expr::UnaryOp { op, expr } => {
                 let val = self.eval_expr(expr, line)?;
+                self.charge(ChargeKind::Operation, line)?;
                 self.eval_unary(op, &val, line)
             }
 
@@ -4202,12 +4183,16 @@ impl Evaluator {
                     && crate::ast::is_side_effect_free(index)
                     && let Some(cell) = self.env.get_cell(name)
                 {
+                    // object の識別子は読み取らないが、expression 1 は払う（VM の `IndexLocal` と同じ）。
+                    self.charge(ChargeKind::Expression, line)?;
                     let idx = self.eval_expr(index, line)?;
+                    self.charge(ChargeKind::Operation, line)?;
                     let collection = cell.borrow();
                     return self.eval_index(&collection, &idx, line);
                 }
                 let obj = self.eval_expr(object, line)?;
                 let idx = self.eval_expr(index, line)?;
+                self.charge(ChargeKind::Operation, line)?;
                 self.eval_index(&obj, &idx, line)
             }
 
@@ -4552,7 +4537,7 @@ impl Evaluator {
             && self.env.get_cell(name).is_none()
             && self.host_registry.contains_name(name)
         {
-            self.charge(ChargeKind::HostCall, line)?;
+            self.charge(ChargeKind::Invocation, line)?;
             // 引数を評価してから host function へ渡す（呼び出し側で評価順を確定する）。
             let mut arg_values = Vec::with_capacity(args.len());
             for arg in args {
@@ -4602,6 +4587,8 @@ impl Evaluator {
     ) -> Result<Value, TsumugiError> {
         // registry と capability を分けて借用するため、registry の Arc を clone してから
         // consult する（`self` の他 field と借用が競合しないようにする）。
+        // host call attempt（§4.1、F-2c Q1 = A）: 引数の評価の後、grant 検査より前。
+        self.charge(ChargeKind::HostCallAttempt, line)?;
         let registry = std::sync::Arc::clone(&self.host_registry);
         let value = crate::host_function::resolve_host_call(
             &registry,
@@ -4622,7 +4609,7 @@ impl Evaluator {
     /// ユーザー関数呼び出しの入口: `charge` → 深度検査（同期経路と式 frame で共有する段、
     /// tree-expr-continuation-e2a）。
     fn begin_user_call(&mut self, line: usize) -> Result<(), TsumugiError> {
-        self.charge(ChargeKind::UserCall, line)?;
+        self.charge(ChargeKind::Invocation, line)?;
         if self.call_stack.len() >= MAX_USER_CALL_DEPTH {
             return Err(TsumugiError::call_depth_limit(line, MAX_USER_CALL_DEPTH));
         }
@@ -4724,7 +4711,7 @@ impl Evaluator {
             return self.finish_cooperative_result(name, result, line);
         }
 
-        self.charge(ChargeKind::HostCall, line)?;
+        self.charge(ChargeKind::Invocation, line)?;
         // 引数を評価してから adapter へ渡す（評価順を確定する）。
         let mut arg_values = Vec::with_capacity(args.len());
         for arg in args {
@@ -4743,6 +4730,8 @@ impl Evaluator {
     ) -> Result<Value, TsumugiError> {
         // capability / arity を検査して adapter を取り出す（registry の Arc を clone して借用衝突を
         // 避ける）。grant 不足は capability error、arity 不一致は argument error（どちらも catch 可能）。
+        // host call attempt（§4.1、F-2c Q1 = A）: 引数の評価の後、grant 検査より前。
+        self.charge(ChargeKind::HostCallAttempt, line)?;
         let registry = std::sync::Arc::clone(&self.host_registry);
         let Some(function) = crate::host_function::resolve_cooperative_call(
             &registry,
