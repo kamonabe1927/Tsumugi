@@ -2960,8 +2960,8 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   課金点 約 300〜450、budget の既定値・版 約 50）、触る仕組みは fuel の課金点 1 つ、受入基準 5。
   1000 行を超える見込みになったら、実装に入る前に止めて報告する（§14.1）。
 
-**ready にする時点の注記**（F-2c の設計 PR #TBD。main 722bec0 で確かめた。上の範囲・範囲外・受入基準は変えず、
-実装で読み違えやすい点と、spec に無いため判断の候補にした点（PR #TBD の Q1〜Q3）を書く）:
+**ready にする時点の注記**（F-2c の設計 PR #483。main 722bec0 で確かめた。上の範囲・範囲外・受入基準は変えず、
+実装で読み違えやすい点と、spec に無いため判断の候補にした点（PR #483 の Q1〜Q3）を書く）:
 
 - 依存の F-2b は done（実装 PR #477）。今の課金は `charge(ChargeKind)`（tree は `src/eval.rs` の `Evaluator::charge`、
   VM は `src/vm.rs` の `Vm::charge`）が `FuelSchedule::cost` を引く形で、種別は `LoopIteration`・`UserCall`・`HostCall`・

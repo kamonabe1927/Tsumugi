@@ -553,7 +553,7 @@ spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "F-2c 実装スライス（§4.1 の主要 charge point への移行・`fuel_accounting_revision` 1 → 2・既定 `total_fuel`）" }
 acceptance = ["F2c-AT-01..05"]
 depends_on = ["F-2b"]
-design_pr  = 0
+design_pr  = 483
 order      = 28
 
 # F-2b が入れる FuelSchedule / Charge opcode の基盤と F-2c の版 2 の上に bulk 課金点を足すため F-2c 依存（F-2 の分割、PR #470 で付け替え）。
