@@ -1925,6 +1925,7 @@ fn hil_at_03_invalid_module_keeps_module_and_parse_cause() {
                 message.contains("想定外の文字: '@'"),
                 "原因の診断: {message}"
             );
+            assert_eq!(stable_id(&error), "import.syntax");
             assert_eq!(usage.committed.fuel, 0);
         }
         other => panic!("LinkError を期待したが {other:?}"),

@@ -471,20 +471,16 @@ Parserはプログラム直下とblock内の文を区別し、block内のimport�
 - 名前衝突は「後から定義した方が勝つ」で解決（Python と同じ）
 - 将来名前空間が欲しくなったら、クラス実装時にドット演算子を追加すれば自然に対応できる
 
-#### パス解決: 実行中スクリプトからの相対パス
+#### import の解決: 論理 `ModuleId` と link
 
-- import を書いたファイルの親ディレクトリを基準に解決する
-- `std::fs::canonicalize()` で正規化し、循環 import 検出に使う
-- REPL では `cwd` を基準にする
+- importはどの経路（file・stdin・REPL・schedulerのhandle経路）も、link時にresolver capabilityが論理`ModuleId`（`@mount/...`。mountの無いspecifierは`@default/...`）で解決する。import元ファイルの親ディレクトリや`cwd`を基準にしたファイルの正規化はしない。REPLも`--allow-import-root`のgrantが要る（詳細の正本は[Capability Model仕様](capability-model.md)第10節）
 
-#### 循環 import: サイレントスキップ
+#### import の重複と循環: 既訪問は1回だけ展開、循環はlink時にerror
 
-- 正規化パスの `HashSet` で管理
-- 正常に完了したimportの2回目以降は何もせずスキップ（エラーにしない）
+- 同じ`ModuleId`は1回だけ展開する。正常に完了したimportの2回目以降は何もせずスキップする（エラーにしない）。同じ`ModuleId`が別の内容（`source_hash`が違う）で再び現れたら、1文も実行せずに`import.hash_mismatch`で失敗する
 - link・課金・実行に失敗した場合は、そのsubmission・executionが新しく展開したmoduleの記録（`ModuleId`と`source_hash`の表）を巻き戻し、同じmoduleを再試行可能にする
-- A→B→Aのように同じ正規化pathへ戻る循環は、深度検査前の既訪問判定で従来どおり停止する
+- A→B→Aのようにactiveな`ModuleId`へ戻る循環は、linkが`LinkError::Cycle`で拒否し、1文も実行しない（schedulerのhandle経路では`import.cycle`のterminal `LinkError`になる）
 - importの深度はlinkがactive chainだけを数え、root scriptを除く128ファイルまで許可する。129段目はlink時に拒否し（`LinkError::DepthExceeded`）、1文も実行しない
-- Python の挙動に近い（部分的に実行済みのモジュールオブジェクトを返す）
 
 #### link済みProgramを両backendへ渡す
 
