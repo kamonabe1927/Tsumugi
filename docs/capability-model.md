@@ -1307,7 +1307,7 @@ issue #327 の Q2=A を scheduler の handle 経路（alpha `Engine`、`src/engi
   [脅威モデル](threat-model.md) の逸脱一覧の REPL・handle 経路の行のうち handle の部分を削除する（REPL の 2 本が done なら行ごと削除する）。execution-control の逸脱一覧（§9.1）の行は形の差として残す。
 - **依存**: REPL（tree・VM）が `ModuleLoader` を使わなくなってから削除するので、fix-repl-import-gate に依存する（issue #366 で、統合前の 2 本 fix-repl-import-gate-tree / -vm を
   この 1 本にまとめた。この小節の「REPL の 2 本」「REPL（fix-repl-import-gate-tree / -vm）」も fix-repl-import-gate を指す）。fix-repl-import-gate は done（PR #446）なので、
-  issue #478 の設計 PR で `ready` にした（設計の中身は変えていない）。
+  issue #478 の設計 PR（PR #479）で `ready` にした（設計の中身は変えていない）。
 
 ### fix-repl-import-gate 実装スライス（tree REPL と VM REPL の import を同じ PR で resolver gate に通す）
 
