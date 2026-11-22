@@ -2960,6 +2960,48 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   課金点 約 300〜450、budget の既定値・版 約 50）、触る仕組みは fuel の課金点 1 つ、受入基準 5。
   1000 行を超える見込みになったら、実装に入る前に止めて報告する（§14.1）。
 
+**ready にする時点の注記**（F-2c の設計 PR #TBD。main 722bec0 で確かめた。上の範囲・範囲外・受入基準は変えず、
+実装で読み違えやすい点と、spec に無いため判断の候補にした点（PR #TBD の Q1〜Q3）を書く）:
+
+- 依存の F-2b は done（実装 PR #477）。今の課金は `charge(ChargeKind)`（tree は `src/eval.rs` の `Evaluator::charge`、
+  VM は `src/vm.rs` の `Vm::charge`）が `FuelSchedule::cost` を引く形で、種別は `LoopIteration`・`UserCall`・`HostCall`・
+  `BuiltinCallback` の 4 つ（版 `1` ではどれも 1）。課金点は、tree が `src/eval.rs` の 7 か所（`while` / `for` の反復 2・
+  `begin_user_call` 1・登録 host function 4）と `src/builtin.rs` の `callback_precheck` 1 か所、VM が compiler の
+  `Charge`（`LoopIteration` を `while` の back-edge・`for` の back-edge・`while` の `continue` の 3 か所、`UserCall` を 2 か所）と
+  `Vm::call_fn_value` の `BuiltinCallback` である。上の小節の「`count_step`」はこれらの `charge` の呼び出しと読む。
+  F-2c は種別を §4.1 の charge point（statement・expression・operation・invocation・loop iteration・host call attempt）に
+  合わせて付け直し、`ChargeKind::allowed_in_bytecode` も合わせる（callback の invocation は今と同じく
+  `Vm::call_fn_value` から直接課金する。Q5 = A）。
+- core builtin の呼び出しには版 `1` の課金点が無く、invocation（5）は F-2c で新しく足す。VM の compiler は呼び出しを
+  user 経路と builtin 経路に実行時に分ける（`src/compiler.rs` の `user_jump`）ので、builtin 経路にも課金を出す。
+- 上の小節は host call attempt（10）を「tree の host-call 境界（filesystem builtin）にだけ現れる。VM は host function に
+  対応しないため該当なし」とするが、今は VM も filesystem builtin 14 個を tree と同じ論理位置で host call として数える
+  （fix-fs-builtin-host-call-charge。`src/vm.rs` の `exec_builtin`）。filesystem builtin の host call attempt は両 engine で
+  同じ位置・同じ値で課金し（上の小節の「両 engine で同一の順序・同一の line で課金する」）、F2c-AT-02 の 3 経路は
+  filesystem builtin について両 engine で確かめ、F2c-AT-03 の境界にも含める。VM に無いのは embedder が登録した host
+  function だけで、その課金は tree 単独で確かめる。
+- host call attempt（10）を課金する呼び出しの範囲（上の小節は filesystem builtin だけを挙げるが、§2 は clock・env・process
+  の呼び出しを、§6.1 は stdio と任意の host call を host call とする）と、登録 host function を invocation と host call の
+  どちらに数えるか（F-2b の判断 Q1 で F-2c に回した）は spec に無い。判断の候補 Q1・Q2 にした。
+- §4.1 は charge point の表だけを持ち、AST のどのノードを expression・operation に数えるか、operation と loop iteration を
+  いつ課金するかを決めていない。成功する最小の上限 N は課金の順序に依らないが、`and` / `or` の短絡の数え方は N を変え、
+  上限 N − 1 で止まる位置（それより前に出た stdout）は順序で変わる。F2c-AT-03 は両 engine の stdout の一致を求めるので、
+  両 engine が従う規則を spec に置く。判断の候補 Q3 にした。
+- 式は AST に line を持たない（`src/ast.rs` の `Expr`）。expression・operation・invocation・host call attempt の課金の line は
+  その式を含む文の line（関数本体・lambda 本体の中では、その中の文の line）で、両 engine で同じにする。今の課金と同じ扱いである。
+- 既存の per-element 課金（比較・表示・`sort`）、List / Dict の深度の読み直し（§4.1）、`for` の反復列の heap 課金
+  （fix-for-iter-snapshot-charge）は変えない。
+- watchdog（[次期意味論・実装決定](semantic-decisions.md) §17.7）の上限 `total_fuel × 2 + 16` は既定 `total_fuel` に追従する。
+  課金点が増えても正規 compiler 出力ではループの各周回と各呼び出しに fuel の課金が 1 以上あるので、fuel 上限が watchdog
+  上限より先に来ることは F2c-AT-05 で確かめる。
+- 文書: 実装 PR で、§3.1 の表（`fuel_accounting_revision` を `2`、`total_fuel` を測った値）、§3.1 の本文の「初期版は `1`」の
+  後の現在版の記述、[次期意味論・実装決定](semantic-decisions.md) §17.7.3 の fuel の論理課金点 (F1)・(F2)、`src/budget.rs` の
+  `ChargeKind`・`FuelSchedule` の doc を合わせ、冒頭の未実装範囲の §4.1 の行を消す（UTF-8 payload・AST node・`map` /
+  `filter` / serialize の per-element は `fuel-bulk-charge` の行として残す）。登録 host function と `env`・`now`・`exit` が
+  host-call の回数・byte を数えない逸脱一覧の 2 行は fuel ではない（§6.1 の counter）ので F-2c では消さない。
+- 想定の変更規模（見直し）: Q1 で host call attempt の課金点が増える分（stdio・`env` / `now` / `exit`・登録 host function、
+  両 engine で 約 50 行）を足し、`src/` 約 600〜800 行。§14.1 の 1000 行に収まる。触る仕組みは fuel の課金点 1 つ、受入基準 5。
+
 **判断の記録**（設計 PR #470 の判断の候補。判断役が選択（PR #470）、Q1〜Q5=A）:
 
 - **Q1 = A（3 つに割る。F-2a → F-2b → F-2c）**: 観測を変えない土台（F-2a・F-2b）を先に入れ、課金表の移行・版 1→2・
