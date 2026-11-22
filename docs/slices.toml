@@ -554,6 +554,7 @@ spec       = { doc = "docs/execution-control.md", section = "F-2c 実装スラ�
 acceptance = ["F2c-AT-01..05"]
 depends_on = ["F-2b"]
 design_pr  = 483
+impl_pr    = 485
 order      = 28
 
 # F-2b が入れる FuelSchedule / Charge opcode の基盤と F-2c の版 2 の上に bulk 課金点を足すため F-2c 依存（F-2 の分割、PR #470 で付け替え）。
