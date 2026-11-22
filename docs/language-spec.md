@@ -2,7 +2,7 @@
 
 バージョン: 0.21
 
-最終更新: 2026-11-22
+最終更新: 2026-11-23
 
 この番号は言語仕様のrevisionであり、Cargo package / REPLの実装バージョン `0.1.0` とは独立して管理する。
 
@@ -14,20 +14,23 @@
 
 - CLI の既定は safe profile である（[Capability Model仕様](capability-model.md) §14.2・§14.4）。safe profile が既定で許可するのは標準出力（`print`）とスクリプト引数（`args()`）だけで、それ以外は `--allow-env KEY`・`--allow-clock`・`--allow-script-stdin`・`--allow-exit`・`--fs-root NAME=PATH` と `--fs-op NAME=OP[,OP...]`・`--allow-import-root NAME=PATH` で個別に許可する（同 §14.1）。`--deny-stdout` は標準出力の許可を外す
 - `--profile legacy` は互換用で、環境変数（`TSUMUGI_` で始まるものを除く）・時刻・標準入出力・プロセス終了と、`TSUMUGI_SANDBOX` に従うファイルシステムを許可する（同 §14.3）。legacy profile は import root を許可しないため、ファイル・標準入力から実行するスクリプトの import は拒否される
-- REPL も同じ profile と option で動く。REPL の import もファイル・標準入力と同じく import root を要し、許可が無ければ link 時に拒否される（「モジュール / import」の「制約」、[Capability Model仕様](capability-model.md) §10）。現在の実装との差は下の「逸脱一覧」にある
+- REPL も同じ profile と option で動く。REPL の import もファイル・標準入力と同じく import root を要し、許可が無ければ link 時に拒否される（「モジュール / import」の「制約」、[Capability Model仕様](capability-model.md) §10）
 - 許可の無い操作は、スクリプト実行中なら catch 可能な `capability`（ファイルシステム操作は `sandbox`）エラーになる。import の拒否だけは実行開始前の link 時に起き、catch できない（「モジュール / import」の「パス解決」）
 
 本節と、組み込み関数表・「実行安全性」の権限に関する記述は、loop:drift #298 の D-17・D-18 を受けて CLI の既定（safe profile）に合わせて直した。実装は変えず、本書を [Capability Model仕様](capability-model.md) §14 と実装に合わせる案（Q1=A・Q2=A）は、返信なしのため推奨案で確定した（[開発ループ手順書](loop-runbook.md) §7.5、issue #298）。理由: Capability Model仕様が採択した safe 既定はマニフェスト原則 2「権限はホストが明示的に付与する」に沿い、実装もそれに一致している。本書だけが CLI が ambient に権限を持つ前提で書かれていた。これは既に実装されている CLI の既定を記述し直したもので、`LanguageRevision` で分岐する言語挙動の変更ではないため、仕様 revision は 0.21 のまま変えない。
 
 組み込み関数表の `exit` の行は、loop:drift #302 の D-19 を受けて、実装（C7 で `Exited` へ写すようにした `exit`）と [Capability Model仕様](capability-model.md) §9 に合わせて 0〜255 の範囲・範囲外の `argument` エラー・許可が要ることを補った。実装は変えず本書を補う案（Q1=A）は、返信なしのため推奨案で確定した（issue #302、当時の[開発ループ手順書](loop-runbook.md) §7.5）。理由: 既に実装されている挙動の記述漏れで、`LanguageRevision` で分岐する言語挙動の変更ではないため、仕様 revision は 0.21 のまま変えない。
 
+組み込み関数表の `mkdir` の行は、loop:drift #487 の D-146 を受けて、「ディレクトリを再帰的に作成」から実装（非再帰。親が無ければ `host` エラー）に合わせて書き直した。spec を実装に合わせる案（Q1=A）は判断役が選択した（issue #487）。理由: 1 回の `mkdir` が作るのを 1 つのディレクトリに限ると、host call 1 回・外部効果 1 つ・audit の記録 1 つが対応し、[Capability Model仕様](capability-model.md) §8 の adapter `create_dir`（1 つの `RelativePath` を取る）とも、本書の「許可された操作の失敗は `host` エラー（既存ディレクトリへの `mkdir` など）」とも合う（[マニフェスト](manifesto.md) 原則 7・8、優先順位の「小さく監査可能な中核 > 広範な組み込み機能」）。親が無い `mkdir` が `host` エラーになることは `tests/fs_builtin_host_call_charge.rs` がすでに前提にしている（原則 9）。採らなかった案B（実装を再帰にする fix スライスを足す）は、1 回の呼び出しで複数の外部効果が起き、途中の各ディレクトリの capability 判定・host call の課金・途中で失敗したときの残り方を新たに決める必要があり、中核を広げるため採らない（原則 8）。既に実装されている挙動の記述の訂正で、仕様 revision は 0.21 のまま変えない。
+
+「エラーの kind とメッセージ（正本）」の表の「`exit` の引数が2個以上」の行は、loop:drift #487 の D-147 を受けて、実装（kind `argument`、message_id `argument.exit_arity`。`src/builtin_core.rs` の `exit` の arity 検査）に合わせて足した。それまでは `exit` の 2 個以上の引数も「builtin arity」の行の文言になるように読めたが、実装は tree・`--vm` とも `exit` 専用の文言を返す。整合点検で機械的なずれとした（判断を要さない記述の訂正）ので、仕様 revision は 0.21 のまま変えない。
+
 ### 逸脱一覧（目標仕様に対する現在の逸脱）
 
-本書の本文は目標の仕様であり、現在の実装との差（逸脱）はこの表にだけ書く（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。表にある挙動へ依存するコードは移植可能とみなさない。解消した行は削除する。ツリーウォーク版と `--vm` 版の差、および本書の規範との差は、整合点検（loop:drift #382）で確かめた範囲で表に無かった。その後に issue #358 で見つかった `for` の反復列の差を表に足し（解消済み）、issue #399 の `path_join` の途中の長さの差を足した。loop:drift #395 の D-90 で、issue #393 のステップ上限の行番号の差を足した（解消済み）。issue #365 で見つかった `--vm` 版の `for` の隠しローカルの差を足した（解消済み）。loop:drift #475 の D-142 で、debug build の `--vm` 版で builtin の callback を通る再帰が深度上限の手前で host を abort させる差を足した。
+本書の本文は目標の仕様であり、現在の実装との差（逸脱）はこの表にだけ書く（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。表にある挙動へ依存するコードは移植可能とみなさない。解消した行は削除する。ツリーウォーク版と `--vm` 版の差、および本書の規範との差は、整合点検（loop:drift #382）で確かめた範囲で表に無かった。その後に issue #358 で見つかった `for` の反復列の差を表に足し（解消済み）、issue #399 の `path_join` の途中の長さの差を足した。loop:drift #395 の D-90 で、issue #393 のステップ上限の行番号の差を足した（解消済み）。issue #365 で見つかった `--vm` 版の `for` の隠しローカルの差を足した（解消済み）。loop:drift #475 の D-142 で、debug build の `--vm` 版で builtin の callback を通る再帰が深度上限の手前で host を abort させる差を足した。loop:drift #487 の D-143 で、fix-repl-import-gate（PR #446）で解消済みの REPL の import の行を削除した。
 
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
-| REPL（tree・VM）の import は link 時の resolver gate を通らず、import root を要さずに現在の作業ディレクトリからの相対パスで解決され、profile にかかわらず `TSUMUGI_SANDBOX` を読む。import chain の深度も link で検証されず、129 段目は評価器内蔵 `ModuleLoader` の `import` ランタイムエラー `import 失敗: ネストが深すぎます (上限: 128)` になり、REPL は次の入力へ進む（詳細は[次期意味論・実装決定](semantic-decisions.md)の逸脱一覧の import chain の深度上限の行）。目標は、REPL もファイル・標準入力と同じく各入力を link 時に import root の下で解決し（未許可なら拒否）、深度も link 時に検証し、`TSUMUGI_SANDBOX` を読まないことである。両 engine 共通で、[Capability Model仕様](capability-model.md) の目標（§10・§14.3・§14.4）との差でもあり、詳細は同仕様の逸脱一覧の REPL の import の行にある | 「モジュール / import」の「制約」、「実行安全性」の「import chain深度制限」、[Capability Model仕様](capability-model.md) §10・§14.3・§14.4 | E7（tree）、E9 の VM file/stdin 統合で据え置いた VM REPL |
 | `--vm` 版で `map` / `filter` / `each` の callback から同じ関数を呼ぶ再帰（`fn rec(x)` の本体が `return map([x], rec)` で、`print(rec(1))` を実行する）は、debug build では呼び出しの深度上限 128 に届く前に Rust の stack（`src/main.rs` の 8 MiB の実行スレッド `tsumugi-main`）を使い切り、`thread 'tsumugi-main' has overflowed its stack` で host process が abort する（exit 134）。目標は「コールフレーム深度制限」の「プロセスクラッシュ前にランタイムエラー化する」「ツリーウォーク版・VM版で同じ境界・同じメッセージ」で、ツリーウォーク版は同じスクリプトで「スタックオーバーフロー: 再帰が深すぎます (上限: 128)」のランタイムエラー（exit 1）になる。release build の `--vm` 版も同じランタイムエラー（exit 1）で、abort は debug build だけである。callback を通らない直接の再帰（`return rec(x)`）は debug build の `--vm` 版でも同じランタイムエラー（exit 1）になる。callback は VM の `Vm::call_fn_value`（`src/vm.rs`）を通る。main 2d37fe0 で確かめた（`cargo build` → `target/debug/tsumugi --vm`）。[脅威モデル](threat-model.md) の TM-AT-07 との差でもある | 「実行安全性」の「コールフレーム深度制限」 | —（fix スライス fix-vm-callback-recursion-stack で直す。loop:drift #475 D-142） |
 
 この表は loop:drift #382 の D-82 を受けて、それまでの箇条書きの「現在の既知非適合」（詳細の参照先をロードマップとしていた）から移した。表に載せたのは、整合点検の輪番で tree・VM とも今も成り立つことを確かめた REPL の import の 1 行だけである。逸脱一覧の形に移す案（Q1=A）は判断役が選択した（issue #382）。理由: spec の実装状態の正本を各 spec の逸脱一覧 1 つとする [ドキュメント運用ガイド](documentation-guide.md)「状態の正本は粒度ごとに 1 箇所だけ」に合わせ、同ガイドの移行の規則（輪番で事実を確かめたものから寄せる）どおりに移す。参照先だったロードマップには該当する節も ID も無く、状態の正本が読み手に分からなかった（[マニフェスト](manifesto.md) 原則 9）。採らなかった案B（次に本書に触れる done の実装 PR まで今の形のままにする）は、その PR がいつ来るか決まっておらず、その間ロードマップと本書に状態が分かれたままになるため採らない。
@@ -684,17 +687,19 @@ import はプログラムの実行を始める前にすべて解決する。impo
 
 ### 循環 import
 
-- 同じファイルが正常に import 済みの場合、2回目以降はスキップされる（エラーにはならない）
+- 同じファイルが正常に import 済みの場合、2回目以降はスキップされる（エラーにはならない）。これは循環でない重複（A と B がどちらも C を import するなど）の扱いである
 - 読み込み・パース・実行に失敗した import は完了扱いにせず、同じパスを再試行できる
-- これにより循環 import が安全に処理される
+- import の途中にあるファイルへ戻る循環（A → B → A のように、現在処理中の import chain にあるファイルを再び import する）は、実行開始前の link 時に拒否する。拒否は catch できず、1文も実行せずに診断 `import の循環を検出しました: {chain}`（`{chain}` は循環したモジュールを ` -> ` でつないだもの）を標準エラーへ出して終了コード 1 で終わる。ツリーウォーク版と `--vm` 版で同じである（[組み込みAPI仕様](embedding-api.md) §5 の link の検証、`LinkError::Cycle`）
+
+本節の循環の扱いは、loop:drift #487 の D-144 を受けて、それまでの「2回目以降はスキップされ、循環 import が安全に処理される（エラーにはならない）」から、実装（link 時の `LinkError::Cycle`）に合わせて書き直した。spec を実装に合わせる案（Q1=A）は判断役が選択した（issue #487）。理由: import は名前空間を分けずに展開するので、循環を skip して進めると、循環の途中のモジュールは相手の定義がまだ無い状態で動き、結果が import の順に依存する。拒否なら 1 文も実行せずに閉路を示して止まる（[マニフェスト](manifesto.md) 原則 5・6、優先順位の「構造化された停止・失敗 > best-effort での実行継続」）。[組み込みAPI仕様](embedding-api.md) §5（link は循環を実行前に検証）、[設計](design.md)「import の重複と循環」、[次期意味論・実装決定](semantic-decisions.md) §3.4 の `import.cycle`（PR #480 Q2=A）、`tests/fixtures/import_circular.expected_err` とも合い、tree・`--vm` で同じ動きがテストで固定済みである（原則 9）。循環でない重複の skip は今も正しいので残した。採らなかった案B（実装を spec に合わせ、既訪問のモジュールを skip して成功させる fix スライスを足す）は、決定・テスト済みの link の graph の判定を覆して変更が大きく（原則 8）、途中まで定義されたモジュールを黙って通すほうが結果を説明しにくい（原則 5）ため採らない。既に実装されている挙動の記述の訂正で、`LanguageRevision` で分岐する言語挙動の変更ではないため、仕様 revision は 0.21 のまま変えない。
 
 ### 制約
 
 - import はプログラムのトップレベルでのみ使用できる。関数・条件分岐・ループ・`try` / `catch`・複数行ラムダのブロック内に記述すると、パスの読み込み前にパースエラー `import はトップレベルでのみ使用できます` になる
-- root scriptを数えず、現在処理中のimport chainは最大128ファイル。異なるファイルへの129段目のimportがあると、実行開始前のlink時に拒否する。拒否はcatchできず、1文も実行せずに診断 `import のネストが深すぎます (上限: 128)` を標準エラーへ出して終了コード 1 で終わる。ツリーウォーク版と `--vm` 版で同じである（「実行安全性」の「import chain深度制限」）。既訪問パスは深度検査前にスキップされるため、循環importはこの上限を消費しない
+- root scriptを数えず、現在処理中のimport chainは最大128ファイル。異なるファイルへの129段目のimportがあると、実行開始前のlink時に拒否する。拒否はcatchできず、1文も実行せずに診断 `import のネストが深すぎます (上限: 128)` を標準エラーへ出して終了コード 1 で終わる。ツリーウォーク版と `--vm` 版で同じである（「実行安全性」の「import chain深度制限」）。正常にimport済みのパス（循環でない重複）は深度検査前にスキップされ、この上限を消費しない。循環importは上の「循環 import」のとおりlink時に拒否する
 - import されたファイル内の `let` 宣言・`fn` 定義がすべて現在のスコープに展開される（名前空間は分離されない）
 - REPL での import も、ファイル・標準入力と同じく入力ごとに実行開始前の link 時に import root の下で解決され、import root が許可されていなければ link 時に拒否される（[Capability Model仕様](capability-model.md) §10）。現在の作業ディレクトリからの相対の import が欲しいときは `--allow-import-root default=.` を明示する
-- ファイル・標準入力・REPL の import は `TSUMUGI_SANDBOX` を読まない（import の許可は import root だけで決まる。[Capability Model仕様](capability-model.md) §14.3・§14.4）。現在の実装との差は冒頭の「逸脱一覧」にある
+- ファイル・標準入力・REPL の import は `TSUMUGI_SANDBOX` を読まない（import の許可は import root だけで決まる。[Capability Model仕様](capability-model.md) §14.3・§14.4）
 
 ## エラー処理（try / catch）
 
@@ -792,7 +797,7 @@ end
 - リスト/辞書以外へのインデックス代入
 - `to_int` / `floor` / `ceil` / `round` の変換失敗（`NaN` / `±Infinity` / i64 範囲外）
 - `file_size` のサイズが i64 で表現できない（`int_overflow`）
-- `print` の出力失敗（`io`）— 出力先が閉じられた場合など
+- `print` の出力失敗（`host`）— 出力先が閉じられた場合など
 
 上記は例であり、網羅ではない。`e["type"]` で得られる種別は次のとおり。
 
@@ -825,6 +830,7 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 | 非callableの呼び出し | `type` | `呼び出せない型です: {type}` |
 | user関数arity | `argument` | `{callable} の引数個数が一致しません: 期待 {expected}, 実際 {actual}` |
 | builtin arity | `argument` | `{builtin} の引数個数が一致しません: 期待 {expected}, 実際 {actual}` |
+| `exit` の引数が2個以上 | `argument` | `exit() は引数0〜1個ですが、{actual}個渡されました` |
 | builtin argument型 | `builtin_type` | `{builtin} の第 {position} 引数は {expected} である必要があります: {type}` |
 | callback非callable | `type` | `{builtin} のコールバックは呼び出し可能である必要があります: {type}` |
 | callback arity | `argument` | `{builtin} のコールバック引数個数が一致しません: 期待 1, 実際 {actual}` |
@@ -849,11 +855,14 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 - import 先ファイルの構文エラー — `import` はトップレベル限定のため `try` の内側に置けない
 - import root が許可されていない import — 実行開始前の link 時に拒否するため（「モジュール / import」の「パス解決」）
 - import chain の深度上限（129 段目の import）— 実行開始前の link 時に拒否するため（「実行安全性」の「import chain深度制限」）
+- 循環 import — 実行開始前の link 時に拒否するため（「モジュール / import」の「循環 import」）
 - 予算超過（`limit`・`collection_limit`・`string_limit`・`source_limit`・`heap_limit`・`io_limit`）— 予算超過は実行の停止であり、script の `try` / `catch` から捕捉できない（[実行予算・協調実行仕様](execution-control.md) §2 の不変条件 3）
 
 ### 出力の失敗
 
-`print` は標準出力への書き込みに失敗した場合、`io` 種別のランタイムエラーになる。パイプの読み取り側が先に終了した場合（`tsumugi script.tsg | head -1` など）もこれに該当し、捕捉しなければ診断を表示して終了コード1で終わる。CLI自身のREPLプロンプトやバナーの出力に失敗した場合は、スクリプトのエラーではなくCLIの診断として報告する。
+`print` は標準出力への書き込みに失敗した場合、`host` 種別のランタイムエラー（`host function の実行に失敗しました: print (stdout)`）になる。パイプの読み取り側が先に終了した場合（`tsumugi script.tsg | head -1` など）もこれに該当し、捕捉しなければ診断を表示して終了コード1で終わる。CLI自身のREPLプロンプトやバナーの出力に失敗した場合は、スクリプトのエラーではなくCLIの診断として報告する。
+
+本節と「キャッチできるエラー」の `print` の行は、loop:drift #487 の D-145 を受けて、`io`（`標準出力への書き込みに失敗しました`）から実装の `host` に書き直した。spec を実装に合わせる案（Q1=A）は判断役が選択した（issue #487）。理由: `print` は Stdout adapter を通る adapter-backed builtin で、[Capability Model仕様](capability-model.md) §4 は adapter の失敗を catch 可能な canonical `host` error とする。[次期意味論・実装決定](semantic-decisions.md) §3.4 にも「host adapter失敗」の行があり、stdout だけを `io` にすると同じ規則が 2 つに割れる（[マニフェスト](manifesto.md) 原則 5）。実装は tree・`--vm` とも `host` で、`tests/integration.rs` が固定している（原則 9）。採らなかった案B（実装を `io` に戻す fix スライスを足す）は、capability-model §4 の 1 つの規則を割り、C4 で決めて固定したテストも戻すことになるため採らない（原則 5・8）。`e["type"]` の種別の一覧の `io` は、種別（`ErrorKind::Io`）が実装に残っているので一覧からは外していない（現在の実装に `io` を発生させる経路は無い）。既に実装されている挙動の記述の訂正で、仕様 revision は 0.21 のまま変えない。
 
 ## 組み込み関数
 
@@ -890,7 +899,7 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 | `format_time(timestamp, format)` | タイムスタンプをUTC固定でフォーマット（%Y, %m, %d, %H, %M, %S, %z, %Z）。`timestamp` は整数のみで、Floatは `builtin_type` エラー。`%z` は常に `+0000`、`%Z` は常に `UTC` という UTC 固定の定数に展開し、OS・ロケール・TZ 設定に依存しない。これら以外の未知記号はそのまま出力に残る（semantic-decisions.md §20） |
 | `path_exists(path)` | パスが存在すれば true |
 | `path_join(parts...)` | パーツを結合してパス文字列を返す。全引数はStrである必要があり、非Strは左から順に検査して最初の1つで `builtin_type` エラー（結合は開始しない）。引数0個は空文字列。正規化・存在確認はせず、separator/absolute component/prefixの扱いは実行OSのRust `PathBuf` と同じ。引数を左から1つずつ結合し、途中の長さが `max_single_string_bytes`（[実行予算・協調実行仕様](execution-control.md) §5.3）を超えた時点で、後ろの引数が absolute component で置き換える場合でも結合を止めて予算超過（`SingleStringBytes`）になる |
-| `mkdir(path)` | ディレクトリを再帰的に作成。成功で true |
+| `mkdir(path)` | ディレクトリを 1 つ作成する（再帰的には作らない）。親ディレクトリが無い場合と既存のディレクトリの場合は `host` エラー（`host function の実行に失敗しました: mkdir (filesystem)`）。途中のディレクトリが要るときは親から順に呼ぶ。成功で true |
 | `remove(path)` | ファイルまたは空ディレクトリを削除。final symlinkはlink自体だけを削除する。成功で true |
 | `remove_dir(path)` | **空ディレクトリのみ**を削除する。非空ディレクトリは削除しない（再帰削除は `remove_tree`）。成功で true |
 | `remove_tree(path)` | ディレクトリを中身ごと**再帰削除**する。final symlinkはlink自体だけを削除し、targetをたどらない。成功で true |
@@ -989,7 +998,7 @@ CLI では環境変数 `TSUMUGI_MAX_COLLECTION_SIZE` で、List/Dictの要素数
 
 ### ファイルI/Oサンドボックス
 
-CLI の既定（safe profile）では、ファイル操作の範囲は `--fs-root` / `--fs-op` で許可した root と操作に限られ、許可が無ければ全て拒否する（[Capability Model仕様](capability-model.md) §14.1・§14.2）。ファイル操作に関して `TSUMUGI_SANDBOX` を読むのは `--profile legacy` のときだけである（同 §14.3）。import の許可は import root だけで決まり、ファイル・標準入力から実行するスクリプトの import は `TSUMUGI_SANDBOX` を読まない（「モジュール / import」の「制約」）。現在の実装との差は冒頭の「逸脱一覧」にある。
+CLI の既定（safe profile）では、ファイル操作の範囲は `--fs-root` / `--fs-op` で許可した root と操作に限られ、許可が無ければ全て拒否する（[Capability Model仕様](capability-model.md) §14.1・§14.2）。ファイル操作に関して `TSUMUGI_SANDBOX` を読むのは `--profile legacy` のときだけである（同 §14.3）。import の許可は import root だけで決まり、ファイル・標準入力・REPL の import は `TSUMUGI_SANDBOX` を読まない（「モジュール / import」の「制約」）。
 
 `--profile legacy` では、環境変数 `TSUMUGI_SANDBOX` でファイル操作（read_file, write_file, append_file 等）の対象パスを制限する。
 
@@ -1047,11 +1056,11 @@ ListとDictの入れ子の深さを256に制限する。深さが際限なく増
 
 ### import chain深度制限
 
-現在処理中の非循環import chainを128ファイルに制限する。root scriptは数えず、正規化済みの既訪問パスは深度を消費せずスキップする。
+現在処理中の非循環import chainを128ファイルに制限する。root scriptは数えず、正常にimport済みのパス（循環でない重複）は深度を消費せずスキップする。循環importはlink時に拒否する（「モジュール / import」の「循環 import」）。
 
 - 上限: 128ファイル
 - 129段目: 実行開始前のlink時に拒否する。catchできず、1文も実行せずに診断 `import のネストが深すぎます (上限: 128)` を標準エラーへ出して終了コード 1 で終わる
-- 対象: ファイル・標準入力・REPLのimport。深度はlinkがmodule graphを確かめるときに検証する（[組み込みAPI仕様](embedding-api.md) §5）。ツリーウォーク版と`--vm`版で同じ。REPLの現在の差は冒頭の「逸脱一覧」にある
+- 対象: ファイル・標準入力・REPLのimport。深度はlinkがmodule graphを確かめるときに検証する（[組み込みAPI仕様](embedding-api.md) §5）。ツリーウォーク版と`--vm`版で同じ
 - 設定変更: 不可（コンパイル時定数）
 
 ### TSUMUGI_* 環境変数の保護

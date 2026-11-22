@@ -1,4 +1,4 @@
-# 循環 import テスト: B → A（Aは既に import 済みなのでスキップ）
+# 循環 import テスト: B → A（A は import の途中で、完了していないので循環になる）
 import "import_circular_a.tsg"
 
 fn from_b()
