@@ -112,7 +112,7 @@ pub struct Vm {
     /// rollback journal entry の heap 課金が上限を超えたとき、次の per-instruction step
     /// 課金境界で surface する保留エラー（REV-015 PR-d）。checkpoint 記録は `pop` など
     /// 多数の infallible 経路から呼ばれるため、その場で `Result` を返さず、ここへ退避し
-    /// て `count_step` で `BudgetExceeded(HeapBytes)` を返す。既定上限では発生しない。
+    /// て `charge` で `BudgetExceeded(HeapBytes)` を返す。既定上限では発生しない。
     pending_heap_stop: Option<ControlStop>,
 
     /// instruction watchdog の tick 数（semantic-decisions §17.7 層1、execution-control §14 F-1）。
@@ -1870,7 +1870,7 @@ impl Vm {
     ///
     /// checkpoint 記録は `pop` など多数の infallible 経路から呼ばれるため、その場で
     /// `Result` を返さず、超過時は `pending_heap_stop` へ退避して次の per-instruction
-    /// step 課金境界（[`Vm::count_step`]）で surface する。保持する旧 value の到達
+    /// step 課金境界（[`Vm::charge`]）で surface する。保持する旧 value の到達
     /// payload（List/Dict/String body）は shared backing の `Tracked` が entry の握る
     /// `Rc` で生き続けるため既に live heap に計上されており、ここで再課金しない（§5.2）。
     /// 台帳を持たない文脈では untracked（無課金）で包む。
