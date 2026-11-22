@@ -1276,3 +1276,18 @@ acceptance = ["DSW-AT-01..04"]
 design_pr  = 472
 impl_pr    = 473
 order      = 117
+
+# loop:drift #475 の D-142（機械的。実装の変更が要る）で language-spec と threat-model の逸脱一覧に足した行の fix（loop-runbook §12.3、
+#   ずれの修正の PR で追加）。debug build の `--vm` で map / filter / each の callback（Vm::call_fn_value）を通る再帰が、深度上限 128 の手前で
+#   host stack を使い切って abort する（tree と release build の --vm は構造化 error）。実装の範囲・受入基準は設計 PR で spec の小節に書く（todo）。
+#   直し方（callback 1 段あたりの Rust stack の消費を減らすか、host stack の残量で止めるかなど）は設計で決める。parent は 128 user frame の
+#   統一（depth-counting）を持つ REV-012。
+# order は loop-runbook §12.3 の 1 の既定（`すり抜け` の印が無い D-N から作るもの: 今あるすべての ready より後。今の ready は F-2b の 26）を
+#   満たす、すべてのスライスより後の 118 に置いた（fix-dangling-final-symlink-write の 117 と同じ置き方）。
+#   §6.3 の分類は非該当（拒否・課金をすり抜けて通るのでなく、abort で止まる。fix-closure-capture-chain-stack と同じ）。
+[[slice]]
+id         = "fix-vm-callback-recursion-stack"
+title      = "debug build の --vm で map / filter / each の callback を通る再帰が深度上限 128 の手前で host stack を使い切って abort するのを、tree と同じ構造化 error にする（language-spec「コールフレーム深度制限」、threat-model TM-AT-07、loop:drift #475 D-142）"
+status     = "todo"
+parent     = "REV-012"
+order      = 118
