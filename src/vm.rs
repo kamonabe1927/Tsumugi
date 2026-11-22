@@ -311,58 +311,9 @@ impl Vm {
         self.frames.len().saturating_sub(1)
     }
 
-    /// root source と import source を予算へ課金する（REV-015 Slice 2、§5.3）。
-    ///
-    /// `Link` フェーズの課金であり、`run` の前に呼ぶ。tree evaluator の
-    /// `Evaluator::charge_link` と同じ規則で、root を 1 本の source として `charge_source`
-    /// し、初めて解決した各 import module を `charge_source`（`source_bytes`）と
-    /// `charge_import`（`import_bytes`）の両方へ課金する。超過は catch 不能 terminal
-    /// として既存 error へ写像する。両 engine で観測挙動を一致させる。
-    pub fn charge_link(
-        &mut self,
-        root_source_bytes: u64,
-        loaded: &[crate::module::LoadedModule],
-    ) -> Result<Vec<(std::path::PathBuf, Rc<crate::value::HeapToken>)>, TsumugiError> {
-        // live heap は tracked backing の生成/drop で逐次維持する（REV-015 案A/PR-b/PR-c）。
-        // collection・String・cell・関数 instance header はすべて per-drop 追跡されるため、
-        // 同じ台帳を跨ぐ実行では pre-existing な live heap が自動的に持ち越され、Link 境界で
-        // baseline を再走査する必要がない（再走査すると tracked 分を二重計上する）。よって
-        // baseline 再課金は行わない（tree engine の `Evaluator::charge_link` と対称）。
-        // `charge_context_baseline` は fresh ledger モデルの埋め込み API 用に残す。
-        //
-        // imported module record の live heap token は呼び出し側（loader 所有者）が
-        // `loaded` set と寿命を揃えて保持できるよう戻り値で返す（REV-015 PR-d）。
-        let mut record_tokens: Vec<(std::path::PathBuf, Rc<crate::value::HeapToken>)> = Vec::new();
-        self.budget
-            .charge_source(root_source_bytes, ExecutionPhase::Link)
-            .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, 0))?;
-        for module in loaded {
-            self.budget
-                .charge_source(module.byte_len, ExecutionPhase::Link)
-                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, module.line))?;
-            self.budget
-                .charge_import(module.byte_len, ExecutionPhase::Link)
-                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, module.line))?;
-            // imported module record を live heap へ課金する（REV-015 PR-d）。tree engine
-            // の `Evaluator::charge_link` と同じ規則（canonical path の UTF-8 byte 長）で
-            // 課金し、token を呼び出し側（`ModuleLoader` を所有する main.rs）へ返して
-            // `loaded` set と寿命を揃えて保持させる。VM は loader を所有しないため、
-            // tree engine のように内部で登録できない。
-            let module_id_bytes = module.path.as_os_str().len() as u64;
-            let token = Value::new_heap_token(
-                crate::budget::heap_size::imported_module_record(module_id_bytes),
-                &self.budget.heap_handle(),
-                ExecutionPhase::Link,
-            )
-            .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, module.line))?;
-            record_tokens.push((module.path.clone(), token));
-        }
-        Ok(record_tokens)
-    }
-
     /// link が確かめた graph から展開した module を予算へ課金する（capability-model §10、
-    /// execution-control §5.1・§5.3）。[`Self::charge_link`] の `ModuleId` 版で、root と各 module の
-    /// 保持 source の byte 長で `charge_source`・`charge_import` を行い、imported module record を
+    /// execution-control §5.1・§5.3）。`Link` フェーズの課金であり、`run` の前に呼ぶ。root を 1 本の
+    /// source として課金し、`expanded` の各 module について、保持 source の byte 長で `charge_source`・`charge_import` を行い、imported module record を
     /// 96 + `ModuleId` の UTF-8 byte 長で heap に課金する。token は呼び出し側（main.rs）が実行の
     /// 寿命で持つ。
     pub fn charge_link_graph(

@@ -964,6 +964,25 @@ impl LinkedScript {
     }
 }
 
+impl LinkedScript {
+    /// link が読んだ module source を `root`（この link の root を parse した program）と合わせて
+    /// 再 parse し、import の展開に使う [`crate::module::GraphModules`] を作る（capability-model §10）。
+    pub(crate) fn graph_modules(
+        &self,
+        root: &Program,
+    ) -> Result<crate::module::GraphModules, String> {
+        crate::module::GraphModules::prepare(
+            root,
+            self.0.import_graph.nodes.iter().filter_map(|node| {
+                self.0
+                    .module_sources
+                    .get(&node.module_id)
+                    .map(|text| (&node.module_id, node.source_hash, &**text))
+            }),
+        )
+    }
+}
+
 impl std::fmt::Debug for LinkedScript {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LinkedScript")
@@ -1922,14 +1941,13 @@ impl ExecutionContext {
         Ok(())
     }
 
-    /// 評価器内蔵の `ModuleLoader` の相対 import 解決・自己再 import 防止に使う script path を
-    /// 設定する。
+    /// script path を設定する。
     ///
-    /// [`Engine::run`]・[`Engine::run_audited`] の import には効かない（link が確かめた graph から
-    /// 展開するため、capability-model §10）。`ModuleLoader` を使う経路（scheduler の handle 経路）
-    /// のためと、公開 API の互換のために残す。
+    /// import は link が確かめた graph からだけ展開する（capability-model §10）ので、この値は
+    /// import の解決に使われない（相対 import の基準は resolver の mount が決める）。公開 API の
+    /// 互換のために引数を受け取るだけで、何も保持しない。
     pub fn set_script_path(&mut self, path: impl AsRef<std::path::Path>) {
-        self.evaluator.set_base_dir(path.as_ref());
+        let _ = path;
     }
 
     /// 現在の予算使用量 snapshot を返す（仕様第6節 `BudgetUsage`）。
@@ -6577,8 +6595,8 @@ mod c6c_tests {
     fn emb_at_05_run_does_not_call_resolver() {
         let engine = Engine::builder().build().unwrap();
         // run するため root を retain=true で compile し、import は default routing で解決する。
-        // root 本文は import した名前を使わない（評価器の ambient ModuleLoader は tempdir を持たない
-        // ため、ここでは import 解決を link 層のみで観測し、run は root の素の文だけ実行する）。
+        // root 本文は import した名前を使わない（ここでは import 解決を link 層のみで観測し、
+        // run は root の素の文だけ実行する）。
         let (resolver, calls) = CountingResolver::new(&[("@default/a", "let a = 1\n")]);
         let script = engine
             .compile(

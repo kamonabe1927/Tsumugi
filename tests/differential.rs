@@ -183,7 +183,7 @@ fn run_vm_single(source: &str, limits: Limits) -> (BudgetUsage, Result<(), Tsumu
     // tree の `run()` は root source を `charge_link` で課金する。VM 単発の `Vm::new().run()` は
     // この経路を通らず source counter が 0 のままになるため、tree と対称に root source を課金して
     // 比較を apples-to-apples にする（harness 側だけの対称化で prod 変更は無い）。
-    if vm.charge_link(source.len() as u64, &[]).is_err() {
+    if vm.charge_link_graph(source.len() as u64, &[]).is_err() {
         return (
             vm.budget_usage(),
             Err(TsumugiError::runtime_with_kind(
@@ -344,7 +344,7 @@ fn vm_usage_per_input(inputs: &[&str]) -> Vec<BudgetUsage> {
         let tokens = Lexer::new(input).tokenize();
         let program = Parser::new(tokens).parse().expect("パースに失敗");
         // source 会計は実行可否と独立に行う（charge_link が超過なら以降は skip）。
-        if vm.charge_link(input.len() as u64, &[]).is_err() {
+        if vm.charge_link_graph(input.len() as u64, &[]).is_err() {
             snapshots.push(vm.budget_usage());
             continue;
         }
@@ -998,44 +998,83 @@ fn stage_import_graph(fixture: &ImportGraphFixture) -> (std::path::PathBuf, Impo
     (root_path, dir)
 }
 
-/// tree arm: `Evaluator::new()`（standard budget 相当の既定）を `set_base_dir` で張って `run`。
-/// ambient `ModuleLoader` が import を解決し `charge_link` が source/import を課金する。
-fn run_tree_import_graph(root_path: &std::path::Path, root_source: &str) -> BudgetUsage {
-    let tokens = Lexer::new(root_source).tokenize();
-    let program = Parser::new(tokens).parse().expect("root のパースに失敗");
-    let mut evaluator = Evaluator::new();
-    evaluator.set_capabilities(print_capabilities());
-    evaluator.set_base_dir(root_path);
-    evaluator
-        .run(&program, root_source.len() as u64)
-        .expect("tree 実行は成功するはず");
-    evaluator.budget_usage()
+/// staging したディレクトリを `@default` mount にした resolver で root を link する（capability-model §10）。
+fn link_import_graph(
+    dir: &std::path::Path,
+    root_source: &str,
+) -> (tsumugi::embedding::Engine, tsumugi::LinkedScript) {
+    use tsumugi::embedding::Engine;
+    use tsumugi::{
+        CompileOptions, ExecutionId, FilesystemModuleResolver, LinkRequest, MonotonicClock,
+        MountName, OsDirectoryHandle, Source, SourceId, SymlinkPolicy, SystemMonotonicClock,
+    };
+
+    let pid = NonZeroU128::new(7).expect("non-zero");
+    let handle = OsDirectoryHandle::new(dir.to_path_buf(), pid, SymlinkPolicy::DenyAll);
+    let resolver = FilesystemModuleResolver::new(
+        pid,
+        [(MountName::new("default").expect("mount"), Arc::new(handle))],
+    )
+    .expect("resolver");
+    let caps = CapabilitySet::builder()
+        .module_resolver(Arc::new(resolver))
+        .expect("grant resolver")
+        .build();
+    let engine = Engine::builder().build().expect("engine");
+    let script = engine
+        .compile(
+            Source::new(SourceId::new("main").expect("id"), root_source),
+            &CompileOptions {
+                retain_source: true,
+            },
+        )
+        .expect("compile");
+    let clock: Arc<dyn MonotonicClock> = Arc::new(SystemMonotonicClock::new());
+    let budget = BudgetConfig::standard(clock.as_ref()).expect("budget");
+    let linked = engine
+        .link(
+            &script,
+            LinkRequest::new(
+                ExecutionId::new(NonZeroU128::new(1).expect("non-zero")),
+                caps,
+                budget,
+            ),
+        )
+        .expect("link は成功するはず");
+    (engine, linked)
 }
 
-/// VM arm: `ModuleLoader` で import を expand し、linked program を compile。`Vm::new` +
-/// `vm.charge_link(root_bytes, &loaded)` で tree と対称に source/import を課金してから `run`。
-fn run_vm_import_graph(root_path: &std::path::Path, root_source: &str) -> BudgetUsage {
-    use tsumugi::module::ModuleLoader;
+/// tree arm: `Engine::link` → `Engine::run`（link の graph から展開し、Link フェーズで source/import を課金する）。
+fn run_tree_import_graph(dir: &std::path::Path, root_source: &str) -> BudgetUsage {
+    use tsumugi::embedding::{ExecutionContext, ExecutionOutcome, ExecutionRequest};
+    use tsumugi::{MonotonicClock, SystemMonotonicClock};
 
-    let tokens = Lexer::new(root_source).tokenize();
-    let program = Parser::new(tokens).parse().expect("root のパースに失敗");
+    let (engine, linked) = link_import_graph(dir, root_source);
+    let clock: Arc<dyn MonotonicClock> = Arc::new(SystemMonotonicClock::new());
+    let budget = BudgetConfig::standard(clock.as_ref()).expect("budget");
+    let request = ExecutionRequest::new(budget, Arc::clone(&clock))
+        .expect("request")
+        .with_capabilities(print_capabilities());
+    let mut context = ExecutionContext::new(&engine);
+    match engine.run(&linked, &mut context, request) {
+        ExecutionOutcome::Completed { usage } => usage,
+        other => panic!("tree 実行は成功するはず: {other:?}"),
+    }
+}
 
-    // tree と同じ ambient loader で import を expand し、linked program と loaded 集合を得る。
-    let mut loader = ModuleLoader::new();
-    loader.set_base_dir(root_path);
-    let (linked, loaded) = loader
-        .link(&program)
-        .expect("VM arm の link は成功するはず");
-    let target = linked.as_ref().unwrap_or(&program);
-
+/// VM arm: 同じ link の graph を `expand_for_cli` で展開して compile し、`Vm::charge_link_graph` で
+/// tree と対称に source/import を課金してから `run`。
+fn run_vm_import_graph(dir: &std::path::Path, root_source: &str) -> BudgetUsage {
+    let (_engine, linked) = link_import_graph(dir, root_source);
+    let (program, expanded) = linked.expand_for_cli().expect("expand");
     let chunk = Compiler::new()
-        .compile(target)
+        .compile(&program)
         .expect("linked program の compile に失敗");
     let mut vm = Vm::new(chunk);
     vm.set_capabilities(print_capabilities());
-    // tree の `charge_link` と対称に root source + 各 import を課金する。
-    vm.charge_link(root_source.len() as u64, &loaded)
-        .expect("VM arm の charge_link は成功するはず");
+    let _tokens = vm
+        .charge_link_graph(root_source.len() as u64, &expanded)
+        .expect("VM arm の charge は成功するはず");
     vm.run().expect("VM 実行は成功するはず");
     vm.budget_usage()
 }
@@ -1043,8 +1082,9 @@ fn run_vm_import_graph(root_path: &std::path::Path, root_source: &str) -> Budget
 /// import graph を両 engine で link/charge し、source/import 会計軸が一致することを突合する。
 fn assert_import_graph_parity(fixture: &ImportGraphFixture) {
     let (root_path, _dir) = stage_import_graph(fixture);
-    let tree = run_tree_import_graph(&root_path, fixture.root);
-    let vm = run_vm_import_graph(&root_path, fixture.root);
+    let dir_path = root_path.parent().expect("root の親ディレクトリ");
+    let tree = run_tree_import_graph(dir_path, fixture.root);
+    let vm = run_vm_import_graph(dir_path, fixture.root);
     // source_count / import_count / source_bytes / import_bytes は engine 間不変軸（軸(A)）。
     assert_invariant_axes(fixture.label, &tree, &vm);
 }

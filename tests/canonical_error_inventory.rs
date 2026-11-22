@@ -28,14 +28,9 @@ fn run_vm(source: &str) -> TsumugiError {
     let program = tsumugi::parser::Parser::new(tokens)
         .parse()
         .unwrap_or_else(|errors| panic!("パースに失敗: {errors:?}"));
-    // import を実行前に解決する（AUD-030）。import の失敗も canonical error として
-    // 返るため、tree の `run()` と同じ経路をたどる。
-    let mut loader = tsumugi::module::ModuleLoader::new();
-    let (linked, _) = match loader.link(&program) {
-        Ok(linked) => linked,
-        Err(error) => return error,
-    };
-    let target = linked.as_ref().unwrap_or(&program);
+    // import は link が確かめた graph からだけ展開する（capability-model §10）ので、この harness の
+    // source は import を含まない。
+    let target = &program;
     // VM は break/continue のループ外使用や arity などを compile 時に検出する。
     // tree は同じ診断を実行時に返すが、canonical な kind/message/line は一致する。
     let chunk = match tsumugi::compiler::Compiler::new().compile(target) {
@@ -539,85 +534,6 @@ fn error_line_matches_across_engines_in_various_positions() {
             Some(ErrorKind::Type),
             "{}: kind 不一致",
             case.label
-        );
-    }
-}
-
-// =============================================================
-// import 軸: import 解決失敗の canonical error が tree/VM で一致する（3.4）
-// =============================================================
-
-#[test]
-fn import_errors_are_identical_across_engines() {
-    struct ImportCase {
-        label: &'static str,
-        source: &'static str,
-        kind: ErrorKind,
-        message: &'static str,
-        line: usize,
-    }
-
-    let cases = [
-        ImportCase {
-            label: "存在しないモジュール",
-            source: "import \"tests/fixtures/does_not_exist.tsg\"\n",
-            kind: ErrorKind::Import,
-            message: "import に失敗しました: モジュールを読み込めません: tests/fixtures/does_not_exist.tsg",
-            line: 1,
-        },
-        ImportCase {
-            label: "構文が不正なモジュール",
-            source: "import \"tests/fixtures/import_bad_syntax.tsg\"\n",
-            kind: ErrorKind::Import,
-            // wrapper message へ原因 parse error の行・メッセージを保持する（REV-020）。
-            message: "import に失敗しました: モジュールの構文が不正です: tests/fixtures/import_bad_syntax.tsg (2行目: 想定外の文字: '@')",
-            line: 1,
-        },
-    ];
-
-    for case in cases {
-        let tree = run_tree(case.source);
-        let vm = run_vm(case.source);
-
-        assert_eq!(
-            (tree.kind(), tree.message(), tree.line()),
-            (vm.kind(), vm.message(), vm.line()),
-            "{}: import error が tree/VM で不一致",
-            case.label
-        );
-        assert_eq!(tree.kind(), Some(case.kind), "{}: kind 不一致", case.label);
-        assert_eq!(
-            tree.message(),
-            case.message,
-            "{}: message 不一致",
-            case.label
-        );
-        assert_eq!(tree.line(), case.line, "{}: line 不一致", case.label);
-    }
-}
-
-/// REV-020: import 先モジュールに構文エラーがある場合、import エラーの message へ
-/// 原因 parse error の行番号・元メッセージが保持される（原因診断を捨てない）。
-///
-/// `import_bad_syntax.tsg` は 2 行目に不正トークン `@` を含む。wrapper message へ
-/// `(2行目: 想定外の文字: '@')` が連結されることを tree/VM 両経路で確認する。
-#[test]
-fn import_parse_error_preserves_cause_in_message() {
-    let source = "import \"tests/fixtures/import_bad_syntax.tsg\"\n";
-    for (engine, error) in [("tree", run_tree(source)), ("VM", run_vm(source))] {
-        assert_eq!(
-            error.kind(),
-            Some(ErrorKind::Import),
-            "{engine}: import error を期待"
-        );
-        let message = error.message();
-        assert!(
-            message.contains("2行目"),
-            "{engine}: 原因の行番号が message に無い: {message}"
-        );
-        assert!(
-            message.contains("想定外の文字: '@'"),
-            "{engine}: 原因メッセージが message に無い: {message}"
         );
     }
 }

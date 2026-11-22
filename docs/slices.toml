@@ -715,7 +715,7 @@ order      = 90
 [[slice]]
 id         = "fix-handle-import-from-link"
 title      = "scheduler の handle 経路の import を link 済み graph から展開し、ModuleLoader と sandbox.rs の import 経路を外す（capability-model §10・execution-control §9.1、issue #327）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-handle-import-from-link 実装スライス（scheduler の handle 経路の import を link 済み graph から展開）" }
 acceptance = ["HIL-AT-01..04"]

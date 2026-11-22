@@ -105,7 +105,7 @@ pub struct StableError {
 /// per-template の安定 message ID の tag と文字列の単一テーブル（§2 の 1 テーブル集約）。
 ///
 /// 二重管理を避けるため、canonical constructor（error.rs / ast.rs / module.rs /
-/// builtin_core.rs / builtin.rs / sandbox.rs のクラス B constructor）と射影側 resolver
+/// builtin_core.rs / builtin.rs のクラス B constructor）と射影側 resolver
 /// [`message_id_for`] が、この単一のテーブルを参照する。各 tag は §3.4 の 1 テンプレート
 /// （= 1 constructor が生む 1 日本語テンプレート）に 1:1 で対応する。
 ///
@@ -120,6 +120,8 @@ pub mod message_id {
     macro_rules! message_ids {
         ($($name:ident = $value:expr => $id:expr;)*) => {
             $(
+                // 安定 ID の欠番を作らないため、constructor が無くなった tag（`SANDBOX_PATH_DENIED`）も表に残す。
+                #[allow(dead_code)]
                 pub(crate) const $name: NonZeroU16 = match NonZeroU16::new($value) {
                     Some(v) => v,
                     None => panic!("message_id tag must be non-zero"),
@@ -202,7 +204,7 @@ pub mod message_id {
         INT_OVERFLOW_ARITHMETIC = 37 => "int_overflow.arithmetic";
         INT_OVERFLOW_FILE_SIZE = 38 => "int_overflow.file_size";
 
-        // Sandbox（クラス B: 2 テンプレート）
+        // Sandbox（クラス B: 2 テンプレート。`SANDBOX_PATH_DENIED` は import 用の検査（sandbox.rs）の撤去で constructor が無い）
         SANDBOX_FILESYSTEM_DENIED = 39 => "sandbox.filesystem_denied";
         SANDBOX_PATH_DENIED = 40 => "sandbox.path_denied";
 

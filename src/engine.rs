@@ -67,7 +67,9 @@ impl Engine {
 
     /// ソースをパースし、再利用可能なスクリプトを作成する。
     ///
-    /// import の解決は実行コンテキストに依存するため、ここでは行わない。
+    /// import の解決は実行コンテキストに依存するため、ここでは行わない。import は handle の初回 poll の
+    /// Link フェーズで、context に grant された `module_resolver` を使って解決する（未 grant なら
+    /// resolver を呼ばずに `Denied` で失敗する、capability-model §10）。
     pub fn compile(&self, source: &str) -> Result<CompiledScript, Vec<TsumugiError>> {
         let mut lexer = Lexer::new(source);
         let tokens = lexer.tokenize();
@@ -78,6 +80,8 @@ impl Engine {
             program,
             // root source の生 UTF-8 byte 長（REV-015 Slice 2、source accounting）。
             source_bytes: source.len() as u64,
+            // handle の Link フェーズが import を link するために保持する（capability-model §10）。
+            source: source.into(),
         })
     }
 
@@ -283,6 +287,9 @@ pub struct CompiledScript {
     program: Program,
     /// root source の生 UTF-8 byte 長（REV-015 Slice 2 の source accounting）。
     source_bytes: u64,
+    /// root source 本文。handle の初回 poll の Link フェーズが、context の `module_resolver` で
+    /// import を link するために使う（capability-model §10、import が無ければ読まない）。
+    source: Arc<str>,
 }
 
 /// 実行間で維持する Tsumugi の状態。
@@ -326,9 +333,11 @@ impl ExecutionContext {
 
     /// スクリプトファイルの完全なパスを設定する。
     ///
-    /// 相対 import の解決と、スクリプト自身の再 import 防止に使われる。
+    /// import は link が確かめた graph からだけ展開する（capability-model §10）ので、この値は
+    /// import の解決に使われない（相対 import の基準は resolver の mount が決める）。公開 API の
+    /// 互換のために引数を受け取るだけで、何も保持しない。
     pub fn set_script_path(&mut self, path: impl AsRef<Path>) {
-        self.evaluator.set_base_dir(path.as_ref());
+        let _ = path;
     }
 
     /// `args()` が返すスクリプト引数の snapshot を設定する（AUD-018）。
@@ -978,11 +987,18 @@ impl ExecutionHandle<'_, '_, '_> {
             // handle 経路のすべての execution は transaction（submission journal を開始時点で
             // 張り、Completed / exit は commit、それ以外の terminal と drop は rollback。§10）。
             let program = &self.script.program;
-            match self
-                .context
-                .evaluator
-                .begin_execution(program, source_bytes, true)
-            {
+            // import は context の `module_resolver` で link し、その graph から展開する
+            // （resolver の呼び出しはこの Link フェーズだけ。Running 以降は 0 回、capability-model §10）。
+            let graph = match link_graph(self.script, &self.context.evaluator, repl_submission) {
+                Ok(graph) => graph,
+                Err(outcome) => return SlicePoll::Terminal(outcome),
+            };
+            match self.context.evaluator.begin_execution_from_graph(
+                program,
+                source_bytes,
+                true,
+                &graph,
+            ) {
                 Ok(()) => {
                     self.started = true;
                 }
@@ -1033,6 +1049,108 @@ impl ExecutionHandle<'_, '_, '_> {
             }
         }
     }
+}
+
+/// handle の Link フェーズで import を link し、展開に使う graph を作る（capability-model §10）。
+///
+/// import が無ければ空の graph を返す（resolver は呼ばない）。import があれば、context に grant された
+/// `module_resolver` で [`crate::embedding::Engine::link`] と同じ規則（cancel の観測 → resolver 未 grant は
+/// resolver 呼び出し 0 回の `Denied` → graph の解決・UTF-8 検証・module 単体 compile）を通す。
+/// 失敗は terminal outcome にして返し、1 文も実行しない。
+fn link_graph(
+    script: &CompiledScript,
+    evaluator: &Evaluator,
+    repl_submission: bool,
+) -> Result<crate::module::GraphModules, ExecutionOutcome> {
+    use crate::embedding::{
+        CompileOptions, Engine as EmbeddingEngine, ExecutionId, LinkRequest, Source, SourceId,
+    };
+
+    let fail = |error: TsumugiError| {
+        // REPL の入力は Link/Run を区別せず RuntimeError。
+        if repl_submission {
+            ExecutionOutcome::RuntimeError { error }
+        } else {
+            ExecutionOutcome::LinkError { error }
+        }
+    };
+    let internal = |detail: &str| fail(TsumugiError::internal(0, detail));
+
+    let has_imports = script
+        .program
+        .iter()
+        .any(|stmt| matches!(stmt, crate::ast::Stmt::Import { .. }));
+    if !has_imports {
+        return Ok(crate::module::GraphModules::default());
+    }
+
+    let engine = EmbeddingEngine::builder()
+        .build()
+        .map_err(|_| internal("import の link 用 Engine を作れません"))?;
+    let source_id = SourceId::new("<script>").map_err(|_| internal("source 識別子が不正です"))?;
+    let options = CompileOptions {
+        retain_source: true,
+    };
+    let compiled = engine
+        .compile(Source::new(source_id, &script.source), &options)
+        .map_err(|_| internal("import の link 用の compile に失敗しました"))?;
+    let operation_id = ExecutionId::new(std::num::NonZeroU128::MIN);
+    let request = LinkRequest::new(
+        operation_id,
+        evaluator.capabilities().clone(),
+        evaluator.budget_config(),
+    )
+    .with_cancellation(evaluator.cancellation_token());
+    let linked = engine
+        .link(&compiled, request)
+        .map_err(|error| link_failure_outcome(error, &fail))?;
+    linked
+        .graph_modules(&script.program)
+        .map_err(|_| internal("link が確かめた graph と import が合いません"))
+}
+
+/// link の失敗を handle の terminal outcome へ写す（execution-control §1.1）。
+///
+/// cancel / deadline は専用 terminal、それ以外は `fail`（`LinkError`、REPL の入力は `RuntimeError`）。
+/// message に host path・specifier 原文を含めない（capability-model §8.5）。
+fn link_failure_outcome(
+    error: crate::embedding::LinkError,
+    fail: &dyn Fn(TsumugiError) -> ExecutionOutcome,
+) -> ExecutionOutcome {
+    use crate::embedding::LinkError;
+    use crate::stable_error::message_id;
+
+    let import_error = |id, message: String| crate::module::import_error(0, id, message);
+    let error = match error {
+        LinkError::Cancelled => return ExecutionOutcome::Cancelled,
+        LinkError::DeadlineExceeded => return ExecutionOutcome::DeadlineExceeded,
+        LinkError::Denied(_) => TsumugiError::capability_denied(0, "module_resolver"),
+        LinkError::Resolve(host) => import_error(
+            message_id::IMPORT_UNREADABLE,
+            format!(
+                "import に失敗しました: モジュールを解決できません ({})",
+                host.code.as_str()
+            ),
+        ),
+        LinkError::InvalidModule { .. } => import_error(
+            message_id::IMPORT_SYNTAX,
+            "import に失敗しました: モジュールが不正です".to_string(),
+        ),
+        LinkError::Cycle { .. } => import_error(
+            message_id::IMPORT_UNREADABLE,
+            "import に失敗しました: import が循環しています".to_string(),
+        ),
+        LinkError::DepthExceeded { limit } => import_error(
+            message_id::IMPORT_DEPTH,
+            format!("import に失敗しました: import のネストが深すぎます (上限: {limit})"),
+        ),
+        LinkError::BudgetExceeded(_) => import_error(
+            message_id::IMPORT_UNREADABLE,
+            "import に失敗しました: link の予算を超過しました".to_string(),
+        ),
+        other => TsumugiError::internal(0, format!("import の link に失敗しました: {other:?}")),
+    };
+    fail(error)
 }
 
 /// [`ExecutionHandle::drive_one_slice`] の結果（REV-015 Slice 3 PR-d-2 / Slice 5 §4.3/§4.7）。

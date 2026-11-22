@@ -319,7 +319,7 @@ fn unqualified_path_requires_default_mount() {
 ///
 /// link 層の resolver が `@foo/bar.tsg` を mount `foo` へ routing して解決し、run 層は link が読んだ
 /// source から展開する（capability-model §10、fix-import-run-from-link-graph）。以前は run 層の
-/// 評価器内 `ModuleLoader` が `@foo/...` をリテラル相対 path として扱い import error だった。
+/// 評価器内の読み込み元が `@foo/...` をリテラル相対 path として扱い import error だった。
 #[test]
 fn at_syntax_import_runs_in_both_engines() {
     for use_vm in [false, true] {
@@ -398,10 +398,10 @@ fn relative_import_tree_requires_import_root() {
 /// E9: VM file/stdin も tree と対称に `--allow-import-root` が必須になった。
 ///
 /// E9 で VM file/stdin（`execute_vm_with_path`）は link 層の Engine resolver gate へ統合された。
-/// 旧挙動（VM は ModuleLoader に残り import root 無しで相対 import が動く、`relative_import_vm_
+/// 旧挙動（VM は評価器内の読み込み元に残り import root 無しで相対 import が動く、`relative_import_vm_
 /// still_works_without_import_root`）は**意図的に反転**し、resolver 未 grant + import は tree と同じく
 /// terminal `Denied`（exit 1、actionable 診断）になる。import root を grant すれば従来どおり
-/// `@default/...` routing で解決・実行できる（run 層は依然 ambient `ModuleLoader`）。
+/// `@default/...` routing で解決・実行できる（run 層は link の graph から展開する）。
 /// tree 版 `relative_import_tree_requires_import_root` と対称。
 #[test]
 fn relative_import_vm_requires_import_root() {

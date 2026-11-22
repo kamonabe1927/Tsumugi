@@ -5,6 +5,9 @@
 //! 固定する。本 FEAT（FEAT-001）は scheduler-core（admission + fairness/backpressure）の
 //! 範囲を対象とし、host pending（HostCallPending / waker）は FEAT-002 で追加する。
 
+#[path = "support/counting_resolver.rs"]
+mod counting_resolver;
+
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use tsumugi::{
@@ -1784,4 +1787,107 @@ fn trs_at_04_non_terminal_drop_still_releases_slot() {
     let _h2 = engine
         .create_execution(&script, &mut c2, ExecutionRequest::new())
         .expect("非 terminal の drop で active が解放される");
+}
+
+/// HIL-AT-02（grant あり・execution 中の resolver 0 回、TM-AT-24）: 呼ばれた回数を数える resolver を
+/// grant し、import を 2 本含む script を 1 slice ずつ poll すると、resolver は初回 poll の Link フェーズで
+/// import の数だけ呼ばれ、以後の poll では 0 回で、module の top-level が実行される。
+#[test]
+fn hil_at_02_resolver_called_only_in_link_phase() {
+    use std::sync::atomic::Ordering;
+
+    let engine = Engine::new();
+    let script = engine
+        .compile(
+            "import \"a.tsg\"\nimport \"b.tsg\"\nlet z = a1 + b1\nlet i = 0\nwhile i < 200\n  i = i + 1\nend\n",
+        )
+        .unwrap();
+    let (resolver, calls) = counting_resolver::CountingResolver::new(&[
+        ("@default/a.tsg", "let a1 = 1\n"),
+        ("@default/b.tsg", "let b1 = 2\n"),
+    ]);
+    let mut context = ExecutionContext::new();
+    context.set_capabilities(resolver.capabilities());
+
+    let mut handle = engine
+        .create_execution(&script, &mut context, ExecutionRequest::new())
+        .expect("admit");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "create_execution は link しない"
+    );
+
+    let small = PollSlice { max_fuel: 8 };
+    let first = handle.poll(small).expect("poll");
+    assert!(
+        matches!(first, PollResult::Yielded { .. }),
+        "1 slice では終わらないはず: {first:?}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "resolver は Link フェーズで import の数だけ呼ばれる"
+    );
+
+    let mut polls = 1;
+    loop {
+        match handle.poll(small).expect("poll") {
+            PollResult::Terminal { outcome, .. } => {
+                assert_eq!(
+                    outcome,
+                    ExecutionOutcome::Completed,
+                    "module の top-level が実行される"
+                );
+                break;
+            }
+            PollResult::Yielded { .. } => {
+                polls += 1;
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    2,
+                    "Running 以降の resolver 呼び出しは 0 回"
+                );
+            }
+            other => panic!("想定外: {other:?}"),
+        }
+    }
+    assert!(polls > 2, "複数 slice にまたがったはず: {polls}");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+/// HIL-AT-03（読み直さない）: on-disk に無い module を返す in-memory resolver で handle 経路の import が
+/// 実行され、CWD に同名のファイルがあっても読まれない。
+#[test]
+fn hil_at_03_import_uses_resolver_not_filesystem() {
+    use std::sync::atomic::Ordering;
+
+    // `tests/fixtures/import_lib.tsg` は CWD（crate root）に実在し、`fn add` を定義する。resolver は
+    // 同じ specifier に対し別の内容（`from_resolver`）を返すので、読まれたのがどちらかが分かる。
+    assert!(std::path::Path::new("tests/fixtures/import_lib.tsg").exists());
+    let engine = Engine::new();
+    let script = engine
+        .compile("import \"tests/fixtures/import_lib.tsg\"\nlet z = from_resolver + 1\n")
+        .unwrap();
+    let (resolver, calls) = counting_resolver::CountingResolver::new(&[(
+        "@default/tests/fixtures/import_lib.tsg",
+        "let from_resolver = 41\n",
+    )]);
+    let mut context = ExecutionContext::new();
+    context.set_capabilities(resolver.capabilities());
+
+    let mut handle = engine
+        .create_execution(&script, &mut context, ExecutionRequest::new())
+        .expect("admit");
+    match handle.poll(PollSlice::default()).expect("poll") {
+        PollResult::Terminal { outcome, .. } => {
+            assert_eq!(
+                outcome,
+                ExecutionOutcome::Completed,
+                "resolver の内容が展開される"
+            );
+        }
+        other => panic!("terminal を期待したが {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

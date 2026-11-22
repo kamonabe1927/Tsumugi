@@ -1071,10 +1071,8 @@ fn import_source_bytes_charged_allows_execution_within_limit() {
 //
 // `import_count_limit_gates_file_execution` が CLI の legacy env budget を subprocess で見るのに対し、
 // 本テストは tree arm の standard budget 経路を in-process で直接駆動し、N-1/N/N+1 境界と
-// 「chunk 蓄積前に拒否」を観測する。`Evaluator::with_budget` + ambient `ModuleLoader`
-// （`set_base_dir` + tempdir に staging した `.tsg`）で standard budget をそのまま使う。
-// `TSUMUGI_SANDBOX` は process 全体の `OnceLock` で並列テストに敵対的なので設定しない
-// （未設定時の sandbox は許容的）。
+// 「chunk 蓄積前に拒否」を観測する。`Evaluator::with_budget` + in-memory の graph
+// （`begin_execution_from_graph`）で standard budget をそのまま使う。
 
 /// stdout 書き込みを buffer へ写す capturing な [`Output`]。root body が 1 文でも実行されれば
 /// buffer に `print` 出力が入るため、「N+1 で 1 文も実行していない」ことを buffer の空で観測できる。
@@ -1124,34 +1122,58 @@ fn standard_budget_with(mutate: impl FnOnce(&mut tsumugi::BudgetConfig)) -> tsum
     config
 }
 
-/// `root_source` を tempdir に書き、`base_dir` を張った `Evaluator::with_budget(config)` で実行して
-/// `(結果, stdout buffer 文字列)` を返す。import は `imports`（ファイル名→本文）で staging する。
+/// `root_source` を in-memory の graph（`imports`: ファイル名→本文、`@default` mount）から展開する
+/// `Evaluator::with_budget(config)` で実行して `(結果, stdout buffer 文字列)` を返す。
+///
+/// link が確かめた graph からの展開（`begin_execution_from_graph`）と Link フェーズの課金を、
+/// filesystem も resolver も使わずに観測する。
 fn run_tree_in_process(
-    label: &str,
+    _label: &str,
     config: tsumugi::BudgetConfig,
     imports: &[(&str, &str)],
     root_source: &str,
 ) -> (Result<(), tsumugi::error::TsumugiError>, String) {
-    use tsumugi::eval::Evaluator;
+    use tsumugi::eval::{Evaluator, SliceOutcome};
     use tsumugi::lexer::Lexer;
+    use tsumugi::module::GraphModules;
     use tsumugi::parser::Parser;
-
-    let dir = TestDir::new(label);
-    for (name, body) in imports {
-        std::fs::write(dir.path.join(name), body).expect("import module の作成に失敗");
-    }
-    let root_path = dir.path.join("main.tsg");
-    std::fs::write(&root_path, root_source).expect("root script の作成に失敗");
+    use tsumugi::{ModuleId, SourceHash};
 
     let tokens = Lexer::new(root_source).tokenize();
     let program = Parser::new(tokens).parse().expect("root のパースに失敗");
 
+    let ids: Vec<ModuleId> = imports
+        .iter()
+        .map(|(name, _)| ModuleId::new(format!("@default/{name}")).expect("module id"))
+        .collect();
+    let hash = SourceHash::from_bytes([0; 32]);
+    let graph = GraphModules::prepare(
+        &program,
+        ids.iter()
+            .zip(imports)
+            .map(|(id, (_, body))| (id, hash, *body)),
+    )
+    .expect("graph の準備");
+
     let (caps, buffer) = capturing_stdout_capabilities();
     let mut evaluator = Evaluator::with_budget(config);
-    evaluator.set_base_dir(&root_path);
     evaluator.set_capabilities(caps);
 
-    let result = evaluator.run(&program, root_source.len() as u64);
+    let mut result = evaluator
+        .begin_execution_from_graph(&program, root_source.len() as u64, true, &graph)
+        .map_err(|(_, error)| error);
+    while result.is_ok() {
+        match evaluator.run_slice(u64::MAX) {
+            SliceOutcome::Terminal(outcome) => {
+                result = outcome;
+                break;
+            }
+            SliceOutcome::YieldedSliceFuel
+            | SliceOutcome::YieldedExplicit
+            | SliceOutcome::YieldedAuditQueue => {}
+            SliceOutcome::YieldedHostCall { .. } => panic!("host call は起きないはず"),
+        }
+    }
     let printed =
         String::from_utf8(buffer.lock().expect("buffer lock").clone()).expect("stdout は UTF-8");
     (result, printed)

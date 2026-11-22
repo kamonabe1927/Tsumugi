@@ -323,7 +323,7 @@ fn vm_run(source: &str, fuel: u64) -> (BudgetUsage, Result<(), TsumugiError>) {
     let mut vm = Vm::new(chunk);
     vm.set_capabilities(print_capabilities());
     vm.set_max_steps(fuel);
-    vm.charge_link(source.len() as u64, &[])
+    vm.charge_link_graph(source.len() as u64, &[])
         .expect("charge_link");
     let result = vm.run();
     (vm.budget_usage(), result)

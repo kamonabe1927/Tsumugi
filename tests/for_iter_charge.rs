@@ -30,7 +30,7 @@ fn run_vm(source: &str, config: BudgetConfig) -> (BudgetUsage, Result<(), Tsumug
     let program = Parser::new(tokens).parse().expect("パースに失敗");
     let chunk = Compiler::new().compile(&program).expect("コンパイルに失敗");
     let mut vm = Vm::with_budget(chunk, config);
-    vm.charge_link(source.len() as u64, &[])
+    vm.charge_link_graph(source.len() as u64, &[])
         .expect("charge_link に失敗");
     let result = vm.run();
     (vm.budget_usage(), result)

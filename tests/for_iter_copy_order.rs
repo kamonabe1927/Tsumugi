@@ -62,7 +62,7 @@ fn run(source: &str, config: BudgetConfig, use_vm: bool) -> Outcome {
     if use_vm {
         let chunk = Compiler::new().compile(&program).expect("コンパイルに失敗");
         let mut vm = Vm::with_budget(chunk, config);
-        vm.charge_link(source.len() as u64, &[])
+        vm.charge_link_graph(source.len() as u64, &[])
             .expect("charge_link に失敗");
         let before = ALLOCATED.load(Ordering::Relaxed);
         let result = vm.run();

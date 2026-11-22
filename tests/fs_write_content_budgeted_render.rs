@@ -201,7 +201,7 @@ fn run_vm(source: &str, base: &Path) -> (Result<(), TsumugiError>, BudgetUsage) 
     let chunk = Compiler::new().compile(&program).expect("compile");
     let mut vm = Vm::with_budget(chunk, BudgetConfig::for_legacy(1_000_000, 1_000_000));
     vm.set_capabilities(capabilities(base));
-    vm.charge_link(source.len() as u64, &[])
+    vm.charge_link_graph(source.len() as u64, &[])
         .expect("charge_link");
     let result = vm.run();
     (result, vm.budget_usage())
