@@ -1061,6 +1061,9 @@ impl Evaluator {
     /// Q1 = A）。slice 上限の判定は yield 可能な文/反復境界（driver）で行うため、ここでは課金だけ行い
     /// yield はしない（式の途中で
     /// yield すると Rust 再帰スタックを保存できず resume 不能になるため）。
+    // 式・文ごとに呼ぶので、エラー写像を `eval_expr` などの再帰する関数へ inline させない
+    // （再帰 1 段あたりの host stack を増やさない。F-2c）。
+    #[inline(never)]
     fn charge(&mut self, kind: ChargeKind, line: usize) -> Result<(), TsumugiError> {
         self.budget
             .charge_fuel(FuelSchedule::cost(kind), ExecutionPhase::Run)
@@ -2453,13 +2456,10 @@ impl Evaluator {
         match dest {
             CallDest::Discard => Ok(None),
             CallDest::Let { name, line } => {
-                // assignment の operation（§4.1、F-2c Q3 = A 規則 3）: 格納の直前。
-                self.charge(ChargeKind::Operation, line)?;
-                self.env_set(&name, value, line)?;
+                self.bind_let(&name, value, line)?;
                 Ok(None)
             }
             CallDest::Assign { name, line } => {
-                self.charge(ChargeKind::Operation, line)?;
                 self.assign_existing(&name, value, line)?;
                 Ok(None)
             }
@@ -2907,14 +2907,8 @@ impl Evaluator {
                 match (op, count) {
                     (_, 0) => self.begin_expr_child(&owner, stmt_index, slot, &path, 0, line),
                     (BinOpKind::And | BinOpKind::Or, 1) => {
-                        // 右を評価するかを決める前に operation 1（F-2c Q3 = A 規則 3）。
-                        self.charge(ChargeKind::Operation, line)?;
-                        let truthy = self.expr_frame_mut().operands[0].is_truthy();
-                        let short = match op {
-                            BinOpKind::And => !truthy,
-                            _ => truthy,
-                        };
-                        if short {
+                        let left = self.expr_frame_mut().operands[0].clone();
+                        if self.short_circuits(op, &left, line)? {
                             let left = self.expr_frame_mut().operands.pop().expect("left");
                             self.finish_expr_frame(left)
                         } else {
@@ -2927,7 +2921,6 @@ impl Evaluator {
                     }
                     (_, 1) => self.begin_expr_child(&owner, stmt_index, slot, &path, 1, line),
                     _ => {
-                        self.charge(ChargeKind::Operation, line)?;
                         let operands = std::mem::take(&mut self.expr_frame_mut().operands);
                         let result = self.eval_binop(&operands[0], op, &operands[1], line)?;
                         let value = self
@@ -2943,7 +2936,6 @@ impl Evaluator {
                 if self.expr_frame_mut().operands.is_empty() {
                     return self.begin_expr_child(&owner, stmt_index, slot, &path, 0, line);
                 }
-                self.charge(ChargeKind::Operation, line)?;
                 let operands = std::mem::take(&mut self.expr_frame_mut().operands);
                 let value = self.eval_unary(op, &operands[0], line)?;
                 drop(operands);
@@ -2953,7 +2945,6 @@ impl Evaluator {
                 0 => self.begin_expr_child(&owner, stmt_index, slot, &path, 0, line),
                 1 => self.begin_expr_child(&owner, stmt_index, slot, &path, 1, line),
                 _ => {
-                    self.charge(ChargeKind::Operation, line)?;
                     let operands = std::mem::take(&mut self.expr_frame_mut().operands);
                     let value = self.eval_index(&operands[0], &operands[1], line)?;
                     drop(operands);
@@ -3603,14 +3594,12 @@ impl Evaluator {
         match stmt {
             Stmt::Let { name, value, line } => {
                 let val = self.eval_expr(value, *line)?;
-                self.charge(ChargeKind::Operation, *line)?;
-                self.env_set(name, val, *line)?;
+                self.bind_let(name, val, *line)?;
                 Ok(StmtStep::Val)
             }
 
             Stmt::Assign { name, value, line } => {
                 let val = self.eval_expr(value, *line)?;
-                self.charge(ChargeKind::Operation, *line)?;
                 self.assign_existing(name, val, *line)?;
                 Ok(StmtStep::Val)
             }
@@ -3760,9 +3749,35 @@ impl Evaluator {
         }
     }
 
+    /// `let` の束縛（`exec_stmt` と driver 上の呼び出しの戻り値の受け渡しで共有する）。assignment の
+    /// operation（§4.1、F-2c Q3 = A 規則 3）を値の評価の後、格納の直前に課金する。課金をこの関数に置き、
+    /// 再帰する `exec_stmt` の frame を大きくしない。
+    fn bind_let(&mut self, name: &str, val: Value, line: usize) -> Result<(), TsumugiError> {
+        self.charge(ChargeKind::Operation, line)?;
+        self.env_set(name, val, line)
+    }
+
+    /// `and` / `or` の左を評価した後、右を評価せずに左を結果にするか（短絡するか）。右を評価するかを
+    /// 決める前に operation 1 を課金する（§4.1、F-2c Q3 = A 規則 3。右を評価しなくても 1）。
+    fn short_circuits(
+        &mut self,
+        op: &BinOpKind,
+        left: &Value,
+        line: usize,
+    ) -> Result<bool, TsumugiError> {
+        self.charge(ChargeKind::Operation, line)?;
+        let truthy = left.is_truthy();
+        Ok(match op {
+            BinOpKind::And => !truthy,
+            _ => truthy,
+        })
+    }
+
     /// 再代入（`name = value`）を既存 binding へ適用する（`exec_stmt` と driver 上の呼び出しの
     /// 戻り値の受け渡しで共有する。tree-expr-continuation-e1）。
     fn assign_existing(&mut self, name: &str, val: Value, line: usize) -> Result<(), TsumugiError> {
+        // assignment の operation（§4.1、F-2c Q3 = A 規則 3）: 値の評価の後、格納の直前。
+        self.charge(ChargeKind::Operation, line)?;
         match self.env.update(name, val) {
             Ok(()) => Ok(()),
             Err(crate::env::UpdateError::Undefined) => {
@@ -4109,19 +4124,9 @@ impl Evaluator {
             Expr::BinOp { left, op, right } => {
                 // and/or は短絡評価（右辺を常に評価しない）
                 match op {
-                    BinOpKind::And => {
+                    BinOpKind::And | BinOpKind::Or => {
                         let l = self.eval_expr(left, line)?;
-                        // 右を評価するかを決める前に operation 1（F-2c Q3 = A 規則 3）。
-                        self.charge(ChargeKind::Operation, line)?;
-                        if !l.is_truthy() {
-                            return Ok(l);
-                        }
-                        self.eval_expr(right, line)
-                    }
-                    BinOpKind::Or => {
-                        let l = self.eval_expr(left, line)?;
-                        self.charge(ChargeKind::Operation, line)?;
-                        if l.is_truthy() {
+                        if self.short_circuits(op, &l, line)? {
                             return Ok(l);
                         }
                         self.eval_expr(right, line)
@@ -4129,7 +4134,6 @@ impl Evaluator {
                     _ => {
                         let l = self.eval_expr(left, line)?;
                         let r = self.eval_expr(right, line)?;
-                        self.charge(ChargeKind::Operation, line)?;
                         let result = self.eval_binop(&l, op, &r, line)?;
                         // 文字列結合（`+`）が新規生成する String body を課金する
                         // （REV-015 Slice 2）。track_result は untracked な String だけを
@@ -4144,7 +4148,6 @@ impl Evaluator {
 
             Expr::UnaryOp { op, expr } => {
                 let val = self.eval_expr(expr, line)?;
-                self.charge(ChargeKind::Operation, line)?;
                 self.eval_unary(op, &val, line)
             }
 
@@ -4186,13 +4189,11 @@ impl Evaluator {
                     // object の識別子は読み取らないが、expression 1 は払う（VM の `IndexLocal` と同じ）。
                     self.charge(ChargeKind::Expression, line)?;
                     let idx = self.eval_expr(index, line)?;
-                    self.charge(ChargeKind::Operation, line)?;
                     let collection = cell.borrow();
                     return self.eval_index(&collection, &idx, line);
                 }
                 let obj = self.eval_expr(object, line)?;
                 let idx = self.eval_expr(index, line)?;
-                self.charge(ChargeKind::Operation, line)?;
                 self.eval_index(&obj, &idx, line)
             }
 
@@ -4223,11 +4224,14 @@ impl Evaluator {
 
     /// インデックスアクセスの評価
     fn eval_index(
-        &self,
+        &mut self,
         object: &Value,
         index: &Value,
         line: usize,
     ) -> Result<Value, TsumugiError> {
+        // index の operation（§4.1、F-2c Q3 = A 規則 3）: operand の評価の後、演算の直前。課金を
+        // ここに置き、再帰する `eval_expr` の frame を大きくしない。
+        self.charge(ChargeKind::Operation, line)?;
         match object {
             Value::List(list) => {
                 let Value::Int(i) = index else {
@@ -4290,6 +4294,8 @@ impl Evaluator {
         right: &Value,
         line: usize,
     ) -> Result<Value, TsumugiError> {
+        // 二項演算の operation（§4.1、F-2c Q3 = A 規則 3）: operand の評価の後、演算の直前。
+        self.charge(ChargeKind::Operation, line)?;
         match (left, op, right) {
             // 整数同士の算術
             (Value::Int(l), BinOpKind::Add, Value::Int(r)) => l
@@ -4438,11 +4444,13 @@ impl Evaluator {
 
     /// 単項演算
     fn eval_unary(
-        &self,
+        &mut self,
         op: &UnaryOpKind,
         val: &Value,
         line: usize,
     ) -> Result<Value, TsumugiError> {
+        // 単項演算の operation（§4.1、F-2c Q3 = A 規則 3）: operand の評価の後、演算の直前。
+        self.charge(ChargeKind::Operation, line)?;
         match (op, val) {
             (UnaryOpKind::Neg, Value::Int(n)) => n
                 .checked_neg()
