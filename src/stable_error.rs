@@ -213,6 +213,9 @@ pub mod message_id {
 
         // Import の 4 つ目のテンプレート（同じ ModuleId の別内容、capability-model §10）
         IMPORT_HASH_MISMATCH = 42 => "import.hash_mismatch";
+
+        // Import の 5 つ目のテンプレート（link が検出した import の循環。scheduler の handle 経路、PR #480）
+        IMPORT_CYCLE = 43 => "import.cycle";
     }
 }
 

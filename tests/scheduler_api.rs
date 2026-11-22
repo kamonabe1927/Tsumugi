@@ -1930,3 +1930,72 @@ fn hil_at_03_invalid_module_keeps_module_and_parse_cause() {
         other => panic!("LinkError を期待したが {other:?}"),
     }
 }
+
+/// HIL-AT-03 の補足: link の失敗（解決失敗・循環・深度）は §3.4 のテンプレートで、terminal の LinkError になる
+/// （PR #480 の Q2=A。解決失敗は `{code}`、循環は `{chain}`、深度は上限つき）。
+#[test]
+fn hil_at_03_link_failures_use_spec_templates() {
+    fn link_error_of(root: &str, sources: &[(&str, &str)]) -> tsumugi::error::TsumugiError {
+        let engine = Engine::new();
+        let script = engine.compile(root).unwrap();
+        let (resolver, _calls) = counting_resolver::CountingResolver::new(sources);
+        let mut context = ExecutionContext::new();
+        context.set_capabilities(resolver.capabilities());
+        let mut handle = engine
+            .create_execution(&script, &mut context, ExecutionRequest::new())
+            .expect("admit");
+        match handle.poll(PollSlice::default()).expect("poll") {
+            PollResult::Terminal {
+                outcome: ExecutionOutcome::LinkError { error },
+                ..
+            } => error,
+            other => panic!("LinkError を期待したが {other:?}"),
+        }
+    }
+
+    // 解決失敗: `{code}` は host が作る検証済みの code で、specifier 原文を含まない。
+    let error = link_error_of("import \"missing_module\"\n", &[]);
+    assert_eq!(error.error_type(), "import");
+    assert!(
+        error
+            .message()
+            .starts_with("import に失敗しました: モジュールを読み込めません: "),
+        "{}",
+        error.message()
+    );
+    assert!(!error.message().contains("missing_module"));
+
+    // 循環: 起点を末尾に再掲した chain を `->` で結ぶ。
+    let error = link_error_of(
+        "import \"a.tsg\"\n",
+        &[
+            ("@default/a.tsg", "import \"b.tsg\"\n"),
+            ("@default/b.tsg", "import \"a.tsg\"\n"),
+        ],
+    );
+    assert_eq!(error.error_type(), "import");
+    assert_eq!(
+        error.message(),
+        "import に失敗しました: import が循環しています: @default/a.tsg -> @default/b.tsg -> @default/a.tsg"
+    );
+
+    // 深度: 129 段目の import。
+    let owned: Vec<(String, String)> = (0..130)
+        .map(|i| {
+            (
+                format!("@default/m{i}.tsg"),
+                format!("import \"m{}.tsg\"\n", i + 1),
+            )
+        })
+        .collect();
+    let refs: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let error = link_error_of("import \"m0.tsg\"\n", &refs);
+    assert_eq!(error.error_type(), "import");
+    assert_eq!(
+        error.message(),
+        "import に失敗しました: import のネストが深すぎます (上限: 128)"
+    );
+}

@@ -1126,10 +1126,11 @@ fn link_failure_outcome(
         LinkError::Cancelled => return ExecutionOutcome::Cancelled,
         LinkError::DeadlineExceeded => return ExecutionOutcome::DeadlineExceeded,
         LinkError::Denied(_) => TsumugiError::capability_denied(0, "module_resolver"),
+        // `{code}` は host が作る検証済みの `HostErrorCode`（`/`・空白を含まず、host path・specifier を運ばない）。
         LinkError::Resolve(host) => import_error(
             message_id::IMPORT_UNREADABLE,
             format!(
-                "import に失敗しました: モジュールを解決できません ({})",
+                "import に失敗しました: モジュールを読み込めません: {}",
                 host.code.as_str()
             ),
         ),
@@ -1155,10 +1156,16 @@ fn link_failure_outcome(
                 ),
             )
         }
-        LinkError::Cycle { .. } => import_error(
-            message_id::IMPORT_UNREADABLE,
-            "import に失敗しました: import が循環しています".to_string(),
-        ),
+        LinkError::Cycle { chain } => {
+            let chain: Vec<&str> = chain.iter().map(|id| id.as_str()).collect();
+            import_error(
+                message_id::IMPORT_CYCLE,
+                format!(
+                    "import に失敗しました: import が循環しています: {}",
+                    chain.join(" -> ")
+                ),
+            )
+        }
         LinkError::DepthExceeded { limit } => import_error(
             message_id::IMPORT_DEPTH,
             format!("import に失敗しました: import のネストが深すぎます (上限: {limit})"),
