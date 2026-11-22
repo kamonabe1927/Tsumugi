@@ -793,6 +793,7 @@ OPTIONS:
 - sandbox未設定/空: legacy専用`LegacyFilesystemTranslator`へunrestricted filesystem namespace authorityを明示grantしsecurity warningをstderrへ1件出す。Unixは`/`とsnapshot CWD handle、Windowsは要求されたvolume rootとsnapshot CWD handleへ安全なhandle操作を使う。authority自体がunrestrictedなだけでcheck/use文字列fallbackは使わない。ここでの「空」は値が空文字列（0 byte）のときだけを指す。
 - sandbox設定ありでhost rootが0個（実質空）: 値は空文字列でないが、comma区切りの各要素をtrimすると空しか残らないもの（`,`・` , `・空白だけなど）は、未設定とみなさず**空の許可リスト**として扱う。filesystem capabilityをgrantせず、形式の正しいパスのscript filesystem操作はすべてI/O前に§8.5の単一denial（catch可能なcanonical `sandbox` error）になる。形式の誤り（空・NUL・component内の`:`）は§8.5のとおり、grantが無くても`sandbox`でなく`argument`になる（D-38 Q1=A・Q2=A）。security warningをstderrへ1件出す。出す場所と件数は未設定時の警告と同じにし、文言は未設定時の「全体を許可」でなく「すべて拒否」を告げる別のもの（`警告: TSUMUGI_SANDBOX にパスが含まれていないため、legacy profile はファイルシステム操作をすべて拒否します`）にする。値を書いたのに全開放になる驚きを残さず、明示的に付与しない限り権限は無い（[マニフェスト](manifesto.md) 原則2、fail-closed）。issue #291 のQ2=A（返信なしのため推奨案で確定、[開発ループ手順書](loop-runbook.md) §7.5）による。採らなかった案B（未設定と同じunrestrictedにし警告だけ必ず出す）は、値を書いたのに全開放になる驚きが残るため採らない。警告の文言はPR #303 の判断待ちQ1=Aによる（返信なしのため推奨案で確定、[開発ループ手順書](loop-runbook.md) §7.5）。理由: legacy authorityの警告は付与の内容をホストへ告げるもので、全部拒否なのに「全体へのアクセスを許可」と告げると権限を誤解させる（[マニフェスト](manifesto.md) 原則2・原則6）。採らなかった案B（未設定時の警告をそのまま出す）は、挙動と正反対の内容を告げるため採らない。
 - env allow設定あり: comma-separated exact keyまたは末尾`*` prefixだけsnapshot。未設定/空は`TSUMUGI_`以外を全snapshotしwarning 1件。
+- legacyのscript pathの形式検査（空・NUL・component内の`:`、Windowsで先頭のdrive prefixの後にrootが無いdrive-relative path）は、script自身の文字列のcomponentに対し、CWD基準のlexical絶対化より前に行う。CWDのcomponentは検査しない。component内の`:`は`PathError::ColonInComponent`、Windowsのdrive-relative path（`a:b`・`C:x`）は`PathError::Absolute`で、どちらもcatch可能な`argument`になる（§8.2・§8.5）。grantの有無とtree/VMを問わず同じ検査を使う。判断役が選択（PR #486）のQ1=A・Q2=A。理由はfix-windows-legacy-lexical-colonの小節（形式の誤りはscriptの文字列だけで決まりhostのCWDやdriveごとのcurrent directoryに依らず、同じ文字列のerrorの種類がOSで揃う。[マニフェスト](manifesto.md) 原則5）。
 - translatorは旧absolute pathをnamespace root handle、旧relative pathをstart時CWD handleへ変換する。legacy filesystemは`OsDirectoryHandle` + `SymlinkPolicy::FollowWithinRoot`で構築し、旧`sandbox.rs`のcanonicalizeベースsymlink解決をroot拘束handle追従へ具体化する（symlink追従自体は互換維持。中間component symlinkはroot内へ拘束して追従し、root外へ逃げるものと final entry symlinkはhandle契約どおり拒否する）。safe profileは常に`DenyAll`、legacy profileは`FollowWithinRoot`とsymlink policyが異なる。root選択（candidate生成・component数比較）はCWD基準で絶対化したlexical path（symlink非追従）で行いcanonicalizeしない。Unix / Windowsはsecure handleを持ち、Windowsは§8.3契約3のreparse fail-closed（junction / mount point拒否）を伴う。secure handleを実装できないplatform（非Unix・非Windows）ではfilesystem capability構築を拒否。
 - legacy authorityは`ExecutionStarted.capability_policy_hash`と通常のcanonical decision/host-call eventで観測する。warning専用の別audit eventを追加しない。Phase 2完了条件はstderr warning、Phase 6では同じ8 event schemaとfail-closedを使う。
 
@@ -1492,6 +1493,80 @@ loop:drift #429 の D-124 の扱いを、kamonabe の判断（issue #433 の (a)
 - **想定の変更規模**: `src/` の本体はコメントだけで ±10 行程度（コードの変更 0 行）。試験は +120〜220 行程度（OS adapter の unit test、safe・legacy の subprocess test）。
   文書は設計書・言語仕様で ±4 行、`tests/threat_model_traceability.rs` で ±5 行。触る仕組みは OS adapter の final symlink の扱い 1 つ（試験で固定するだけ）、受入基準は 4 項目。
   逸脱一覧の行は足さず消さない（目標の §8.3 契約 4・5 と実装は一致しており、足りなかったのは試験と設計書・言語仕様の記述である）。
+
+### fix-windows-legacy-lexical-colon 実装スライス（Windows の legacy profile の lexical 検査が component 内の `:` を取りこぼさないようにする）
+
+loop:drift #352 の D-57 を直す。目標（§8.2）は、legacy translator（`LegacyFsTranslator::translate` の Component::Normal）でも component 内の ASCII `:`
+（Windows ADS / stream 指定）を `PathError::ColonInComponent` で拒否し、host platform path へ変換する前に検証することである。§8.5 は、形式の誤りを
+capability の有無より先に catch 可能な `argument` error にする理由を「形式の誤りは script 自身の文字列だけで決まり host の状態に依らない」とする。
+実装（`src/capability.rs` の `legacy_lexical_check`）は、script path を CWD 基準で `absolutize_lexical` してから、絶対化後の Normal component に `:` が
+あるかを見る。Windows では `absolutize_lexical` の `PathBuf::push` が `<ASCII 1 文字>:` で始まる中間の component（`d/a:b` の `a:b`、`d/a:/x` の `a:`）を
+drive prefix と読んで path 全体を置き換えるので、`:` が `Component::Prefix` へ移って検査をすり抜ける（逸脱一覧の該当行。`d/a:b` は `argument` でなく
+`sandbox` になる）。置き換え後の path は drive-relative（root を持たない）なので、どの root にも route されず `sandbox` になり、権限は増えていない。
+fix-fs-path-syntax-before-grant 小節の「Windows の component 内の `:`」の決定（PR #341 の Q1=A）は、grant 済み経路の Windows の挙動を変えるこの修正を、
+spec の追記と platform 差のテストを持たせた別の fix スライスで扱うとした。このスライスがそれである。
+
+**判断役が選択（PR #486）の Q1=A・Q2=A**: 次の 2 点は spec に書かれておらず、legacy profile の言語挙動（どの path が `argument` になるか）に
+影響するので、判断の候補として出し、判断役が選んだ。選んだ内容は §14.3 にも書いた。
+
+- **Q1=A（`:` を検査する対象）**: script の文字列そのものの component（`std::path::Path::new(script_path).components()` の Normal）を、
+  CWD 基準の絶対化より前に検査し、絶対化後の component 列（CWD の component を含む）は検査しない。理由: §8.5 は形式の誤りを
+  「script 自身の文字列だけで決まり host の状態に依らない」ものとし、§8.2 は host platform path へ変換する前の検証を求めている。A だけがこの 2 つを
+  そのまま満たし、同じ script・入力から同じ種類の error になる（[マニフェスト](manifesto.md) 原則 5）。Windows の `PathBuf::push` の prefix の読み替えより前に
+  見るので D-57 の穴を原因ごと閉じる。形式検査は adapter・OS を呼ばず、通った path は今までどおり root handle の経路で route されるので、
+  絶対化後の検査を外しても権限は増えない（原則 2）。Unix で `d/a:b/../x` が `argument` に変わる点は §8.2 の「component 内の `:` を拒否する」に
+  近づく方向で、全 OS で同じ結果になる（原則 5）。直す場所は `legacy_lexical_check` 1 か所で、OS を限らない unit test で確かめられる（原則 8・9）。
+  採らなかった案: B（絶対化の前と後の両方を検査する）は、同じ script の同じ path の error の種類が host の CWD で変わり続け、§8.5 の理由と原則 5 に
+  反しうる（差分の小ささ〔原則 8〕は優先順位の表の「一貫した意味論」より下に置く）。C（`absolutize_lexical` の積み方を直し絶対化後だけを検査する）は、
+  `absolutize_lexical` が root 選択にも使う関数で影響が広く、CWD 依存が残り（原則 5・§8.5）、`..` で消える component の `:` を見逃して §8.2 の拒否を
+  満たしきらない。
+- **Q2=A（Windows の先頭の drive-relative）**: `a:b`・`C:x` のように先頭が drive prefix で、その後に root（`\`）が無い path は、形式の誤り
+  （`PathError::Absolute`。公開の error は catch 可能な `argument` の `ファイルパスの形式が不正です`）にする。理由: この形の path の意味は drive ごとの
+  current directory という、§14.3 が snapshot しない host の状態で決まるので、legacy の構文として受け付けない方が §8.5 の考え方（形式は文字列だけで
+  決まる）に合う。§8.2 は先頭の drive prefix を `PathError::Absolute` とし、component 内の `:`（`ColonInComponent`）と別概念としているので、
+  variant の使い分けも既存の決定と一貫する。同じ文字列が Unix では `:` の検査で `argument` になるので、公開の error の種類が OS で揃う（原則 5、
+  優先順位の表「一貫した意味論」）。drive-relative の path は今も絶対化後に root を持たず、どの root にも route されず必ず `sandbox` なので、使える path は
+  減らず権限も増えない（原則 2）。失敗は catch 可能な構造化された error のままである（原則 6）。採らなかった案: B（今のまま Windows は `sandbox`、
+  Unix は `argument` とし platform 差として固定する）は、同じ script・同じ文字列の error の種類が OS で分かれる状態をテストで固定することになり、
+  原則 5 に反しうる。範囲が狭いこと（原則 8）だけでは選ばない。
+
+- **実装範囲**:
+  1. `src/capability.rs` の `legacy_lexical_check`: 空・NUL の検査の後、絶対化の前に、script の文字列の component を検査する。Normal component が `:` を
+     含めば `PathError::ColonInComponent`（Q1=A）。Windows で先頭の `Component::Prefix` の直後が `Component::RootDir` でなければ `PathError::Absolute`（Q2=A。
+     `Prefix` の種類は `Disk` に限らず、root を伴わない prefix を拒否する）。絶対化後の component 列の `:` 検査は外す（Q1=A）。
+     `translate` は今のとおりこの関数を使うので、grant の有無の両方の経路（`translate` と `fs_syntax_before_grant`）に同じ検査が効く。
+     tree と VM は `dispatch_fs`（`src/builtin_core.rs`）を共有しているので両方に効く。
+  2. `absolutize_lexical`（`src/capability.rs`）は変えない（1 の検査を通った path では、中間の component が prefix と読まれることは無い）。
+  3. 既存の `legacy_translate_rejects_colon_component_ads` と FPS-AT-03 の試験（`src/eval.rs` の `fps_at_03_tree_legacy_mark_without_grant`、
+     `src/vm.rs` の `fps_at_03_vm_legacy_mark_without_grant`）に、中間の `<ASCII 1 文字>:` の component（`d/a:b`）の確認を足し、
+     「`a:b` の穴は別 slice の範囲」のコメントを外す。
+- **範囲外**: safe profile と埋め込み host の `FilesystemTarget::parse`（§8.2 のとおり既に `:` と drive prefix を拒否する）、
+  CLI の root の設定値（`TSUMUGI_SANDBOX`・`--fs-root` の host path。`src/cli_capability.rs` の `absolutize_lexical`。script の文字列ではない）、
+  Windows の UNC・verbatim（`\\server\share`・`\\?\C:\`）の prefix の扱い（root を伴うので今のまま）、legacy の root 選択と symlink の扱い、
+  link 層の import specifier（§10、legacy の translator を通らない）。
+- **観測される変化**（legacy profile の script の filesystem builtin。grant の有無を問わない。tree と VM で同じ）:
+  - Windows: 中間に `<ASCII 1 文字>:` の component を持つ path（`d/a:b`・`d/a:/x`・`C:\root\a:b`）が、`sandbox` でなく catch 可能な `argument` error になる。
+    先頭の drive-relative（`a:b`・`C:x`）も `sandbox` でなく `argument` になる（Q2=A）。
+  - すべての OS: `..` で打ち消される component の `:`（`d/a:b/../x`）も、script の文字列に `:` 入りの component があるので `argument` になる（今は Unix で通る。Q1=A）。
+  - Unix: CWD の component に `:` があっても、`:` を含まない相対 path は `argument` にならない（今は CWD の `:` で相対 path がすべて `argument` になる。Q1=A）。
+- **受入基準（fix-windows-legacy-lexical-colon）**:
+  - **WLC-AT-01**（中間の component、全 OS）: `legacy_lexical_check` と root の無い `LegacyFsTranslator::translate` が、`d/a:b`・`d/a:/x`・`d/a:b/../x`・
+    絶対 path の中間に `a:b` を持つ path（Unix は `/base/a:b/x`、Windows は `C:\base\a:b\x`）・`d/foo.txt:stream` のすべてで `PathError::ColonInComponent` を返す。
+    確かめ方: `src/capability.rs` の `#[cfg(test)]` の unit test（`#[cfg]` で OS を限らない。CI の windows-latest でも走る）。
+  - **WLC-AT-02**（先頭の drive-relative、platform 差）: `a:b` が Unix では `PathError::ColonInComponent`、Windows では `PathError::Absolute` を返し、
+    どちらも `Err` になる。Windows の `C:x` も `PathError::Absolute`、`C:\x`（root を伴う絶対 path）は `Ok` になる。
+    確かめ方: `src/capability.rs` の unit test（共通の `Err` の確認と、`#[cfg(unix)]`・`#[cfg(windows)]` で分けた variant の確認）。
+  - **WLC-AT-03**（builtin、tree と VM）: legacy の印を付けて filesystem を grant しない set で `read_file("d/a:b")` が `argument` になり（FPS-AT-03 の試験に足す）、
+    `TSUMUGI_SANDBOX=<root>` で filesystem を grant したとき `read_file("<root>/a:b")`（`<root>` は絶対 path）と `read_file("d/a:b")` が catch 可能な `argument` error
+    （`ファイルパスの形式が不正です`）になる。tree と `--vm` の両方。確かめ方: `src/eval.rs`・`src/vm.rs` の FPS-AT-03 の試験と、
+    `tests/cli_legacy_profile.rs` の subprocess test（`#[cfg]` で OS を限らない）。
+  - **WLC-AT-04**（CWD に依らない、Unix）: CWD を名前に `:` を含むディレクトリ（`x:y`）にし、`TSUMUGI_SANDBOX` をそのディレクトリにして、`read_file("f.txt")`（存在する）が
+    成功し、`read_file("a:b")` は `argument` になる。tree と `--vm` の両方。確かめ方: `tests/cli_legacy_profile.rs` の `#[cfg(unix)]` の subprocess test
+    （Windows はディレクトリ名に `:` を使えないので対象にしない）。
+- **想定の変更規模**: 本体（`#[cfg(test)]` を除く `src/`）は `src/capability.rs` の `legacy_lexical_check` だけで +15〜35 行程度（生の component の検査、
+  Windows の prefix の検査、絶対化後の検査の削除）。テストは +80〜150 行程度（unit test、FPS-AT-03 への追加、subprocess test）。
+  触る仕組みは legacy profile の path の lexical 検査 1 つ、受入基準は 4 項目で、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
+  done にする実装 PR で、逸脱一覧の「legacy profile の lexical 検査は、Windows では component 内の `:` を一部取りこぼす」の行を削除する。
 
 ## 19. 受入基準
 
