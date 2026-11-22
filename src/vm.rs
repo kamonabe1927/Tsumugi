@@ -1483,7 +1483,7 @@ impl Vm {
                 });
             }
             OpCode::PrepareCall => {
-                // (F2) user function 呼び出しの fuel は直前の `Charge(UserCall)` が課金済み（tree と
+                // (F2) user function 呼び出しの fuel は直前の `Charge(Invocation)` が課金済み（tree と
                 // 同じく深度検査の前）。深度上限は PrepareCall と Call の両方で検査する（raw Call でも
                 // 迂回させない）。
                 if self.active_user_frame_count() >= MAX_USER_CALL_DEPTH {
