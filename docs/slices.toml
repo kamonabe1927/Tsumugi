@@ -749,6 +749,7 @@ status     = "ready"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-windows-legacy-lexical-colon 実装スライス（Windows の legacy profile の lexical 検査が component 内の `:` を取りこぼさないようにする）" }
 acceptance = ["WLC-AT-01..04"]
+design_pr  = 486
 order      = 29
 
 [[slice]]
