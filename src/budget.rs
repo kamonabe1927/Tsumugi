@@ -1055,6 +1055,11 @@ fn charge_reason_for(resource: BudgetResource) -> crate::audit::BudgetChargeReas
 }
 
 impl BudgetLedger {
+    /// この台帳が持つ予算設定（link の request に載せる値として使う）。
+    pub(crate) fn config(&self) -> BudgetConfig {
+        self.config
+    }
+
     /// config と cancellation token から台帳を作る。
     pub fn new(config: BudgetConfig, cancellation: CancellationToken) -> Self {
         Self {

@@ -574,7 +574,7 @@ fn run_vm(source: &str) -> Outcome {
     vm.set_capabilities(capabilities(&buffer));
     // link 時の課金 token は実行が終わるまで持っておく。
     let result = vm
-        .charge_link(source.len() as u64, &[])
+        .charge_link_graph(source.len() as u64, &[])
         .and_then(|_tokens| vm.run());
     let stdout = String::from_utf8_lossy(&buffer.lock().expect("buffer lock")).into_owned();
     match result {

@@ -11,7 +11,6 @@ use crate::limits::MAX_USER_CALL_DEPTH;
 use crate::value::{FnDef, FunctionId, NumericOrder, SharedValue, Value};
 
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::rc::Rc;
 /// 評価器の戻り値（通常の値 or return / break / continue による制御フロー）
 enum EvalResult {
@@ -520,9 +519,6 @@ pub struct Evaluator {
     /// 実行予算の課金台帳（REV-015 Slice 1）。
     /// step（fuel）と collection 要素数の検査をここへ一本化する。
     budget: BudgetLedger,
-    /// import の解決状態（実行前にリンクする。AUD-030）。REPL・scheduler の handle 経路・
-    /// [`Self::run`] / [`Self::run_phased`] が使う評価器内蔵の読み込み元。
-    loader: crate::module::ModuleLoader,
     /// link が確かめた graph から展開した module（`ModuleId` → `source_hash`、capability-model §10）。
     /// [`Self::begin_execution_from_graph`] だけが使う。context の再利用をまたいで保持し、
     /// `clear_user_state`（評価器の作り直し）で捨てる。
@@ -540,7 +536,7 @@ pub struct Evaluator {
     script_args: Vec<String>,
     /// 実行対象 AST（linked program、root + node）の §5.1 論理サイズを live heap へ
     /// 課金するトークン（REV-015 PR-d）。AST は実行のあいだ生き続けるため execution の
-    /// 寿命でトークンを保持する。REPL では入力ごとに charge_link で入れ替えて release し、
+    /// 寿命でトークンを保持する。REPL では入力ごとに charge_link_graph で入れ替えて release し、
     /// 前入力の AST を持ち越さない。VM は AST を bytecode へ compile するため、代わりに
     /// bytecode chunk を課金する（§5.3「AST または bytecode」）。
     ///
@@ -737,8 +733,6 @@ struct RunSession {
     /// この実行が回すべき frame stack の下限深度（root frame を積む前の `frames.len()`）。
     /// `run_driver` はここまで縮んだら本体完了とみなす。
     base_depth: usize,
-    /// 実行完了しなかったとき解決マーカーを巻き戻す import module 群（AUD-030）。
-    newly_loaded: Vec<crate::module::LoadedModule>,
     /// 実行完了しなかったとき未展開へ戻す、graph から新しく展開した module（capability-model §10）。
     newly_expanded: Vec<crate::embedding::ModuleId>,
     /// transaction 経路か（未捕捉エラー・cancel・deadline・drop で language-state を execution
@@ -766,7 +760,6 @@ impl Evaluator {
             env,
             call_stack: Vec::new(),
             budget,
-            loader: crate::module::ModuleLoader::new(),
             graph_expanded: std::collections::HashMap::new(),
             graph_record_tokens: std::collections::HashMap::new(),
             next_function_id: 0,
@@ -978,6 +971,11 @@ impl Evaluator {
     }
 
     /// この実行の capability 集合を参照する（builtin dispatch から consult する）。
+    /// 台帳が持つ予算設定（handle の Link フェーズが link の request に載せる）。
+    pub(crate) fn budget_config(&self) -> BudgetConfig {
+        self.budget.config()
+    }
+
     pub(crate) fn capabilities(&self) -> &crate::capability::CapabilitySet {
         &self.capabilities
     }
@@ -1058,11 +1056,6 @@ impl Evaluator {
             .checked_add(1)
             .ok_or_else(|| TsumugiError::internal(line, "FunctionId を割り当てできません"))?;
         Ok(FunctionId(id))
-    }
-
-    /// 基準ディレクトリを設定する（ファイル実行時に呼ばれる）
-    pub fn set_base_dir(&mut self, path: &Path) {
-        self.loader.set_base_dir(path);
     }
 
     /// ステップ（fuel）を [`FuelSchedule`] の種別の値で課金し、上限チェックする（REV-015 Slice 1・F-2b）。
@@ -1168,55 +1161,8 @@ impl Evaluator {
         self.budget.reset_fuel();
     }
 
-    /// root source と import source を予算へ課金する（REV-015 Slice 2、§5.3）。
-    ///
-    /// `Link` フェーズの課金であり、最初の文を実行する前に行う。root（実行対象
-    /// スクリプト）を 1 本の source として `charge_source` し、初めて解決した各 import
-    /// module を `charge_source`（`source_bytes`）と `charge_import`（`import_bytes`）
-    /// の両方へ課金する。超過は catch 不能 terminal として既存 error へ写像する。
-    fn charge_link(
-        &mut self,
-        root_source_bytes: u64,
-        loaded: &[crate::module::LoadedModule],
-        linked_program: &Program,
-    ) -> Result<(), TsumugiError> {
-        // live heap は tracked backing の生成/drop で逐次維持する（REV-015 案A/PR-b/PR-c）。
-        // collection・String・変数 cell・関数 instance header はすべて per-drop 追跡され、
-        // 生成時に課金し最後の参照 drop で release する。よって同じ台帳を跨ぐ REPL 入力では
-        // pre-existing な言語状態の live heap が自動的に持ち越され、Link 境界で baseline を
-        // 再走査する必要がない（再走査するとむしろ tracked 分を二重計上する）。したがって
-        // `charge_link` では baseline 課金を行わない。`charge_context_baseline`
-        // （全 heap object を 1 回ずつ論理課金する純関数）は、execution ごとに台帳を作り直す
-        // 埋め込み API（fresh ledger モデル、後続 Phase）用に残し、単体テストで固定する。
-        self.budget
-            .charge_source(root_source_bytes, ExecutionPhase::Link)
-            .map_err(|stop| self.control_stop_to_error(stop, 0))?;
-        for module in loaded {
-            self.budget
-                .charge_source(module.byte_len, ExecutionPhase::Link)
-                .map_err(|stop| self.control_stop_to_error(stop, module.line))?;
-            self.budget
-                .charge_import(module.byte_len, ExecutionPhase::Link)
-                .map_err(|stop| self.control_stop_to_error(stop, module.line))?;
-            // imported module record を live heap へ課金する（REV-015 PR-d）。
-            // module ID は normalized（canonical）path の UTF-8 byte 長で数える。token は
-            // loader が `loaded` set と寿命を揃えて保持し、`forget`（rollback）または
-            // loader drop で release する。
-            let module_id_bytes = module.path.as_os_str().len() as u64;
-            let token = Value::new_heap_token(
-                crate::budget::heap_size::imported_module_record(module_id_bytes),
-                &self.budget.heap_handle(),
-                ExecutionPhase::Link,
-            )
-            .map_err(|stop| self.control_stop_to_error(stop, module.line))?;
-            self.loader
-                .register_record_token(module.path.clone(), token);
-        }
-        self.charge_linked_ast(linked_program)
-    }
-
     /// graph から展開した module を予算へ課金する（capability-model §10、execution-control
-    /// §5.1・§5.3）。[`Self::charge_link`] の `ModuleId` 版で、root と各 module の保持 source の
+    /// §5.1・§5.3）。root と各 module の保持 source の
     /// byte 長で `charge_source`・`charge_import` を行い、imported module record を
     /// 96 + `ModuleId` の UTF-8 byte 長で heap に課金する。token は `graph_expanded` と同じ寿命で持つ。
     fn charge_link_graph(
@@ -1246,8 +1192,7 @@ impl Evaluator {
         self.charge_linked_ast(linked_program)
     }
 
-    /// 実行対象 AST（linked program）を live heap へ課金する（[`Self::charge_link`] と
-    /// [`Self::charge_link_graph`] の共通部）。
+    /// 実行対象 AST（linked program）を live heap へ課金する（[`Self::charge_link_graph`] の部品）。
     fn charge_linked_ast(&mut self, linked_program: &Program) -> Result<(), TsumugiError> {
         // 実行対象 AST（linked program）を live heap へ課金する（REV-015 PR-d / Slice 6）。
         // 前入力の token を先に drop（release）してから今回ぶんを課金し、二重計上しない。tree
@@ -1304,68 +1249,65 @@ impl Evaluator {
         tokens
     }
 
-    /// プログラム全体を実行
+    /// import を含まないプログラム全体を実行する。
     ///
-    /// import は実行前にリンクして解決する（AUD-030）。読み込み・パース・サンドボックス・
-    /// 深度の失敗は、最初の文を実行する前に報告される。
+    /// import の展開は link が確かめた graph からだけ行う（[`Self::begin_execution_from_graph`]、
+    /// capability-model §10）。この入口は graph を持たないので、`import` 文を含む program は
+    /// 1 文も実行せず内部 error で失敗する。
     pub fn run(&mut self, program: &Program, root_source_bytes: u64) -> Result<(), TsumugiError> {
-        let (linked, newly_loaded) = self.loader.link(program)?;
-        let target = linked.as_ref().unwrap_or(program);
-        // source/import 予算と AST heap を Link フェーズで課金する（REV-015 Slice 2 / PR-d）。
-        // 超過なら 1 文も実行せず、解決済みマーカーを巻き戻す。
-        if let Err(e) = self.charge_link(root_source_bytes, &newly_loaded, target) {
-            self.loader.forget(&newly_loaded);
-            return Err(e);
-        }
-        let result = self.exec_program(target);
-        if result.is_err() {
-            // 実行が完了しなかったmoduleは解決済みにしない（同じパスを再試行できる）
-            self.loader.forget(&newly_loaded);
-        }
-        result
+        self.run_phased(program, root_source_bytes)
+            .map_err(|(_, error)| error)
     }
 
-    /// REPL の1入力をトランザクションとして実行する（AUD-024）。
+    /// REPL の1入力（import を含まない）をトランザクションとして実行する（AUD-024）。
     ///
     /// 未捕捉ランタイムエラーで終了した入力は、その入力が変更した全 language-state
-    /// （binding、cell の値、index 代入、push/pop、import marker）を入力開始時点へ
-    /// 巻き戻す。正常完了と、入力内で catch されて最終的に正常完了したエラーは commit
-    /// する。stdout やファイル書き込みなどの外部効果は巻き戻さない。
+    /// （binding、cell の値、index 代入、push/pop）を入力開始時点へ巻き戻す。正常完了と、
+    /// 入力内で catch されて最終的に正常完了したエラーは commit する。stdout やファイル書き込み
+    /// などの外部効果は巻き戻さない。
     ///
-    /// link 失敗（読み込み・parse・sandbox・深度）は最初の文を実行する前に報告され、
-    /// この場合 language-state は変化していないため journal は空のまま破棄される。
+    /// link 失敗は最初の文を実行する前に報告され、この場合 language-state は変化していないため
+    /// journal は空のまま破棄される。import は [`Self::run`] と同じく扱わない。
     pub fn run_repl_submission(
         &mut self,
         program: &Program,
         root_source_bytes: u64,
     ) -> Result<(), TsumugiError> {
         self.env.begin_submission();
-        let (linked, newly_loaded) = match self.loader.link(program) {
+        let linked = match self.link_import_free(program, root_source_bytes) {
             Ok(linked) => linked,
-            Err(e) => {
+            Err((_, e)) => {
                 // link はまだ language-state を変えていない。journal を破棄する。
                 self.env.commit_submission();
                 return Err(e);
             }
         };
         let target = linked.as_ref().unwrap_or(program);
-        // source/import 予算と AST heap を Link フェーズで課金する（REV-015 Slice 2 / PR-d）。
-        // 超過なら 1 文も実行せず、language-state も import marker も巻き戻す。
-        if let Err(e) = self.charge_link(root_source_bytes, &newly_loaded, target) {
-            self.env.rollback_submission();
-            self.loader.forget(&newly_loaded);
-            return Err(e);
-        }
         let result = self.exec_program(target);
         if result.is_err() {
             // language-state を入力開始時点へ戻す。
             self.env.rollback_submission();
-            // 実行が完了しなかったmoduleは解決済みにしない（同じパスを再試行できる）。
-            self.loader.forget(&newly_loaded);
         } else {
             self.env.commit_submission();
         }
         result
+    }
+
+    /// graph を持たない入口（[`Self::run`] など）の Link フェーズ。`import` が無ければ root source
+    /// だけを課金し、あれば graph に無い import として内部 error にする。
+    fn link_import_free(
+        &mut self,
+        program: &Program,
+        root_source_bytes: u64,
+    ) -> Result<Option<Program>, (RunPhase, TsumugiError)> {
+        let graph = crate::module::GraphModules::default();
+        let (linked, expanded) =
+            crate::module::expand_from_graph(program, &graph, &self.graph_expanded)
+                .map_err(|e| (RunPhase::Link, e))?;
+        let target = linked.as_ref().unwrap_or(program);
+        self.charge_link_graph(root_source_bytes, &expanded, target)
+            .map_err(|e| (RunPhase::Link, e))?;
+        Ok(linked)
     }
 
     /// 現在の予算使用量 snapshot を返す（REV-015 Slice 3 PR-a）。
@@ -1608,7 +1550,23 @@ impl Evaluator {
         }
     }
 
-    /// 実行セッションを開始する（REV-015 Slice 3 PR-d-2、poll 経路の初回）。
+    /// import を含まない実行セッションを開始する（REV-015 Slice 3 PR-d-2、poll 経路の初回）。
+    ///
+    /// 空の graph で [`Self::begin_execution_from_graph`] を呼ぶ。`import` 文を含む program は
+    /// 1 文も実行せず `Link` フェーズの内部 error で失敗する（import は link が確かめた graph からだけ
+    /// 展開する、capability-model §10）。
+    pub fn begin_execution(
+        &mut self,
+        program: &Program,
+        root_source_bytes: u64,
+        transactional: bool,
+    ) -> Result<(), (RunPhase, TsumugiError)> {
+        let graph = crate::module::GraphModules::default();
+        self.begin_execution_from_graph(program, root_source_bytes, transactional, &graph)
+    }
+
+    /// 実行セッションを開始する。import は link が確かめた graph（`graph`）から展開する
+    /// （capability-model §10）。`Engine::run`・`run_audited`・REPL・scheduler の handle 経路が使う。
     ///
     /// import を link し、source/import/AST heap を Link フェーズで課金し、REPL transaction を
     /// 開始し、root 文列を Block frame として共有 frame stack へ積む。まだ 1 文も実行しない。
@@ -1620,18 +1578,6 @@ impl Evaluator {
     /// 保持され（[`Self::run_slice`] の yield 分岐は `finalize_session` を呼ばない）、
     /// terminal に到達したときだけ [`Self::finalize_session`] が commit / rollback する。
     /// このため slice 分割の有無にかかわらず、execution 全体が 1 つの transaction になる。
-    pub fn begin_execution(
-        &mut self,
-        program: &Program,
-        root_source_bytes: u64,
-        transactional: bool,
-    ) -> Result<(), (RunPhase, TsumugiError)> {
-        self.begin_execution_with(program, root_source_bytes, transactional, None)
-    }
-
-    /// [`Self::begin_execution`] と同じだが、import を評価器内蔵の [`crate::module::ModuleLoader`]
-    /// ではなく、link が確かめた graph（`graph`）から展開する（capability-model §10、
-    /// fix-import-run-from-link-graph）。`Engine::run`・`run_audited` だけがこの入口を選ぶ。
     ///
     /// 同じ `ModuleId` が別の内容で既に展開されていれば、1 文も実行せずに `Link` フェーズの
     /// import error（`import.hash_mismatch`）で失敗する。
@@ -1642,37 +1588,20 @@ impl Evaluator {
         transactional: bool,
         graph: &crate::module::GraphModules,
     ) -> Result<(), (RunPhase, TsumugiError)> {
-        self.begin_execution_with(program, root_source_bytes, transactional, Some(graph))
-    }
-
-    fn begin_execution_with(
-        &mut self,
-        program: &Program,
-        root_source_bytes: u64,
-        transactional: bool,
-        graph: Option<&crate::module::GraphModules>,
-    ) -> Result<(), (RunPhase, TsumugiError)> {
         if transactional {
             self.env.begin_submission();
         }
-        let linked_result = match graph {
-            None => self
-                .loader
-                .link(program)
-                .map(|(linked, loaded)| (linked, loaded, Vec::new())),
-            Some(graph) => crate::module::expand_from_graph(program, graph, &self.graph_expanded)
-                .map(|(linked, expanded)| (linked, Vec::new(), expanded)),
-        };
-        let (linked, newly_loaded, expanded) = match linked_result {
-            Ok(linked) => linked,
-            Err(e) => {
-                if transactional {
-                    // link はまだ language-state を変えていない。journal を破棄する。
-                    self.env.commit_submission();
+        let (linked, expanded) =
+            match crate::module::expand_from_graph(program, graph, &self.graph_expanded) {
+                Ok(linked) => linked,
+                Err(e) => {
+                    if transactional {
+                        // link はまだ language-state を変えていない。journal を破棄する。
+                        self.env.commit_submission();
+                    }
+                    return Err((RunPhase::Link, e));
                 }
-                return Err((RunPhase::Link, e));
-            }
-        };
+            };
         for module in &expanded {
             self.graph_expanded
                 .insert(module.id.clone(), module.source_hash);
@@ -1680,15 +1609,10 @@ impl Evaluator {
         let newly_expanded: Vec<crate::embedding::ModuleId> =
             expanded.iter().map(|module| module.id.clone()).collect();
         let target = linked.as_ref().unwrap_or(program);
-        let charged = match graph {
-            None => self.charge_link(root_source_bytes, &newly_loaded, target),
-            Some(_) => self.charge_link_graph(root_source_bytes, &expanded, target),
-        };
-        if let Err(e) = charged {
+        if let Err(e) = self.charge_link_graph(root_source_bytes, &expanded, target) {
             if transactional {
                 self.env.rollback_submission();
             }
-            self.loader.forget(&newly_loaded);
             self.forget_graph_modules(&newly_expanded);
             return Err((RunPhase::Link, e));
         }
@@ -1696,7 +1620,6 @@ impl Evaluator {
             if transactional {
                 self.env.rollback_submission();
             }
-            self.loader.forget(&newly_loaded);
             self.forget_graph_modules(&newly_expanded);
             return Err((RunPhase::Run, e));
         }
@@ -1713,7 +1636,6 @@ impl Evaluator {
         });
         self.session = Some(RunSession {
             base_depth,
-            newly_loaded,
             newly_expanded,
             transactional,
         });
@@ -1938,13 +1860,12 @@ impl Evaluator {
             if session.transactional {
                 self.env.rollback_submission();
             }
-            self.loader.forget(&session.newly_loaded);
             self.forget_graph_modules(&session.newly_expanded);
         }
     }
 
     /// graph から展開した module を未展開へ戻し、imported module record token を release する
-    /// （[`crate::module::ModuleLoader::forget`] と同じ巻き戻し、capability-model §10）。
+    /// （巻き戻し、capability-model §10）。
     fn forget_graph_modules(&mut self, modules: &[crate::embedding::ModuleId]) {
         for id in modules {
             self.graph_expanded.remove(id);
@@ -1956,30 +1877,16 @@ impl Evaluator {
     /// （REV-015 Slice 3 PR-a）。
     ///
     /// 埋め込み handle が terminal outcome を `LinkError` と `RuntimeError` に振り分ける
-    /// ために使う。観測挙動は [`Self::run`] と同一で、成功なら `Ok(())`、失敗なら
-    /// 発生フェーズ（`RunPhase::Link` / `RunPhase::Run`）と error を返す。
+    /// ために使う。成功なら `Ok(())`、失敗なら発生フェーズ（`RunPhase::Link` / `RunPhase::Run`）と
+    /// error を返す。[`Self::run`] と同じく import は扱わない。
     pub fn run_phased(
         &mut self,
         program: &Program,
         root_source_bytes: u64,
     ) -> Result<(), (RunPhase, TsumugiError)> {
-        let (linked, newly_loaded) = match self.loader.link(program) {
-            Ok(linked) => linked,
-            Err(e) => return Err((RunPhase::Link, e)),
-        };
+        let linked = self.link_import_free(program, root_source_bytes)?;
         let target = linked.as_ref().unwrap_or(program);
-        if let Err(e) = self.charge_link(root_source_bytes, &newly_loaded, target) {
-            self.loader.forget(&newly_loaded);
-            return Err((RunPhase::Link, e));
-        }
-        match self.exec_program(target) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                // 実行が完了しなかった module は解決済みにしない（同じパスを再試行できる）。
-                self.loader.forget(&newly_loaded);
-                Err((RunPhase::Run, e))
-            }
-        }
+        self.exec_program(target).map_err(|e| (RunPhase::Run, e))
     }
 
     fn exec_program(&mut self, program: &Program) -> Result<(), TsumugiError> {
@@ -6763,25 +6670,26 @@ mod tests {
     // （`SingleSourceBytes < SourceCount < SourceBytes`、`ImportCount < ImportBytes`）どおり
     // `SourceCount` / `ImportCount` であることを固定する。
     //
-    // 観測経路: embedding resolver 経路（`Engine::run_audited`）は現状 source/import の count を
-    // 課金しない（count 上限適用は本 CAP-AT-17 が閉じる TODO）ため、tree の ambient `ModuleLoader`
-    // 経路（`Evaluator::run` + `set_base_dir` + tempdir に staging した `.tsg`）で観測する。
+    // 観測経路: link が確かめた graph からの展開（`begin_execution_from_graph`）の Link フェーズ課金
+    // （`charge_link_graph`）を、in-memory の graph で観測する（filesystem も resolver も使わない）。
     // standard budget を per-resource 上限 1 つだけ N に絞って回す。
 
-    /// CAP-AT-17 の source/import 境界用に import module を tempdir へ staging し、root path を返す。
-    fn stage_cap_at_17_graph(
-        tag: &str,
-        imports: &[(&str, &str)],
-        root: &str,
-    ) -> std::path::PathBuf {
-        let dir = unique_temp_path(tag);
-        std::fs::create_dir_all(&dir).expect("一時ディレクトリの作成に失敗");
-        for (name, body) in imports {
-            std::fs::write(dir.join(name), body).expect("import module の作成に失敗");
-        }
-        let root_path = dir.join("main.tsg");
-        std::fs::write(&root_path, root).expect("root script の作成に失敗");
-        root_path
+    /// CAP-AT-17 の source/import 境界用に、`import "a.tsg"` と `import "b.tsg"` を持つ root と
+    /// それに対応する in-memory の graph を作る。
+    fn cap_at_17_graph() -> (String, crate::module::GraphModules) {
+        let ids = [
+            crate::embedding::ModuleId::new("@default/a.tsg").expect("module id"),
+            crate::embedding::ModuleId::new("@default/b.tsg").expect("module id"),
+        ];
+        let hash = crate::embedding::SourceHash::from_bytes([0; 32]);
+        let sources = [
+            (&ids[0], hash, "let a1 = 1\n"),
+            (&ids[1], hash, "let b1 = 2\n"),
+        ];
+        let root = "import \"a.tsg\"\nimport \"b.tsg\"\nlet root_marker = 0\n".to_string();
+        let graph = crate::module::GraphModules::prepare(&parse_program(&root), sources)
+            .expect("graph の準備");
+        (root, graph)
     }
 
     /// standard budget を 1 つの per-resource 上限だけ差し替えて作る。
@@ -6795,18 +6703,13 @@ mod tests {
     #[test]
     fn cap_at_17_source_count_overflow_prefers_source_count_resource() {
         // root + import 2 本（source 3 本）> max_source_count=2。
-        let root_path = stage_cap_at_17_graph(
-            "cap-at-17-src-resource",
-            &[("a.tsg", "let a1 = 1\n"), ("b.tsg", "let b1 = 2\n")],
-            "import \"a.tsg\"\nimport \"b.tsg\"\nlet root_marker = 0\n",
-        );
-        let root_source = std::fs::read_to_string(&root_path).expect("root の読み込み");
+        let (root_source, graph) = cap_at_17_graph();
         let program = parse_program(&root_source);
 
         let mut eval = Evaluator::with_budget(cap_at_17_budget(|c| c.max_source_count = 2));
         eval.set_capabilities(ambient_test_capabilities());
-        eval.set_base_dir(&root_path);
-        let result = eval.run(&program, root_source.len() as u64);
+        let result =
+            eval.begin_execution_from_graph(&program, root_source.len() as u64, true, &graph);
 
         assert!(result.is_err(), "N+1（source 3 本）は失敗するはず");
         assert_eq!(
@@ -6820,18 +6723,13 @@ mod tests {
     fn cap_at_17_import_count_overflow_prefers_import_count_resource() {
         // root（import ではない）+ import 2 本 → import_count 2 > max_import_count=1。
         // tiny module なので §7.2 の ImportCount < ImportBytes 順どおり ImportCount が primary。
-        let root_path = stage_cap_at_17_graph(
-            "cap-at-17-imp-resource",
-            &[("a.tsg", "let a1 = 1\n"), ("b.tsg", "let b1 = 2\n")],
-            "import \"a.tsg\"\nimport \"b.tsg\"\nlet root_marker = 0\n",
-        );
-        let root_source = std::fs::read_to_string(&root_path).expect("root の読み込み");
+        let (root_source, graph) = cap_at_17_graph();
         let program = parse_program(&root_source);
 
         let mut eval = Evaluator::with_budget(cap_at_17_budget(|c| c.max_import_count = 1));
         eval.set_capabilities(ambient_test_capabilities());
-        eval.set_base_dir(&root_path);
-        let result = eval.run(&program, root_source.len() as u64);
+        let result =
+            eval.begin_execution_from_graph(&program, root_source.len() as u64, true, &graph);
 
         assert!(result.is_err(), "N+1（import 2 本）は失敗するはず");
         assert_eq!(

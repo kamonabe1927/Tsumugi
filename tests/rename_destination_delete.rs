@@ -152,7 +152,7 @@ fn run_vm(source: &str, caps: CapabilitySet) -> Result<(), TsumugiError> {
     let chunk = Compiler::new().compile(&program).expect("compile");
     let mut vm = Vm::new(chunk);
     vm.set_capabilities(caps);
-    vm.charge_link(source.len() as u64, &[])
+    vm.charge_link_graph(source.len() as u64, &[])
         .expect("charge_link");
     vm.run()
 }

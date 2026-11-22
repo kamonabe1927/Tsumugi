@@ -1073,7 +1073,7 @@ impl Value {
     /// 論理サイズ `bytes` の heap 課金トークン（`Tracked<()>`）を作る（REV-015 PR-d）。
     ///
     /// AST / bytecode chunk / imported module record / rollback journal entry のように
-    /// `Value` ツリーに現れず所有構造側（`ModuleLoader` / `Vm` / `Env` など）が保持する
+    /// `Value` ツリーに現れず所有構造側（`Evaluator` / `Vm` / `Env` など）が保持する
     /// heap object を per-drop 追跡するための汎用トークン。関数 header（PR-c）と同じ
     /// `Tracked<()>` + 台帳への `Weak` 経由の課金パターンで、生成時に §5.1 の論理サイズ
     /// `bytes` を live heap へ課金し、この token を握る最後の `Rc` が drop した時点で

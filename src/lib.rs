@@ -27,7 +27,6 @@ pub mod lexer;
 pub(crate) mod limits;
 pub mod module;
 pub mod parser;
-pub mod sandbox;
 pub mod scheduler;
 pub mod stable_error;
 pub mod token;

@@ -3,6 +3,9 @@
 //! CLI 経由の統合テストではなく、crate root から re-export される型だけを使い、
 //! `Engine` と `ExecutionContext` の利用方法を固定する。
 
+#[path = "support/counting_resolver.rs"]
+mod counting_resolver;
+
 use tsumugi::{Engine, ExecutionContext, ExecutionOutcome};
 
 #[test]
@@ -208,13 +211,15 @@ fn runtime_error_surfaces_as_runtime_error_outcome() {
     }
 }
 
-/// Link フェーズの失敗（存在しない import）は Terminal(LinkError) として現れる。
+/// Link フェーズの失敗（resolver が解決できない import）は Terminal(LinkError) として現れる。
 #[test]
 fn link_error_surfaces_as_link_error_outcome() {
     let engine = Engine::new();
-    // 存在しない module の import は Link フェーズで失敗する。
+    // resolver が解決できない module の import は Link フェーズで失敗する。
     let script = engine.compile("import \"__no_such_module__\"\n").unwrap();
     let mut context = ExecutionContext::new();
+    let (resolver, _calls) = counting_resolver::CountingResolver::new(&[]);
+    context.set_capabilities(resolver.capabilities());
 
     let mut handle = engine
         .create_execution(&script, &mut context, ExecutionRequest::new())
@@ -228,6 +233,80 @@ fn link_error_surfaces_as_link_error_outcome() {
             assert_eq!(error.error_type(), "import");
         }
         other => panic!("LinkError を期待したが {other:?}"),
+    }
+}
+
+/// HIL-AT-01（未 grant）: `module_resolver` を grant しない context の import は、`create_execution` /
+/// `start` のどちらでも `Running` に入らず terminal の LinkError（resolver は grant が無いので呼ばれない）
+/// になり、1 文も実行しない（committed fuel 0）。同期 wrapper の `execute` / `execute_repl_submission`
+/// も同じ。
+#[test]
+fn hil_at_01_import_without_resolver_grant_is_denied() {
+    let engine = Engine::new();
+    let script = engine.compile("import \"m.tsg\"\nlet after = 1\n").unwrap();
+
+    for use_start in [false, true] {
+        let mut context = ExecutionContext::new();
+        let mut handle = if use_start {
+            engine.start(&script, &mut context, ExecutionRequest::new())
+        } else {
+            engine.create_execution(&script, &mut context, ExecutionRequest::new())
+        }
+        .expect("単一 execution の admit は成功する");
+        match handle.poll(PollSlice::default()).unwrap() {
+            PollResult::Terminal {
+                outcome: ExecutionOutcome::LinkError { error },
+                usage,
+            } => {
+                assert_eq!(error.error_type(), "capability", "start={use_start}");
+                assert_eq!(
+                    usage.committed.fuel, 0,
+                    "1 文も実行しない: start={use_start}"
+                );
+            }
+            other => panic!("LinkError を期待したが {other:?} (start={use_start})"),
+        }
+        assert_eq!(
+            handle.state(),
+            tsumugi::ExecutionState::Terminal,
+            "Running を経ずに terminal: start={use_start}"
+        );
+    }
+
+    let mut context = ExecutionContext::new();
+    let error = engine
+        .execute(&script, &mut context)
+        .expect_err("execute は resolver 未 grant の import を拒否するはず");
+    assert_eq!(error.error_type(), "capability");
+    assert_eq!(context.budget_usage().committed.fuel, 0);
+
+    let mut context = ExecutionContext::new();
+    let error = engine
+        .execute_repl_submission(&script, &mut context)
+        .expect_err("execute_repl_submission も拒否するはず");
+    assert_eq!(error.error_type(), "capability");
+    assert_eq!(context.budget_usage().committed.fuel, 0);
+}
+
+/// HIL-AT-01 の補足: resolver を grant した同期 wrapper は import を実行できる（展開は link の graph から）。
+#[test]
+fn hil_at_01_sync_wrappers_run_import_with_resolver_grant() {
+    let engine = Engine::new();
+    let script = engine
+        .compile("import \"m.tsg\"\nlet z = m1 + 1\n")
+        .unwrap();
+    for repl in [false, true] {
+        let (resolver, calls) =
+            counting_resolver::CountingResolver::new(&[("@default/m.tsg", "let m1 = 41\n")]);
+        let mut context = ExecutionContext::new();
+        context.set_capabilities(resolver.capabilities());
+        let result = if repl {
+            engine.execute_repl_submission(&script, &mut context)
+        } else {
+            engine.execute(&script, &mut context)
+        };
+        assert_eq!(result, Ok(ExecutionOutcome::Completed), "repl={repl}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
 
@@ -4020,4 +4099,36 @@ fn check_a_b(engine: &Engine) -> tsumugi::CompiledScript {
     engine
         .compile("if a != 10 or b != 2\n  nope\nend\n")
         .unwrap()
+}
+
+/// HIL-AT-04（経路の削除）: `src/` に評価器内蔵の import loader の定義・参照（コメントを含む）が無く、
+/// import 用のサンドボックス検査（`src/sandbox.rs`）も無い。
+#[test]
+fn hil_at_04_internal_import_loader_is_removed() {
+    fn visit(dir: &std::path::Path, hits: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("src を読める") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                visit(&path, hits);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = std::fs::read_to_string(&path).expect("UTF-8 の source");
+                // 検索語は連結して書き、このテスト自身に一致しないようにする。
+                let needle = ["Module", "Loader"].concat();
+                if text.contains(&needle) {
+                    hits.push(path.display().to_string());
+                }
+            }
+        }
+    }
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut hits = Vec::new();
+    visit(&src, &mut hits);
+    assert!(
+        hits.is_empty(),
+        "import loader の参照が残っている: {hits:?}"
+    );
+    assert!(
+        !src.join("sandbox.rs").exists(),
+        "import 用の検査（sandbox.rs）が残っている"
+    );
 }

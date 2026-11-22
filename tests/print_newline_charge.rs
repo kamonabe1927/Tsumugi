@@ -109,7 +109,7 @@ fn vm_usage(source: &str) -> BudgetUsage {
     let mut vm = Vm::new(chunk);
     vm.set_capabilities(capabilities());
     vm.set_max_steps(100_000);
-    vm.charge_link(source.len() as u64, &[])
+    vm.charge_link_graph(source.len() as u64, &[])
         .expect("charge_link");
     vm.run().expect("vm run");
     vm.budget_usage()

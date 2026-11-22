@@ -5,6 +5,9 @@
 //! 固定する。本 FEAT（FEAT-001）は scheduler-core（admission + fairness/backpressure）の
 //! 範囲を対象とし、host pending（HostCallPending / waker）は FEAT-002 で追加する。
 
+#[path = "support/counting_resolver.rs"]
+mod counting_resolver;
+
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use tsumugi::{
@@ -1784,4 +1787,288 @@ fn trs_at_04_non_terminal_drop_still_releases_slot() {
     let _h2 = engine
         .create_execution(&script, &mut c2, ExecutionRequest::new())
         .expect("非 terminal の drop で active が解放される");
+}
+
+/// HIL-AT-02（grant あり・execution 中の resolver 0 回、TM-AT-24）: 呼ばれた回数を数える resolver を
+/// grant し、import を 2 本含む script を 1 slice ずつ poll すると、resolver は初回 poll の Link フェーズで
+/// import の数だけ呼ばれ、以後の poll では 0 回で、module の top-level が実行される。
+#[test]
+fn hil_at_02_resolver_called_only_in_link_phase() {
+    use std::sync::atomic::Ordering;
+
+    let engine = Engine::new();
+    let script = engine
+        .compile(
+            "import \"a.tsg\"\nimport \"b.tsg\"\nlet z = a1 + b1\nlet i = 0\nwhile i < 200\n  i = i + 1\nend\n",
+        )
+        .unwrap();
+    let (resolver, calls) = counting_resolver::CountingResolver::new(&[
+        ("@default/a.tsg", "let a1 = 1\n"),
+        ("@default/b.tsg", "let b1 = 2\n"),
+    ]);
+    let mut context = ExecutionContext::new();
+    context.set_capabilities(resolver.capabilities());
+
+    let mut handle = engine
+        .create_execution(&script, &mut context, ExecutionRequest::new())
+        .expect("admit");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "create_execution は link しない"
+    );
+
+    let small = PollSlice { max_fuel: 8 };
+    let first = handle.poll(small).expect("poll");
+    assert!(
+        matches!(first, PollResult::Yielded { .. }),
+        "1 slice では終わらないはず: {first:?}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "resolver は Link フェーズで import の数だけ呼ばれる"
+    );
+
+    let mut polls = 1;
+    loop {
+        match handle.poll(small).expect("poll") {
+            PollResult::Terminal { outcome, .. } => {
+                assert_eq!(
+                    outcome,
+                    ExecutionOutcome::Completed,
+                    "module の top-level が実行される"
+                );
+                break;
+            }
+            PollResult::Yielded { .. } => {
+                polls += 1;
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    2,
+                    "Running 以降の resolver 呼び出しは 0 回"
+                );
+            }
+            other => panic!("想定外: {other:?}"),
+        }
+    }
+    assert!(polls > 2, "複数 slice にまたがったはず: {polls}");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+/// HIL-AT-03（読み直さない）: on-disk に無い module を返す in-memory resolver で handle 経路の import が
+/// 実行され、CWD に同名のファイルがあっても読まれない。
+#[test]
+fn hil_at_03_import_uses_resolver_not_filesystem() {
+    use std::sync::atomic::Ordering;
+
+    // `tests/fixtures/import_lib.tsg` は CWD（crate root）に実在し、`fn add` を定義する。resolver は
+    // 同じ specifier に対し別の内容（`from_resolver`）を返すので、読まれたのがどちらかが分かる。
+    assert!(std::path::Path::new("tests/fixtures/import_lib.tsg").exists());
+    let engine = Engine::new();
+    let script = engine
+        .compile("import \"tests/fixtures/import_lib.tsg\"\nlet z = from_resolver + 1\n")
+        .unwrap();
+    let (resolver, calls) = counting_resolver::CountingResolver::new(&[(
+        "@default/tests/fixtures/import_lib.tsg",
+        "let from_resolver = 41\n",
+    )]);
+    let mut context = ExecutionContext::new();
+    context.set_capabilities(resolver.capabilities());
+
+    let mut handle = engine
+        .create_execution(&script, &mut context, ExecutionRequest::new())
+        .expect("admit");
+    match handle.poll(PollSlice::default()).expect("poll") {
+        PollResult::Terminal { outcome, .. } => {
+            assert_eq!(
+                outcome,
+                ExecutionOutcome::Completed,
+                "resolver の内容が展開される"
+            );
+        }
+        other => panic!("terminal を期待したが {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// HIL-AT-03 の補足（REV-020）: import 先の構文エラーは、semantic-decisions §3.4 の「import先のparse失敗」の
+/// テンプレート（`{module}` を含む）で、parse 診断を cause として message に保持した terminal の LinkError になる。
+#[test]
+fn hil_at_03_invalid_module_keeps_module_and_parse_cause() {
+    let engine = Engine::new();
+    let script = engine.compile("import \"bad.tsg\"\nlet z = 1\n").unwrap();
+    let (resolver, _calls) = counting_resolver::CountingResolver::new(&[(
+        "@default/bad.tsg",
+        "let ok = 1\nlet b = @\n",
+    )]);
+    let mut context = ExecutionContext::new();
+    context.set_capabilities(resolver.capabilities());
+    let mut handle = engine
+        .create_execution(&script, &mut context, ExecutionRequest::new())
+        .expect("admit");
+    match handle.poll(PollSlice::default()).expect("poll") {
+        PollResult::Terminal {
+            outcome: ExecutionOutcome::LinkError { error },
+            usage,
+        } => {
+            assert_eq!(error.error_type(), "import");
+            let message = error.message();
+            assert!(
+                message.starts_with(
+                    "import に失敗しました: モジュールの構文が不正です: @default/bad.tsg"
+                ),
+                "{message}"
+            );
+            assert!(message.contains("2行目"), "原因の行番号: {message}");
+            assert!(
+                message.contains("想定外の文字: '@'"),
+                "原因の診断: {message}"
+            );
+            assert_eq!(stable_id(&error), "import.syntax");
+            assert_eq!(usage.committed.fuel, 0);
+        }
+        other => panic!("LinkError を期待したが {other:?}"),
+    }
+}
+
+/// HIL-AT-03 の補足: link の失敗（解決失敗・循環・深度）は §3.4 のテンプレートで、terminal の LinkError になる
+/// （PR #480 の Q2=A。解決失敗は `{code}`、循環は `{chain}`、深度は上限つき）。
+#[test]
+fn hil_at_03_link_failures_use_spec_templates() {
+    fn link_error_of(root: &str, sources: &[(&str, &str)]) -> tsumugi::error::TsumugiError {
+        let engine = Engine::new();
+        let script = engine.compile(root).unwrap();
+        let (resolver, _calls) = counting_resolver::CountingResolver::new(sources);
+        let mut context = ExecutionContext::new();
+        context.set_capabilities(resolver.capabilities());
+        let mut handle = engine
+            .create_execution(&script, &mut context, ExecutionRequest::new())
+            .expect("admit");
+        match handle.poll(PollSlice::default()).expect("poll") {
+            PollResult::Terminal {
+                outcome: ExecutionOutcome::LinkError { error },
+                ..
+            } => error,
+            other => panic!("LinkError を期待したが {other:?}"),
+        }
+    }
+
+    // 解決失敗: `{code}` は host が作る検証済みの code で、specifier 原文を含まない。
+    let error = link_error_of("import \"missing_module\"\n", &[]);
+    assert_eq!(error.error_type(), "import");
+    assert!(
+        error
+            .message()
+            .starts_with("import に失敗しました: モジュールを読み込めません: "),
+        "{}",
+        error.message()
+    );
+    assert!(!error.message().contains("missing_module"));
+    assert_eq!(stable_id(&error), "import.unreadable");
+
+    // 循環: 起点を末尾に再掲した chain を `->` で結ぶ。
+    let error = link_error_of(
+        "import \"a.tsg\"\n",
+        &[
+            ("@default/a.tsg", "import \"b.tsg\"\n"),
+            ("@default/b.tsg", "import \"a.tsg\"\n"),
+        ],
+    );
+    assert_eq!(error.error_type(), "import");
+    assert_eq!(
+        error.message(),
+        "import に失敗しました: import が循環しています: @default/a.tsg -> @default/b.tsg -> @default/a.tsg"
+    );
+    assert_eq!(stable_id(&error), "import.cycle");
+
+    // 深度: 129 段目の import。
+    let owned: Vec<(String, String)> = (0..130)
+        .map(|i| {
+            (
+                format!("@default/m{i}.tsg"),
+                format!("import \"m{}.tsg\"\n", i + 1),
+            )
+        })
+        .collect();
+    let refs: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let error = link_error_of("import \"m0.tsg\"\n", &refs);
+    assert_eq!(error.error_type(), "import");
+    assert_eq!(
+        error.message(),
+        "import に失敗しました: import のネストが深すぎます (上限: 128)"
+    );
+    assert_eq!(stable_id(&error), "import.depth");
+}
+
+/// error の安定 ID（`StableError::project` の `message_id`）。
+fn stable_id(error: &tsumugi::error::TsumugiError) -> String {
+    let module_id = tsumugi::ModuleId::new("@default/root").expect("module id");
+    tsumugi::StableError::project(error, module_id)
+        .expect("import の error は catch 可能")
+        .message_id
+        .as_str()
+        .to_string()
+}
+
+/// `LinkError::BudgetExceeded` の写像（PR #480 の Q1=A）: link 時の予算超過は import の error にせず、
+/// resource に応じた budget 系の error（kind `source_limit`）になり、1 文も実行しない。
+#[test]
+fn hil_at_03_link_budget_exceeded_maps_to_budget_error() {
+    use std::num::NonZeroU128;
+    use tsumugi::{
+        AdapterError, BudgetExceeded, BudgetResource, BudgetUnit, CapabilityCallContext,
+        CapabilitySet, ControlStop, ExecutionPhase, ModuleResolver, ResolveRequest, ResolvedModule,
+    };
+
+    struct BudgetStopResolver;
+    impl ModuleResolver for BudgetStopResolver {
+        fn policy_id(&self) -> NonZeroU128 {
+            NonZeroU128::new(98).expect("非ゼロ")
+        }
+        fn resolve(
+            &self,
+            _context: &mut CapabilityCallContext<'_>,
+            _request: ResolveRequest<'_>,
+        ) -> Result<ResolvedModule, AdapterError> {
+            Err(AdapterError::Control(ControlStop::BudgetExceeded(
+                BudgetExceeded {
+                    resource: BudgetResource::ImportCount,
+                    limit: 1,
+                    used: 1,
+                    reserved: 0,
+                    requested: 1,
+                    unit: BudgetUnit::Count,
+                    phase: ExecutionPhase::Link,
+                },
+            )))
+        }
+    }
+
+    let engine = Engine::new();
+    let script = engine.compile("import \"a.tsg\"\nlet z = 1\n").unwrap();
+    let mut context = ExecutionContext::new();
+    context.set_capabilities(
+        CapabilitySet::builder()
+            .module_resolver(std::sync::Arc::new(BudgetStopResolver))
+            .expect("grant")
+            .build(),
+    );
+    let mut handle = engine
+        .create_execution(&script, &mut context, ExecutionRequest::new())
+        .expect("admit");
+    match handle.poll(PollSlice::default()).expect("poll") {
+        PollResult::Terminal {
+            outcome: ExecutionOutcome::LinkError { error },
+            usage,
+        } => {
+            assert_eq!(error.error_type(), "source_limit");
+            assert_eq!(error.message(), "import の本数が上限を超えました (上限: 1)");
+            assert_eq!(usage.committed.fuel, 0);
+        }
+        other => panic!("LinkError を期待したが {other:?}"),
+    }
 }

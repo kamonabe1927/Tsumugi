@@ -79,7 +79,7 @@ fn run_vm(source: &str, fuel: u64) -> Run {
     let mut vm = Vm::with_budget(chunk, BudgetConfig::for_legacy(fuel, 1_000_000));
     vm.set_capabilities(capabilities(&buffer));
     let result = vm
-        .charge_link(source.len() as u64, &[])
+        .charge_link_graph(source.len() as u64, &[])
         .and_then(|_tokens| vm.run());
     summarize(&buffer, result)
 }

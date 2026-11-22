@@ -135,7 +135,7 @@ fn run_engine(
         let chunk = Compiler::new().compile(&program).expect("compile");
         let mut vm = Vm::with_budget(chunk, config);
         vm.set_capabilities(capabilities(base, grant));
-        vm.charge_link(source.len() as u64, &[])
+        vm.charge_link_graph(source.len() as u64, &[])
             .expect("charge_link");
         let result = vm.run();
         (result, vm.budget_usage())

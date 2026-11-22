@@ -210,25 +210,6 @@ const ALLOWLIST: &[Allow] = &[
         reason: "SystemClock adapter。Clock capability の実体",
         principle: "2・8",
     },
-    // import 解決（C6）。runtime fs ではない（§6.6）。C6/E7 で撤去予定。
-    Allow {
-        file: "module.rs",
-        key: "fs",
-        reason: "import 解決（C6）。runtime fs ではない（§6.6）",
-        principle: "2・8",
-    },
-    Allow {
-        file: "module.rs",
-        key: "env",
-        reason: "import 解決の基準 directory（current_dir）。C6/E7 で撤去予定",
-        principle: "2・8",
-    },
-    Allow {
-        file: "sandbox.rs",
-        key: "env",
-        reason: "legacy の TSUMUGI_SANDBOX の読み取り。C6/E7 で撤去予定",
-        principle: "2・8",
-    },
     // ホスト側の adapter・待機・開発用ツール。
     Allow {
         file: "host_pending.rs",

@@ -982,7 +982,7 @@ impl TsumugiError {
     /// （存在 oracle 防止、CAP-AT-12/13）。message に host path・symlink・permission を
     /// 含めない。存在 path と不存在 path で同一の code/message になる。
     pub fn filesystem_denied(line: usize) -> Self {
-        // Sandbox は 2 テンプレート（filesystem_denied / sandbox.rs のパス範囲外違反）を持つ
+        // Sandbox は 2 テンプレート（filesystem_denied と、import 用の検査〔撤去済み〕のパス範囲外違反）を持つ
         // クラス B kind。kind だけでは一意化できないため message_id を付与する（§8.2）。
         Self::runtime_with_message_id(
             line,
