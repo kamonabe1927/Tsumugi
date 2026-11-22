@@ -1996,9 +1996,10 @@ push_call_frame(...):      # frame を積む唯一の経路（Call / callback。
   watchdog_tick(line)?     # (W2) frame の追加
 
 fuel の論理課金点（tree の現行課金点と同じ。各 1）:
-  (F1) ループの back-edge  : `Loop` 命令（`Loop` は back-edge 専用にする。`for` の
-                             `continue` は前方 `Jump` で increment へ飛ばす）
-  (F2) user function 呼出し: `PrepareCall`（呼び出し位置の line。深度検査の前）
+  (F1) ループの back-edge  : `Loop` 命令の直前の `Charge`（`Loop` は back-edge 専用にする。`for` の
+                             `continue` は前方 `Jump` で increment へ飛ばす。`Loop` 自体は課金しない）
+  (F2) user function 呼出し: `PrepareCall` の直前の `Charge`（呼び出し位置の line。深度検査の前。
+                             `PrepareCall` 自体は課金しない）
   (F3) builtin の callback : `call_fn_value`（builtin 呼び出しの line）
 ```
 

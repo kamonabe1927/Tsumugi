@@ -12,7 +12,7 @@ use crate::value::Value;
 use super::Evaluator;
 
 impl Evaluator {
-    /// callback 呼び出しの前処理: `count_step` → 深度検査 → callable 検査 → arity 検査
+    /// callback 呼び出しの前処理: `charge`（callback 種別）→ 深度検査 → callable 検査 → arity 検査
     /// （同期経路の `call_fn_value` と式 frame の段階評価で共有する、tree-expr-continuation-e4）。
     /// callback は常に `arg_count` 個の引数で呼ぶため、arity 不一致は callback 専用 message で報告する。
     pub(super) fn callback_precheck(
@@ -23,7 +23,7 @@ impl Evaluator {
         line: usize,
     ) -> Result<(), TsumugiError> {
         // 再帰制限チェック（通常の関数呼び出しと同じガードを適用）
-        self.count_step(line)?;
+        self.charge(crate::budget::ChargeKind::BuiltinCallback, line)?;
         if self.call_stack.len() >= super::MAX_USER_CALL_DEPTH {
             return Err(TsumugiError::call_depth_limit(
                 line,

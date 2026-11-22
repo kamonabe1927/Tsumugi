@@ -2,7 +2,9 @@
 mod builtin;
 
 use crate::ast::*;
-use crate::budget::{BudgetConfig, BudgetLedger, ControlStop, ExecutionPhase};
+use crate::budget::{
+    BudgetConfig, BudgetLedger, ChargeKind, ControlStop, ExecutionPhase, FuelSchedule,
+};
 use crate::env::Env;
 use crate::error::{TraceFrame, TsumugiError};
 use crate::limits::MAX_USER_CALL_DEPTH;
@@ -1063,16 +1065,16 @@ impl Evaluator {
         self.loader.set_base_dir(path);
     }
 
-    /// ステップ（fuel）を 1 課金し、上限チェックする（REV-015 Slice 1）。
+    /// ステップ（fuel）を [`FuelSchedule`] の種別の値で課金し、上限チェックする（REV-015 Slice 1・F-2b）。
     ///
     /// 既存挙動どおり、total fuel 上限到達時は `step_limit` エラーを call trace 付きで返す。
     /// 課金した 1 は台帳の commit 済み fuel として slice 使用量（§4.2）にも入る（fuel-bulk-chunk-yield
     /// Q1 = A）。slice 上限の判定は yield 可能な文/反復境界（driver）で行うため、ここでは課金だけ行い
     /// yield はしない（式の途中で
     /// yield すると Rust 再帰スタックを保存できず resume 不能になるため）。
-    fn count_step(&mut self, line: usize) -> Result<(), TsumugiError> {
+    fn charge(&mut self, kind: ChargeKind, line: usize) -> Result<(), TsumugiError> {
         self.budget
-            .charge_fuel(1, ExecutionPhase::Run)
+            .charge_fuel(FuelSchedule::cost(kind), ExecutionPhase::Run)
             .map_err(|stop| self.control_stop_to_error(stop, line))
     }
 
@@ -2340,7 +2342,7 @@ impl Evaluator {
                 // 直前反復の本体を実行し終えていれば、次反復判定の前に fuel を課金する
                 // （従来 while の末尾 count_step と同じ順序・タイミング）。
                 if charge_step {
-                    self.count_step(line)?;
+                    self.charge(ChargeKind::LoopIteration, line)?;
                 }
                 // condition は site.owner（clone した Block ローカル）越しに読む。この借用は
                 // self.frames ではなくローカル `site` に紐づくので、eval_expr（&mut self）を
@@ -2381,7 +2383,7 @@ impl Evaluator {
                 next_item,
             } => {
                 if charge_step {
-                    self.count_step(line)?;
+                    self.charge(ChargeKind::LoopIteration, line)?;
                 }
                 match next_item {
                     Some(item) => {
@@ -3228,14 +3230,14 @@ impl Evaluator {
                         "callback target in step_target_call",
                     ));
                 }
-                CallTarget::Host => self.count_step(line)?,
+                CallTarget::Host => self.charge(ChargeKind::HostCall, line)?,
                 CallTarget::Cooperative => {
                     // resume 中の格納結果は count_step と引数の評価より前に消費する（同期経路と同じ）。
                     if let Some((_call_id, result)) = self.resumed_host_call.take() {
                         let value = self.finish_cooperative_result(name, result, line)?;
                         return self.finish_expr_frame(value);
                     }
-                    self.count_step(line)?;
+                    self.charge(ChargeKind::HostCall, line)?;
                 }
             }
         }
@@ -4643,7 +4645,7 @@ impl Evaluator {
             && self.env.get_cell(name).is_none()
             && self.host_registry.contains_name(name)
         {
-            self.count_step(line)?;
+            self.charge(ChargeKind::HostCall, line)?;
             // 引数を評価してから host function へ渡す（呼び出し側で評価順を確定する）。
             let mut arg_values = Vec::with_capacity(args.len());
             for arg in args {
@@ -4713,7 +4715,7 @@ impl Evaluator {
     /// ユーザー関数呼び出しの入口: `count_step` → 深度検査（同期経路と式 frame で共有する段、
     /// tree-expr-continuation-e2a）。
     fn begin_user_call(&mut self, line: usize) -> Result<(), TsumugiError> {
-        self.count_step(line)?;
+        self.charge(ChargeKind::UserCall, line)?;
         if self.call_stack.len() >= MAX_USER_CALL_DEPTH {
             return Err(TsumugiError::call_depth_limit(line, MAX_USER_CALL_DEPTH));
         }
@@ -4815,7 +4817,7 @@ impl Evaluator {
             return self.finish_cooperative_result(name, result, line);
         }
 
-        self.count_step(line)?;
+        self.charge(ChargeKind::HostCall, line)?;
         // 引数を評価してから adapter へ渡す（評価順を確定する）。
         let mut arg_values = Vec::with_capacity(args.len());
         for arg in args {

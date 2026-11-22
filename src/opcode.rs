@@ -25,6 +25,8 @@ pub enum CaptureDesc {
     Upvalue(usize),
 }
 
+use crate::budget::ChargeKind;
+
 /// VM が実行する命令
 #[derive(Debug, Clone, PartialEq)]
 pub enum OpCode {
@@ -120,8 +122,15 @@ pub enum OpCode {
     /// 後方ジャンプ（ループ先頭に戻る: ip を指定位置に設定）
     Loop(usize),
 
+    /// fuel の論理課金点（F-2b）。payload の種別の値を [`crate::budget::FuelSchedule`] から課金する。
+    ///
+    /// compiler が `Loop` の直前（ループ反復）と `PrepareCall` の直前（user function 呼び出し）に
+    /// 出す。bytecode に出てよい種別はこの 2 つだけで、verifier が他の種別を拒否する。
+    /// dispatch 自体は課金しない。
+    Charge(ChargeKind),
+
     // --- 関数呼び出し ---
-    /// 呼び出しのstep予算と深度をcallee評価前に検査する
+    /// 呼び出しの深度をcallee評価前に検査する（fuel は直前の `Charge`）
     PrepareCall,
 
     /// calleeが関数でarityが一致することを引数評価前に検査する
