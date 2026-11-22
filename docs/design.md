@@ -477,7 +477,7 @@ Parserはプログラム直下とblock内の文を区別し、block内のimport�
 
 #### import の重複と循環: 既訪問は1回だけ展開、循環はlink時にerror
 
-- 同じ`ModuleId`は1回だけ展開する。正常に完了したimportの2回目以降は何もせずスキップする（エラーにしない）。同じ`ModuleId`が別の内容（`source_hash`が違う）で再び現れたら、1文も実行せずに`import.hash_mismatch`で失敗する
+- 同じ`ModuleId`は1回だけ展開する。正常に完了したimportの2回目以降は何もせずスキップする（エラーにしない）。同じ`ModuleId`が1つのlinkの中で別の内容（`source_hash`が違う）で現れたら、linkが`LinkError::Resolve`（code `module_hash_mismatch`）で拒否する。同じcontextで展開済みの`ModuleId`を別の内容のgraphからrunしようとしたら、runの`Link`フェーズで1文も実行せずに`import.hash_mismatch`で失敗する
 - link・課金・実行に失敗した場合は、そのsubmission・executionが新しく展開したmoduleの記録（`ModuleId`と`source_hash`の表）を巻き戻し、同じmoduleを再試行可能にする
 - A→B→Aのようにactiveな`ModuleId`へ戻る循環は、linkが`LinkError::Cycle`で拒否し、1文も実行しない（schedulerのhandle経路では`import.cycle`のterminal `LinkError`になる）
 - importの深度はlinkがactive chainだけを数え、root scriptを除く128ファイルまで許可する。129段目はlink時に拒否し（`LinkError::DepthExceeded`）、1文も実行しない
