@@ -2982,11 +2982,11 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   function だけで、その課金は tree 単独で確かめる。
 - host call attempt（10）を課金する呼び出しの範囲（上の小節は filesystem builtin だけを挙げるが、§2 は clock・env・process
   の呼び出しを、§6.1 は stdio と任意の host call を host call とする）と、登録 host function を invocation と host call の
-  どちらに数えるか（F-2b の判断 Q1 で F-2c に回した）は spec に無い。判断の候補 Q1・Q2 にした。
+  どちらに数えるか（F-2b の判断 Q1 で F-2c に回した）は spec に無い。判断の候補 Q1・Q2 にした（Q1・Q2 = A。下の判断の記録）。
 - §4.1 は charge point の表だけを持ち、AST のどのノードを expression・operation に数えるか、operation と loop iteration を
   いつ課金するかを決めていない。成功する最小の上限 N は課金の順序に依らないが、`and` / `or` の短絡の数え方は N を変え、
   上限 N − 1 で止まる位置（それより前に出た stdout）は順序で変わる。F2c-AT-03 は両 engine の stdout の一致を求めるので、
-  両 engine が従う規則を spec に置く。判断の候補 Q3 にした。
+  両 engine が従う規則を spec に置く。判断の候補 Q3 にした（Q3 = A。下の判断の記録）。
 - 式は AST に line を持たない（`src/ast.rs` の `Expr`）。expression・operation・invocation・host call attempt の課金の line は
   その式を含む文の line（関数本体・lambda 本体の中では、その中の文の line）で、両 engine で同じにする。今の課金と同じ扱いである。
 - 既存の per-element 課金（比較・表示・`sort`）、List / Dict の深度の読み直し（§4.1）、`for` の反復列の heap 課金
@@ -3001,6 +3001,57 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   host-call の回数・byte を数えない逸脱一覧の 2 行は fuel ではない（§6.1 の counter）ので F-2c では消さない。
 - 想定の変更規模（見直し）: Q1 で host call attempt の課金点が増える分（stdio・`env` / `now` / `exit`・登録 host function、
   両 engine で 約 50 行）を足し、`src/` 約 600〜800 行。§14.1 の 1000 行に収まる。触る仕組みは fuel の課金点 1 つ、受入基準 5。
+
+**判断の記録**（F-2c の設計 PR #483 の判断の候補。判断役が選択（PR #483）、Q1〜Q3=A）:
+
+- **Q1 = A（host call attempt 10 は目標の章が host call とする呼び出しすべてに課金する）**: 対象は filesystem builtin
+  14 個、stdio（`print`・`input`）、`env`・`now`・`exit`、登録 host function（同期・cooperative）。§2 の用語は host call を
+  「capability 境界を越える clock、env、stdio、filesystem、process、登録 host function 等の呼出し」とし、§6.1 は stdio も
+  任意の host call も host call とし、§4.1 は host call attempt を種類で分けていない。版 `2` の課金表を目標の章の定義どおりに
+  固定でき、host へ出る呼び出しの費用が経路で変わらない（[マニフェスト](manifesto.md) 原則 3・5）。課金の位置は次のとおり。
+  - filesystem builtin と stdio: 今の回数の課金（`charge_host_call_request`・`charge_output`・`charge_input`）の直前で、
+    内容の描画の後（§6.1 の「描画が上限を超えたら operation 未開始」と合う）。
+  - `env`・`now`・`exit`・登録 host function（回数の counter を今は数えていないもの）: capability 判定より前
+    （§4.1「許可・拒否・host error のいずれでも課金」と §6.1「capability 判定前に `host_calls += 1`」による）。
+    登録 host function では、引数を評価した後、`resolve_host_call` などの grant 検査より前に置く。
+  host-call の回数・byte を数えない逸脱一覧の 2 行は fuel とは別の counter の逸脱なので、F-2c では残す。規模は約 50 行
+  増えて §14.1 に収まる。採らなかった案: B（filesystem builtin と登録 host function だけ）は stdio と clock・env・process を
+  数えないまま版 `2` を固定して §2・§6.1 と食い違い、直すには版をもう一度上げることになる（原則 3・9）。C（filesystem
+  builtin だけ）は登録 host function の host 呼び出しが fuel に現れず資源会計が過小になり、マニフェストに反しうる（原則 3）。
+- **Q2 = A（登録 host function の呼び出しは invocation 5 と host call attempt 10 の両方、計 15 を課金する）**: 上の
+  「F-2 実装スライス」小節の F2-AT-01b は filesystem builtin の 1 文の内訳を「host call 10 + builtin invocation 5 + …」と
+  しており、host へ出る builtin は既に両方を払う。登録 host function も同じ形にすると、同じ形の呼び出し式の費用が callee の
+  種類で変わらない（原則 5）。§4.1 の invocation の行の備考（user function、lambda、core builtin、callback）は登録 host
+  function を挙げていないが、**script の呼び出し式として呼ぶものは invocation に数える**と読み、登録 host function を含める。
+  invocation の位置は今の `ChargeKind::HostCall` の位置（`src/eval.rs`、callee・引数の評価より前）のままで、host call attempt
+  は Q1 の位置に置く（原則 8）。[Capability仕様](capability-model.md) §11.2 の `HostCost`（grant 後・callback 前の fuel）は
+  この 15 とは別のもので、同仕様の逸脱一覧のとおり F-2c では扱わない。採らなかった案: B（host call attempt 10 だけ）は
+  同じ呼び出し式でも callee が filesystem builtin なら 15、登録 host function なら 10 になって規則が 2 つになり、引数評価前の
+  今の課金点も消える（原則 5）。C（invocation 5 だけ）は §4.1 の host call attempt を登録 host function に課金せず、Q1 の C と
+  同じくマニフェストに反しうる（原則 3）。
+- **Q3 = A（実行した分だけを前順で数える）**: 両 engine が次の規則に従う。
+  1. statement: `Stmt` ノード 1 つを実行し始めるとき 1（`FnDef`・`Import`・`Break`・`Continue`・`TryCatch` を含む。
+     ブロックは数えない）。
+  2. expression: `Expr` ノード 1 つを評価し始めるとき 1（前順）。呼び出し式の callee が名前（`Expr::Ident`）のときは callee を
+     別の式に数えない（F2-AT-01b の内訳「call 式の expression 1 + 引数の expression 1」）。f-string は `FStr` 1 と式のパートごとに
+     1（リテラルのパートは数えない）。lambda は `Lambda` 1 で、本体は呼ばれたときに数える。
+  3. operation: `BinOp`（算術・比較・`and` / `or`）・`UnaryOp`・`Index` は operand を評価した後、演算の直前に 1。`and` / `or` は
+     左を評価した後、右を評価するかを決める前に 1（右を評価しなくても 1）。assignment は `Let`・`Assign`・`IndexAssign` で値
+     （と index）を評価した後、格納の直前に 1。`IndexAssign` に index operation を別に数えない。`for` の変数と `catch` の変数への
+     束縛は数えない。operand の評価で失敗した演算には operation を課金しない。
+  4. invocation 5: 今の `UserCall`・`HostCall` の課金と同じ位置（callee と引数の評価より前）。core builtin も同じ位置。callback は
+     今の `BuiltinCallback` の位置（`Vm::call_fn_value`・`callback_precheck`、Q5 = A）。
+  5. loop iteration 2: body に入る直前（`while` は condition が真と決まった後、`for` は次の要素があると決まった後）。最後の
+     condition 偽・要素なしでは課金しない。`break` で抜ける反復も 2 を払う。`continue` 自体は課金せず、次の反復の開始で課金する
+     （F-1 の二重課金回避を保つ）。VM は `Charge(LoopIteration)` を back-edge の `Loop` の直前から body の先頭へ移す。`for` の
+     反復ごとの iterable の課金は無い（iterable 式はループの前に 1 回）。
+  §4.1 の「statement へ入る」「expression へ入る」「loop iteration 開始」と、上の小節の「F-1 の back-edge 1 課金を iteration
+  開始 2 へ置き換える（課金のタイミングと値の両方が変わる）」「1 反復につき 2」に合う。上限 N − 1 で止まる位置が AST の評価順
+  から一意に決まるので、F2c-AT-03 の両 engine の stdout の一致を規則から説明でき、各反復に 2 以上の課金が残るので F2c-AT-05
+  とも食い違わない（原則 5・6・9）。採らなかった案: B（operation を expression の入口でまとめて課金し、loop iteration は F-2b と
+  同じ back-edge に置く）は VM の `Charge` を動かさずに済む（原則 8）が、`break` で抜けた反復に 2 が課金されず「1 反復につき 2」と
+  食い違い、F2c-AT-01 の反復数差の手計算が `break` の有無で変わる。operand の評価で失敗した演算にも operation を課金して
+  「実行した分だけ」にならない（原則 5）。
 
 **判断の記録**（設計 PR #470 の判断の候補。判断役が選択（PR #470）、Q1〜Q5=A）:
 
