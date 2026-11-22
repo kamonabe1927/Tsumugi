@@ -1305,7 +1305,9 @@ issue #327 の Q2=A を scheduler の handle 経路（alpha `Engine`、`src/engi
 - **想定の変更規模**: `src/engine.rs`・`src/eval.rs` の Link フェーズの切り替え +80〜200 行、`src/module.rs` の `ModuleLoader` と `src/sandbox.rs` の import 検査の削除 −300〜500 行。
   合計 400〜700 行。触る仕組みは handle の Link フェーズ 1 つ（削除はその結果）、受入基準 4 項目。done にする実装 PR で、逸脱一覧の handle 経路の行（§10）と、
   [脅威モデル](threat-model.md) の逸脱一覧の REPL・handle 経路の行のうち handle の部分を削除する（REPL の 2 本が done なら行ごと削除する）。execution-control の逸脱一覧（§9.1）の行は形の差として残す。
-- **依存**: REPL の 2 本（fix-repl-import-gate-tree / -vm）が `ModuleLoader` を使わなくなってから削除するので、その 2 本に依存する。2 本が done になったら、設計 PR（`design_pr` を記入）で `ready` にする。
+- **依存**: REPL（tree・VM）が `ModuleLoader` を使わなくなってから削除するので、fix-repl-import-gate に依存する（issue #366 で、統合前の 2 本 fix-repl-import-gate-tree / -vm を
+  この 1 本にまとめた。この小節の「REPL の 2 本」「REPL（fix-repl-import-gate-tree / -vm）」も fix-repl-import-gate を指す）。fix-repl-import-gate は done（PR #446）なので、
+  issue #478 の設計 PR（PR #479）で `ready` にした（設計の中身は変えていない）。
 
 ### fix-repl-import-gate 実装スライス（tree REPL と VM REPL の import を同じ PR で resolver gate に通す）
 
