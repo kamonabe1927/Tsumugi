@@ -3009,8 +3009,11 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   「capability 境界を越える clock、env、stdio、filesystem、process、登録 host function 等の呼出し」とし、§6.1 は stdio も
   任意の host call も host call とし、§4.1 は host call attempt を種類で分けていない。版 `2` の課金表を目標の章の定義どおりに
   固定でき、host へ出る呼び出しの費用が経路で変わらない（[マニフェスト](manifesto.md) 原則 3・5）。課金の位置は次のとおり。
-  - filesystem builtin と stdio: 今の回数の課金（`charge_host_call_request`・`charge_output`・`charge_input`）の直前で、
+  - filesystem builtin と `print`: 今の回数の課金（`charge_host_call_request`・`charge_output`）の直前で、
     内容の描画の後（§6.1 の「描画が上限を超えたら operation 未開始」と合う）。
+  - `input`: 今の `charge_input` は `resolve_input`（capability 判定と host からの読み取り）の後にあるので、その直前では
+    拒否と host error の経路で課金されない。host call attempt は `resolve_input` より前に置く（tree は `src/builtin.rs`、
+    VM は `src/vm.rs` の `input` の分岐。下の `env`・`now`・`exit` と同じ扱い。レビューの指摘で直した）。
   - `env`・`now`・`exit`・登録 host function（回数の counter を今は数えていないもの）: capability 判定より前
     （§4.1「許可・拒否・host error のいずれでも課金」と §6.1「capability 判定前に `host_calls += 1`」による）。
     登録 host function では、引数を評価した後、`resolve_host_call` などの grant 検査より前に置く。
@@ -3042,8 +3045,8 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   4. invocation 5: 今の `UserCall`・`HostCall` の課金と同じ位置（callee と引数の評価より前）。core builtin も同じ位置。callback は
      今の `BuiltinCallback` の位置（`Vm::call_fn_value`・`callback_precheck`、Q5 = A）。
   5. loop iteration 2: body に入る直前（`while` は condition が真と決まった後、`for` は次の要素があると決まった後）。最後の
-     condition 偽・要素なしでは課金しない。`break` で抜ける反復も 2 を払う。`continue` 自体は課金せず、次の反復の開始で課金する
-     （F-1 の二重課金回避を保つ）。VM は `Charge(LoopIteration)` を back-edge の `Loop` の直前から body の先頭へ移す。`for` の
+     condition 偽・要素なしでは課金しない。`break` で抜ける反復も 2 を払う。`continue` 文は規則 1 の statement 1 だけを払い、loop iteration は
+     課金せず、次の反復の開始で課金する（F-1 の二重課金回避を保つ）。VM は `Charge(LoopIteration)` を back-edge の `Loop` の直前から body の先頭へ移す。`for` の
      反復ごとの iterable の課金は無い（iterable 式はループの前に 1 回）。
   §4.1 の「statement へ入る」「expression へ入る」「loop iteration 開始」と、上の小節の「F-1 の back-edge 1 課金を iteration
   開始 2 へ置き換える（課金のタイミングと値の両方が変わる）」「1 反復につき 2」に合う。上限 N − 1 で止まる位置が AST の評価順
