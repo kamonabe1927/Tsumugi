@@ -721,6 +721,7 @@ spec       = { doc = "docs/capability-model.md", section = "fix-handle-import-fr
 acceptance = ["HIL-AT-01..04"]
 depends_on = ["fix-repl-import-gate"]
 design_pr  = 479
+impl_pr    = 480
 order      = 17
 
 # loop:drift #352 の D-57・D-62・D-63・D-64・D-67・D-68 で逸脱一覧に載せた差の延期先。未設計（todo）。
