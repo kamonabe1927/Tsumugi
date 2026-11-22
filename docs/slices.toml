@@ -318,7 +318,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "fix-heap-charge
 acceptance = ["HCN-AT-01..05"]
 design_pr  = 456
 depends_on = ["A-1"]
-order      = 40
+order      = 41
 blocked_reason = "manifesto: 原則5（予測可能性）— Tracked の Drop の release を通知すると、scope の drop 順（src/env.rs の HashMap、既定の hasher）が 256 charge ごとに確定する HeapBytes の BudgetCharged の released_delta・usage_after に出て、同じ script・同じ入力で process ごとに event 列が変わる（実装 PR #457 の審査、issue #458）"
 issues     = [458]
 
@@ -368,7 +368,7 @@ id         = "fix-closure-capture-chain-stack"
 title      = "closure の capture の連鎖の破棄による stack 枯渇を防ぐ（TM-007、semantic-decisions §21.3 の範囲外）"
 status     = "todo"
 parent     = "REV-001"
-order      = 17
+order      = 27
 
 # loop:drift #263 D-3 (e)（Q2=A、返信なしのため推奨案で確定）で見つかった不具合の fix。
 # capability-model §11.1「host function ID は registry 内で一意」に対し、register_cooperative が
@@ -552,7 +552,7 @@ spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "F-2c 実装スライス（§4.1 の主要 charge point への移行・`fuel_accounting_revision` 1 → 2・既定 `total_fuel`）" }
 acceptance = ["F2c-AT-01..05"]
 depends_on = ["F-2b"]
-order      = 27
+order      = 28
 
 # F-2b が入れる FuelSchedule / Charge opcode の基盤と F-2c の版 2 の上に bulk 課金点を足すため F-2c 依存（F-2 の分割、PR #470 で付け替え）。
 # map/filter/serialize の per-element 課金もここで扱う（現状 fuel per-element は比較/表示/sort のみ）。
@@ -564,7 +564,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["F-2c"]
-order      = 41
+order      = 42
 
 # audit-strict-cbor（strict deterministic CBOR、§9.2）は 1 PR の大きさの目安に収まらないため、
 # c1〜c4 の 4 スライスへ分割した（spec「audit-strict-cbor の sub-slice 分割」）。元の id は置き換えて残さない。
@@ -592,7 +592,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-06..10"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 42
+order      = 43
 
 [[slice]]
 id         = "audit-strict-cbor-c3"
@@ -604,7 +604,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-11..15"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 43
+order      = 44
 
 [[slice]]
 id         = "audit-strict-cbor-c4"
@@ -616,7 +616,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-16..20"]
 depends_on = ["audit-strict-cbor-c2", "audit-strict-cbor-c3"]
 design_pr  = 256
-order      = 44
+order      = 45
 
 [[slice]]
 id         = "audit-sink-required"
@@ -625,7 +625,7 @@ status     = "todo"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 depends_on = ["A-1"]
-order      = 45
+order      = 46
 
 [[slice]]
 id         = "audit-fs-builtin-scope"
@@ -692,6 +692,15 @@ blocked_reason = "E10 統合後（roadmap.md「Phase 6 残」の記載どおり�
 # fix-handle-import-from-link: 見積もり src/ 400〜700 行（削除が主）、受入基準 4。形は PR #339 の Q1=A・Q2=A（判断役が選択）。
 #   小節は書いたが depends_on が done でないため ready の条件 3 を満たさず todo。depends_on は #366 で fix-repl-import-gate に付け替えた。
 #   それが done になったら設計 PR で ready にし design_pr を記入する。
+#   issue #478（kamonabe、「優先」）で、fix-repl-import-gate が done（PR #446）なので ready にした。設計の中身（PR #339 の Q1=A・Q2=A、HIL-AT-01..04）は変えない。
+#   order は loop-runbook §8 の「優先」の既定（今あるすべての ready・todo より前）で 17。0〜16 に空きが無いので、この PR の中で付け直した。
+#   done のスライスの order は変えず、todo・blocked どうしの相対順を保つよう、17〜45 の todo・blocked を 1 つ後ろの todo・blocked の値へ、
+#   最後の audit-sink-required を空いている 46 へ送った: fix-handle-import-from-link 92 → 17、fix-closure-capture-chain-stack 17 → 27、F-2c 27 → 28、
+#   fix-windows-legacy-lexical-colon 28 → 29、fix-link-request-budget-charge 29 → 30、fix-run-foreign-engine-mismatch 30 → 31、
+#   fix-execution-request-send-sync 31 → 32、fix-repl-submission-budget 32 → 33、fix-host-error-code-invalid-descriptor 33 → 34、
+#   fix-sync-run-concurrent-handle 34 → 35、fix-scheduler-context-reset-step-budget 35 → 37、fix-execution-budget-usage-fresh 37 → 38、
+#   fix-link-context-baseline-charge 38 → 39、fix-cancel-token-waker-recheck 39 → 40、fix-heap-charge-audit-notify 40 → 41、fuel-bulk-charge 41 → 42、
+#   audit-strict-cbor-c2・c3・c4 42・43・44 → 43・44・45、audit-sink-required 45 → 46。47 以降は変えていない。
 [[slice]]
 id         = "fix-repl-import-gate"
 title      = "tree REPL と VM REPL の import を同じ PR で submission ごとに link 時の resolver gate に通し、link の graph から展開する（capability-model §10、issue #327・#366）"
@@ -706,12 +715,12 @@ order      = 90
 [[slice]]
 id         = "fix-handle-import-from-link"
 title      = "scheduler の handle 経路の import を link 済み graph から展開し、ModuleLoader と sandbox.rs の import 経路を外す（capability-model §10・execution-control §9.1、issue #327）"
-status     = "todo"
+status     = "ready"
 parent     = "AUD-020"
 spec       = { doc = "docs/capability-model.md", section = "fix-handle-import-from-link 実装スライス（scheduler の handle 経路の import を link 済み graph から展開）" }
 acceptance = ["HIL-AT-01..04"]
 depends_on = ["fix-repl-import-gate"]
-order      = 92
+order      = 17
 
 # loop:drift #352 の D-57・D-62・D-63・D-64・D-67・D-68 で逸脱一覧に載せた差の延期先。未設計（todo）。
 # order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 24 で 0〜23 に
@@ -734,42 +743,42 @@ id         = "fix-windows-legacy-lexical-colon"
 title      = "Windows の legacy profile の lexical 検査が component 内の `:` を取りこぼさないようにし、platform 差のテストを足す（capability-model §8.2・§14.3、loop:drift #352 D-57）"
 status     = "todo"
 parent     = "AUD-020"
-order      = 28
+order      = 29
 
 [[slice]]
 id         = "fix-link-request-budget-charge"
 title      = "Engine::link で LinkRequest の budget に source/module/import の count・bytes を課金し上限を判定する（embedding-api §5、loop:drift #352 D-62）"
 status     = "todo"
 parent     = "REV-015"
-order      = 29
+order      = 30
 
 [[slice]]
 id         = "fix-run-foreign-engine-mismatch"
 title      = "Engine::run に別 engine の context・LinkedScript を渡したとき、開始前の EngineMismatch として拒否し context を poison しない（embedding-api §9・§10 規則1・EMB-AT-03、loop:drift #352 D-63）"
 status     = "todo"
 parent     = "REV-008"
-order      = 30
+order      = 31
 
 [[slice]]
 id         = "fix-execution-request-send-sync"
 title      = "MonotonicClock に Send + Sync の bound を足して ExecutionRequest を Send・Sync にし、EMB-AT-02 の assertion に加える（embedding-api §9、loop:drift #352 D-64）"
 status     = "todo"
 parent     = "REV-015"
-order      = 31
+order      = 32
 
 [[slice]]
 id         = "fix-repl-submission-budget"
 title      = "REPL の各 submission を、その ExecutionRequest が所有する有限 budget で実行する（embedding-api §6・§12、execution-control §3・§13、loop:drift #352 D-67）"
 status     = "todo"
 parent     = "REV-007"
-order      = 32
+order      = 33
 
 [[slice]]
 id         = "fix-host-error-code-invalid-descriptor"
 title      = "HostErrorCode::new の文字種の違反に ConfigError::InvalidDescriptor を返す（embedding-api §3・§8、loop:drift #352 D-68）"
 status     = "todo"
 parent     = "REV-015"
-order      = 33
+order      = 34
 
 # 週次計画 #355 の P-1（loop-guard §4.1 の 1 段目＝CI の機械チェックを cargo test のテストとして置く）を元にしたスライス（loop-runbook §10、PM が分割）。未設計（todo）。
 # 検査項目の選定（何を・どの許可リストで弾くか）は設計役が選択肢と推奨案を出し、判断役が決める（#355 P-1）。.github/（凍結）は変えない。
@@ -844,14 +853,14 @@ id         = "fix-sync-run-concurrent-handle"
 title      = "同期の Engine::execute・execute_repl_submission が他の nonterminal handle を検出して ConcurrentRunRequiresPolling を返し、戻らない経路を無くす（execution-control §9.2、loop:drift #373 D-69）"
 status     = "todo"
 parent     = "REV-015"
-order      = 34
+order      = 35
 
 [[slice]]
 id         = "fix-scheduler-context-reset-step-budget"
 title      = "scheduler 側の ExecutionContext::reset_step_budget（fuel だけを戻す公開メソッド）を削除する（execution-control §13、loop:drift #373 D-71）"
 status     = "todo"
 parent     = "REV-015"
-order      = 35
+order      = 37
 
 [[slice]]
 id         = "budget-reservation-settle"
@@ -1192,21 +1201,21 @@ id         = "fix-execution-budget-usage-fresh"
 title      = "scheduler の handle 経路と VM REPL で budget の使用量を execution ごとに新しく数え、前の execution の使用量を上限の判定と usage に含めない（execution-control §2・§9.1・§13、loop:drift #429 D-136）"
 status     = "todo"
 parent     = "REV-015"
-order      = 37
+order      = 38
 
 [[slice]]
 id         = "fix-link-context-baseline-charge"
 title      = "facade の Engine::run の Link で context に残る変数・closure・collection を新 execution の heap の baseline として課金する（execution-control §5.2・§9.2、loop:drift #429 D-137）"
 status     = "todo"
 parent     = "REV-015"
-order      = 38
+order      = 39
 
 [[slice]]
 id         = "fix-cancel-token-waker-recheck"
 title      = "CancellationToken::register_waker で waker を保存したあと cancel 済みかを確かめ直し、cancel 済みなら即 wake する（execution-control §8・§9.1、loop:drift #429 D-139）"
 status     = "todo"
 parent     = "REV-015"
-order      = 39
+order      = 40
 
 # issue #374（kamonabe、PR #349 の判断 Q2 を A から C へ変えた `判断:`。§8 の仕分けで「受け入れ」）から作った fix 2 本。
 # fix-vm-dict-literal-depth-settle: VM の Dict リテラルの構築（OpCode::DictInsert）で途中の深度の読み直しを無くし、tree と同じく
