@@ -22,7 +22,7 @@ Tsumugiは、言語処理系の開発を入り口から理解するための個�
 - **観測・監査可能性:** script identity、言語version、付与権限、予算消費、外部効果、終了理由を構造化してホストへ通知する
 - **小さく理解可能な中核:** 純粋な計算を中核に保ち、外部効果をhost boundaryの後ろへ移す
 
-これらは目標であり、現在のalpha実装に対する保証ではない。Phase 1 の最初の縦切りとして、`src/engine.rs` はツリーウォーク用の `Engine`、パース済み `CompiledScript`、状態保持用 `ExecutionContext`、`ExecutionOutcome` を crate root から公開する。compile は構文解析までで、import は context に依存するため、execute開始時に最初のscript文を実行する前に全件を解決する。この `Engine` の経路（scheduler の handle 経路）と REPL は評価器内蔵の `ModuleLoader` で解決し、CLI の file・stdin の実行は tree・VM とも、次段落の埋め込みAPIの link（resolver capability）が確かめた graph から展開する（[Capability Model仕様](capability-model.md)第10節）。実行は caller の同一スレッドで同期的に行われるため、context は十分なスタックを持つスレッド内で生成・利用する必要がある。
+これらは目標であり、現在のalpha実装に対する保証ではない。Phase 1 の最初の縦切りとして、`src/engine.rs` はツリーウォーク用の `Engine`、パース済み `CompiledScript`、状態保持用 `ExecutionContext`、`ExecutionOutcome` を crate root から公開する。compile は構文解析までで、import は context に依存するため、execute開始時に最初のscript文を実行する前に全件を解決する。この `Engine` の経路（scheduler の handle 経路）は初回 poll の Link フェーズで context の `module_resolver` により link し、REPL と CLI の file・stdin の実行も tree・VM とも、次段落の埋め込みAPIの link（resolver capability）が確かめた graph から展開する（[Capability Model仕様](capability-model.md)第10節）。実行は caller の同一スレッドで同期的に行われるため、context は十分なスタックを持つスレッド内で生成・利用する必要がある。
 
 埋め込みAPI（`src/embedding.rs`。crate rootでは `EmbeddingEngine` / `EmbeddingOutcome` などとして公開）は、実行単位のdeny-by-defaultな `CapabilitySet`（`src/capability.rs`。`ExecutionRequest` の既定は全authorityを拒否する `CapabilitySet::empty`）、論理サイズによるlive heap上限（`BudgetResource::HeapBytes`、超過は `ErrorKind::HeapLimit`）を含む実行予算（`BudgetConfig`、`src/budget.rs`）、host I/Oを注入するcapability adapter（`Input` / `Output` / `Clock` / filesystem / host function）、協調キャンセル（`CancellationToken`、`ErrorKind::Cancelled`）とdeadline（`ErrorKind::DeadlineExceeded`）、`exit()` を構造化terminalとして返す `ExecutionOutcome::Exited` を実装している。従来の環境変数（`TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`・`TSUMUGI_MAX_*`）による制限は、CLIが起動時に読む互換入口（legacy profileのcapability構築と上限の上書き。[実行予算・協調実行仕様](execution-control.md)第13節）に残る。VM（`Backend::VmExperimental`）は埋め込みAPIのrun経路にまだ統合されていない（[組み込みAPI仕様](embedding-api.md)のE9）。領域ごとの逸脱・未実装範囲は各領域別正本の逸脱一覧、現在地と実現順序は[ロードマップ](roadmap.md)で管理する。
 
@@ -481,10 +481,9 @@ Parserはプログラム直下とblock内の文を区別し、block内のimport�
 
 - 正規化パスの `HashSet` で管理
 - 正常に完了したimportの2回目以降は何もせずスキップ（エラーにしない）
-- 読み込み・パース・実行に失敗した場合はmarkerと一時的な`base_dir`を復元し、同じpathを再試行可能にする
+- link・課金・実行に失敗した場合は、そのsubmission・executionが新しく展開したmoduleの記録（`ModuleId`と`source_hash`の表）を巻き戻し、同じmoduleを再試行可能にする
 - A→B→Aのように同じ正規化pathへ戻る循環は、深度検査前の既訪問判定で従来どおり停止する
-- 共有`ModuleLoader`はloaded集合と分離した`import_depth`でactive chainだけを数え、root scriptを除く128ファイルまで許可する。129段目は`ErrorKind::Import`で拒否し、marker挿入前に停止する
-- active depthと一時的な`base_dir`はinner処理の成否にかかわらず呼び出し元の値へ復元する
+- importの深度はlinkがactive chainだけを数え、root scriptを除く128ファイルまで許可する。129段目はlink時に拒否し（`LinkError::DepthExceeded`）、1文も実行しない
 - Python の挙動に近い（部分的に実行済みのモジュールオブジェクトを返す）
 
 #### link済みProgramを両backendへ渡す
@@ -723,7 +722,7 @@ builtin_core.rs
 
 ### import chain深度制限
 
-`MAX_IMPORT_DEPTH = 128`でroot scriptを除くactive import chainを制限する。loaded module総数とは分離したcounterを使うため、REPLで正常importが累積しても許容量は減らない。canonicalize・sandbox・既訪問skipの後、marker挿入前に深度を検査し、129段目は`ErrorKind::Import`で拒否する。
+`MAX_IMPORT_DEPTH = 128`でroot scriptを除くactive import chainを制限する。loaded module総数とは分離したcounterを使うため、REPLで正常importが累積しても許容量は減らない。linkがresolverで解決する前に深度を検査し、129段目はlink時に拒否する（`LinkError::DepthExceeded`。scheduler の handle 経路では`import.depth`の`TsumugiError`を載せたterminalの`LinkError`になる）。
 
 ### TSUMUGI_* 環境変数の保護
 
@@ -742,7 +741,7 @@ REPLではtree版・VM版とも入力開始時にステップカウンタを0へ
 REPLの未捕捉エラーは、外部I/Oを含む完全なACID transactionではない。ただし、次入力を安全に処理するための内部構造状態は入力開始時点へ戻す。
 
 - Compiler: `locals`、scope/loopをcheckpointし、compile errorまたはVM runtime errorで復元
-- ModuleLoader: import集合とbase directoryは`ModuleLoader`が持つ（AUD-030でCompilerから削除済み）。VM REPLはCompilerと同じ入力単位で`ModuleLoader`をcheckpoint（clone）し、link・compile・runtimeのいずれかのerrorで復元する（`src/main.rs`のVM REPL）
+- 展開済みmoduleの表: 展開済みの`ModuleId`と`source_hash`は評価器（tree）とVM REPLのsessionが持つ（AUD-030でCompilerから削除済み）。VM REPLはCompilerと同じ入力単位で表をcheckpointし、link・compile・runtimeのいずれかのerrorで復元する（`src/main.rs`のVM REPL）
 - VM: value stack、call frame、try handler、step状態、runtime global registryのname→slot対応をcheckpointし、未捕捉runtime errorで復元
 - top-levelの`locals_cells`は正常入力間で引き継ぎ、既存closureとの参照同一性を維持
 - try/catchは開始時の有効local slot数を保存し、unwind時はtry-local cellだけを破棄する。既存localがtry中に初めてcell化された場合は昇格を維持する
@@ -759,7 +758,7 @@ REPLの未捕捉エラーは、外部I/Oを含む完全なACID transactionでは
 
 - **エラーにするか null を返すか**: filesystemの許可外の操作はcatch可能な`sandbox` error（意図せぬアクセスを即座に検出するため）。environment snapshotに無いキーの`env()`は null を返す（「存在しないキー」と同じ挙動にして、スクリプト側に漏洩情報を与えない）。Environment自体が未grantなら`capability` errorになる
 - **環境変数を読む時点**: legacy profileの`TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`と`TSUMUGI_MAX_*`は、CLI adapterが起動時に1回だけ読み、executionごとのcapabilityとconfigへ写す。importは`TSUMUGI_SANDBOX`を読まない（`src/sandbox.rs`は撤去した）
-- **import のサンドボックス対応（`ModuleLoader`経路）**: canonicalize 後に`sandbox::check_path`を呼ぶ。ファイルが存在しない場合は canonicalize が先に失敗するため、存在しないパスへの import は「ファイルが見つかりません」エラーになる（サンドボックス違反ではない）。file・stdinのimportはresolver capabilityが扱う（capability-model 第10節）
+- **import の権限**: importはどの経路もresolver capabilityだけで解決する（capability-model 第10節）。`TSUMUGI_SANDBOX`の検査（`src/sandbox.rs`）は撤去した
 - **破壊的操作のdirectory entry検査**: filesystem builtinはC10以降`sandbox.rs`を通らず、`FilesystemCapability`のroot拘束handleとsymlink policyで検査する（`src/builtin_core.rs`の`dispatch_fs`。capability-model 第8節）
 - 判断役が選択（issue #318 D-47 Q1=A）: 本節は、env変数中心・未設定時fail-openの記述から、safe profileが既定のcapabilityモデルの記録へ書き直した。詳細は capability-model 第14節・execution-control 第13節を参照させて再掲しない。理由: 本書は現行実装の正本であり、既定がfail-openと読める記述は現在の保証範囲を誤って伝える（[マニフェスト](manifesto.md) 原則2・原則9、documentation-guide「状態の正本は粒度ごとに1箇所だけ」）
 

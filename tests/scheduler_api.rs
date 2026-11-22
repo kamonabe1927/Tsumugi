@@ -1964,6 +1964,7 @@ fn hil_at_03_link_failures_use_spec_templates() {
         error.message()
     );
     assert!(!error.message().contains("missing_module"));
+    assert_eq!(stable_id(&error), "import.unreadable");
 
     // 循環: 起点を末尾に再掲した chain を `->` で結ぶ。
     let error = link_error_of(
@@ -1978,6 +1979,7 @@ fn hil_at_03_link_failures_use_spec_templates() {
         error.message(),
         "import に失敗しました: import が循環しています: @default/a.tsg -> @default/b.tsg -> @default/a.tsg"
     );
+    assert_eq!(stable_id(&error), "import.cycle");
 
     // 深度: 129 段目の import。
     let owned: Vec<(String, String)> = (0..130)
@@ -1998,4 +2000,74 @@ fn hil_at_03_link_failures_use_spec_templates() {
         error.message(),
         "import に失敗しました: import のネストが深すぎます (上限: 128)"
     );
+    assert_eq!(stable_id(&error), "import.depth");
+}
+
+/// error の安定 ID（`StableError::project` の `message_id`）。
+fn stable_id(error: &tsumugi::error::TsumugiError) -> String {
+    let module_id = tsumugi::ModuleId::new("@default/root").expect("module id");
+    tsumugi::StableError::project(error, module_id)
+        .expect("import の error は catch 可能")
+        .message_id
+        .as_str()
+        .to_string()
+}
+
+/// `LinkError::BudgetExceeded` の写像（PR #480 の Q1=A）: link 時の予算超過は import の error にせず、
+/// resource に応じた budget 系の error（kind `source_limit`）になり、1 文も実行しない。
+#[test]
+fn hil_at_03_link_budget_exceeded_maps_to_budget_error() {
+    use std::num::NonZeroU128;
+    use tsumugi::{
+        AdapterError, BudgetExceeded, BudgetResource, BudgetUnit, CapabilityCallContext,
+        CapabilitySet, ControlStop, ExecutionPhase, ModuleResolver, ResolveRequest, ResolvedModule,
+    };
+
+    struct BudgetStopResolver;
+    impl ModuleResolver for BudgetStopResolver {
+        fn policy_id(&self) -> NonZeroU128 {
+            NonZeroU128::new(98).expect("非ゼロ")
+        }
+        fn resolve(
+            &self,
+            _context: &mut CapabilityCallContext<'_>,
+            _request: ResolveRequest<'_>,
+        ) -> Result<ResolvedModule, AdapterError> {
+            Err(AdapterError::Control(ControlStop::BudgetExceeded(
+                BudgetExceeded {
+                    resource: BudgetResource::ImportCount,
+                    limit: 1,
+                    used: 1,
+                    reserved: 0,
+                    requested: 1,
+                    unit: BudgetUnit::Count,
+                    phase: ExecutionPhase::Link,
+                },
+            )))
+        }
+    }
+
+    let engine = Engine::new();
+    let script = engine.compile("import \"a.tsg\"\nlet z = 1\n").unwrap();
+    let mut context = ExecutionContext::new();
+    context.set_capabilities(
+        CapabilitySet::builder()
+            .module_resolver(std::sync::Arc::new(BudgetStopResolver))
+            .expect("grant")
+            .build(),
+    );
+    let mut handle = engine
+        .create_execution(&script, &mut context, ExecutionRequest::new())
+        .expect("admit");
+    match handle.poll(PollSlice::default()).expect("poll") {
+        PollResult::Terminal {
+            outcome: ExecutionOutcome::LinkError { error },
+            usage,
+        } => {
+            assert_eq!(error.error_type(), "source_limit");
+            assert_eq!(error.message(), "import の本数が上限を超えました (上限: 1)");
+            assert_eq!(usage.committed.fuel, 0);
+        }
+        other => panic!("LinkError を期待したが {other:?}"),
+    }
 }

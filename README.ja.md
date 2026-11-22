@@ -289,7 +289,7 @@ src/
 ├── lexer.rs      # レキサー（ソース → トークン列、行番号追跡）
 ├── ast.rs        # AST ノード定義（行番号保持・深度検査・参照名収集）
 ├── parser.rs     # パーサー（トークン列 → AST、エラー回復と行番号付与）
-├── module.rs     # ModuleLoader（import を実行前に解決してリンク）
+├── module.rs     # link が確かめた graph からの import 展開（expand_from_graph）
 ├── value.rs      # 実行時の値型
 ├── error.rs      # エラー型（TsumugiError: Parse / Runtime、ErrorKind 22種）
 │
