@@ -541,17 +541,19 @@ design_pr  = 474
 impl_pr    = 477
 order      = 26
 
-# 見積もり: src/ 約 550〜750 行、触る仕組みは fuel の課金点 1 つ、受入基準 5（旧 F2-AT-01..08・01b をまとめた。Q2=A）。
+# 見積もり: src/ 約 600〜800 行（設計 PR で host call attempt の課金点の分を足して見直した）、触る仕組みは fuel の課金点 1 つ、
+# 受入基準 5（旧 F2-AT-01..08・01b をまとめた。Q2=A）。
 # 版の bump と既定 total_fuel の更新はこのスライスの同じ PR で行う。
 [[slice]]
 id         = "F-2c"
 title      = "§4.1 の主要 charge point への移行（statement / expression / operation / invocation 5 / loop 2 / host 10）・fuel_accounting_revision 1 → 2・既定 total_fuel の見直し"
-status     = "todo"
+status     = "ready"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "F-2c 実装スライス（§4.1 の主要 charge point への移行・`fuel_accounting_revision` 1 → 2・既定 `total_fuel`）" }
 acceptance = ["F2c-AT-01..05"]
 depends_on = ["F-2b"]
+design_pr  = 483
 order      = 28
 
 # F-2b が入れる FuelSchedule / Charge opcode の基盤と F-2c の版 2 の上に bulk 課金点を足すため F-2c 依存（F-2 の分割、PR #470 で付け替え）。
