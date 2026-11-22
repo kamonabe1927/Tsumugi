@@ -211,9 +211,13 @@ impl Compiler {
 
     /// 文をコンパイル
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), TsumugiError> {
+        // statement へ入る（§4.1、F-2c Q3 = A 規則 1）。ブロックは数えない。
+        self.chunk
+            .emit(OpCode::Charge(ChargeKind::Statement), stmt.line());
         match stmt {
             Stmt::Let { name, value, line } => {
                 self.compile_expr(value, *line)?;
+                self.emit_operation(*line);
                 // AUD-016: 同一scopeでの再宣言も必ず新しいslot（=新しいcell）を割り当てる。
                 // 既存slotへのSetLocalはcell経由で過去のclosureへ波及するため使わない。
                 // resolve_localは末尾から探索するため、以後のreadは新slotへ解決され、
@@ -222,6 +226,7 @@ impl Compiler {
             }
             Stmt::Assign { name, value, line } => {
                 self.compile_expr(value, *line)?;
+                self.emit_operation(*line);
                 if let Ok(slot) = self.resolve_local(name, *line) {
                     self.chunk.emit(OpCode::SetLocal(slot), *line);
                 } else if let Some(upvalue_idx) = self.resolve_upvalue(name) {
@@ -250,6 +255,7 @@ impl Compiler {
                 }
                 self.compile_expr(index, *line)?;
                 self.compile_expr(value, *line)?;
+                self.emit_operation(*line);
                 self.chunk.emit(OpCode::SetIndex(target), *line);
             }
             Stmt::ExprStmt { expr, line } => {
@@ -438,6 +444,9 @@ impl Compiler {
         // 条件式
         self.compile_expr(condition, line)?;
         let exit_jump = self.chunk.emit_jump(OpCode::JumpIfFalse(0), line);
+        // loop iteration 開始（§4.1、F-2c Q3 = A 規則 5）: condition が真と決まった後、body の直前。
+        self.chunk
+            .emit(OpCode::Charge(ChargeKind::LoopIteration), line);
 
         // ループ本体（ブロックスコープあり）
         self.begin_scope();
@@ -447,8 +456,6 @@ impl Compiler {
         self.end_scope(line);
 
         // ループ先頭に戻る
-        self.chunk
-            .emit(OpCode::Charge(ChargeKind::LoopIteration), line);
         self.chunk.emit(OpCode::Loop(loop_start), line);
 
         // ループ脱出先をパッチ
@@ -511,6 +518,9 @@ impl Compiler {
         self.chunk.emit(OpCode::LenLocal(collection_slot), line);
         self.chunk.emit(OpCode::Lt, line);
         let exit_jump = self.chunk.emit_jump(OpCode::JumpIfFalse(0), line);
+        // loop iteration 開始（§4.1、F-2c Q3 = A 規則 5）: 次の要素があると決まった後。
+        self.chunk
+            .emit(OpCode::Charge(ChargeKind::LoopIteration), line);
 
         // ループ変数を反復ごとに新しいcellへ再bindする。
         // 前回値をpopするとlocals_cellsの対応も解除され、escaping closureが
@@ -544,8 +554,6 @@ impl Compiler {
         self.chunk.emit(OpCode::Pop, line);
 
         // ループ先頭に戻る
-        self.chunk
-            .emit(OpCode::Charge(ChargeKind::LoopIteration), line);
         self.chunk.emit(OpCode::Loop(loop_start), line);
 
         // 脱出先パッチ
@@ -621,9 +629,8 @@ impl Compiler {
         }
 
         if continue_resolved {
-            // while: 飛び先が確定している。back-edge はループ文の行で課金する（tree と同じ）。
-            self.chunk
-                .emit(OpCode::Charge(ChargeKind::LoopIteration), loop_line);
+            // while: 飛び先が確定している。loop iteration は次の反復の開始で課金する
+            // （F-2c Q3 = A 規則 5）。
             self.chunk.emit(OpCode::Loop(continue_target), loop_line);
         } else {
             // for: 飛び先（インクリメント位置）は前方なので、前方 Jump を仮で発行して後でパッチ
@@ -636,6 +643,8 @@ impl Compiler {
 
     /// 式をコンパイル（結果はスタックトップに積まれる）
     fn compile_expr(&mut self, expr: &Expr, line: usize) -> Result<(), TsumugiError> {
+        // expression へ入る（§4.1、F-2c Q3 = A 規則 2、前順）。
+        self.emit_expression(line);
         match expr {
             Expr::Int(n) => {
                 self.chunk.emit_constant(Value::Int(*n), line);
@@ -661,6 +670,8 @@ impl Compiler {
                     // and: 短絡評価（左辺が偽なら左辺の値を返す）
                     BinOpKind::And => {
                         self.compile_expr(left, line)?;
+                        // 右を評価するかを決める前に operation 1（F-2c Q3 = A 規則 3）
+                        self.emit_operation(line);
                         // 左辺が偽ならスタックに残したままジャンプ
                         let jump = self.chunk.emit_jump(OpCode::JumpIfFalseKeep(0), line);
                         // 左辺が真 → 左辺を捨てて右辺を評価
@@ -671,6 +682,7 @@ impl Compiler {
                     // or: 短絡評価（左辺が真なら左辺の値を返す）
                     BinOpKind::Or => {
                         self.compile_expr(left, line)?;
+                        self.emit_operation(line);
                         // 左辺が真ならスタックに残したままジャンプ
                         let jump = self.chunk.emit_jump(OpCode::JumpIfTrueKeep(0), line);
                         // 左辺が偽 → 左辺を捨てて右辺を評価
@@ -695,12 +707,14 @@ impl Compiler {
                             BinOpKind::GtEq => OpCode::GtEq,
                             BinOpKind::And | BinOpKind::Or => unreachable!(),
                         };
+                        self.emit_operation(line);
                         self.chunk.emit(opcode, line);
                     }
                 }
             }
             Expr::UnaryOp { op, expr } => {
                 self.compile_expr(expr, line)?;
+                self.emit_operation(line);
                 match op {
                     UnaryOpKind::Neg => self.chunk.emit(OpCode::Negate, line),
                     UnaryOpKind::Not => self.chunk.emit(OpCode::Not, line),
@@ -711,6 +725,7 @@ impl Compiler {
                 if let Expr::Ident(name) = callee.as_ref() {
                     if name == "print" {
                         let arg_count = args.len();
+                        self.emit_invocation(line);
                         for arg in args {
                             self.compile_expr(arg, line)?;
                         }
@@ -778,11 +793,15 @@ impl Compiler {
                     && crate::ast::is_side_effect_free(index)
                     && let Ok(slot) = self.resolve_local(name, line)
                 {
+                    // object の識別子は読み取りを出さないが、expression 1 は払う。
+                    self.emit_expression(line);
                     self.compile_expr(index, line)?;
+                    self.emit_operation(line);
                     self.chunk.emit(OpCode::IndexLocal(slot), line);
                 } else {
                     self.compile_expr(object, line)?;
                     self.compile_expr(index, line)?;
+                    self.emit_operation(line);
                     self.chunk.emit(OpCode::Index, line);
                 }
             }
@@ -830,6 +849,7 @@ impl Compiler {
         args: &[Expr],
         line: usize,
     ) -> Result<(), TsumugiError> {
+        self.emit_invocation(line);
         if crate::builtin_core::is_context_builtin(name) {
             self.chunk.emit(
                 OpCode::ValidateBuiltinCall(
@@ -846,6 +866,8 @@ impl Compiler {
             && let [Expr::Ident(var_name)] = args
             && let Ok(slot) = self.resolve_local(var_name, line)
         {
+            // 引数の識別子は読み取りを出さないが、expression 1 は払う。
+            self.emit_expression(line);
             self.chunk.emit(OpCode::LenLocal(slot), line);
             return Ok(());
         }
@@ -925,6 +947,7 @@ impl Compiler {
             .emit_jump(OpCode::JumpIfGlobalDefined(name.to_string(), 0), line);
 
         // --- builtin 経路の前処理（引数より前） ---
+        self.emit_invocation(line);
         if crate::builtin_core::is_context_builtin(name) {
             self.chunk.emit(
                 OpCode::ValidateBuiltinCall(
@@ -947,6 +970,8 @@ impl Compiler {
             // 前に binding の値を snapshot として積む（issue #293）。`ListPushBinding` が snapshot と
             // 値を pop して push の結果 Null を積む。
             if let Expr::Ident(var_name) = &args[0] {
+                // 第1引数の識別子（expression 1）。user 経路の `compile_expr` と同じ課金。
+                self.emit_expression(line);
                 self.compile_name_read(var_name, line, false);
             }
         }
@@ -954,7 +979,7 @@ impl Compiler {
 
         // --- user 経路の前処理（引数より前） ---
         self.patch_jump(user_jump)?;
-        self.chunk.emit(OpCode::Charge(ChargeKind::UserCall), line);
+        self.emit_invocation(line);
         self.chunk.emit(OpCode::PrepareCall, line);
         if let Expr::Ident(callee_name) = callee {
             self.compile_name_read(callee_name, line, true);
@@ -1049,7 +1074,7 @@ impl Compiler {
     ) -> Result<(), TsumugiError> {
         // step/depth検査 → callee評価 → callable/arity検査 → 引数評価 → Call
         let arg_count = args.len();
-        self.chunk.emit(OpCode::Charge(ChargeKind::UserCall), line);
+        self.emit_invocation(line);
         self.chunk.emit(OpCode::PrepareCall, line);
         if let Expr::Ident(name) = callee {
             // 未解決calleeもcompile errorにせずruntime global lookupへ落とす。
@@ -1065,6 +1090,23 @@ impl Compiler {
         }
         self.chunk.emit(OpCode::Call(arg_count), line);
         Ok(())
+    }
+
+    /// expression へ入る課金（§4.1）を出す。
+    fn emit_expression(&mut self, line: usize) {
+        self.chunk
+            .emit(OpCode::Charge(ChargeKind::Expression), line);
+    }
+
+    /// 論理 operation の課金（§4.1）を、operand の評価の後・演算の直前に出す。
+    fn emit_operation(&mut self, line: usize) {
+        self.chunk.emit(OpCode::Charge(ChargeKind::Operation), line);
+    }
+
+    /// invocation の課金（§4.1）を、callee と引数の評価より前に出す。
+    fn emit_invocation(&mut self, line: usize) {
+        self.chunk
+            .emit(OpCode::Charge(ChargeKind::Invocation), line);
     }
 
     /// 識別子読み取りをstatic slot優先でloweringし、未解決名だけをruntime globalへ落とす。
@@ -1588,25 +1630,26 @@ mod tests {
             "for x in [1]\n  let g = fn()\n    return x\n  end\n  g()\nend\n",
             "fn f()\n  for x in [1]\n    let g = fn()\n      return x\n    end\n    g()\n  end\nend\nf()\n",
         ];
-        // 変更前（隠しローカルの名前が `__collection__` / `__index__` のとき）の命令列。
+        // 変更前（隠しローカルの名前が `__collection__` / `__index__` のとき）の命令列に、F-2c の
+        // `Charge`（statement・expression・operation・invocation・loop iteration）を足したもの。
         let golden: [&[&str]; 5] = [
             &[
-                "[LoadConst(0), LoadConst(1), ListPush, LoadConst(2), ListPush, ToIterList, LoadConst(3), LoadConst(4), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(26), Pop, GetLocal(1), IndexLocal(0), GetLocal(2), Print(1), LoadConst(5), Pop, GetLocal(1), LoadConst(6), Add, SetLocal(1), Pop, Charge(LoopIteration), Loop(8), PopN(3), Return] constants=[List([]), Int(1), Int(2), Int(0), Null, Null, Int(1)] max_locals=3",
+                "[Charge(Statement), Charge(Expression), LoadConst(0), Charge(Expression), LoadConst(1), ListPush, Charge(Expression), LoadConst(2), ListPush, ToIterList, LoadConst(3), LoadConst(4), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(34), Charge(LoopIteration), Pop, GetLocal(1), IndexLocal(0), Charge(Statement), Charge(Expression), Charge(Invocation), Charge(Expression), GetLocal(2), Print(1), LoadConst(5), Pop, GetLocal(1), LoadConst(6), Add, SetLocal(1), Pop, Loop(12), PopN(3), Return] constants=[List([]), Int(1), Int(2), Int(0), Null, Null, Int(1)] max_locals=3",
             ],
             &[
-                "[LoadConst(0), ToIterList, LoadConst(1), LoadConst(2), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(24), Pop, GetLocal(1), IndexLocal(0), GetLocal(2), LoadConst(3), Eq, JumpIfFalse(16), Jump(17), Jump(24), GetLocal(1), LoadConst(4), Add, SetLocal(1), Pop, Charge(LoopIteration), Loop(4), PopN(3), Return] constants=[Str(\"ab\"), Int(0), Null, Str(\"a\"), Int(1)] max_locals=3",
+                "[Charge(Statement), Charge(Expression), LoadConst(0), ToIterList, LoadConst(1), LoadConst(2), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(33), Charge(LoopIteration), Pop, GetLocal(1), IndexLocal(0), Charge(Statement), Charge(Expression), Charge(Expression), GetLocal(2), Charge(Expression), LoadConst(3), Charge(Operation), Eq, JumpIfFalse(25), Charge(Statement), Jump(27), Charge(Statement), Jump(33), GetLocal(1), LoadConst(4), Add, SetLocal(1), Pop, Loop(6), PopN(3), Return] constants=[Str(\"ab\"), Int(0), Null, Str(\"a\"), Int(1)] max_locals=3",
             ],
             &[
-                "[LoadConst(0), LoadConst(1), LoadConst(2), DictInsert, ToIterList, LoadConst(3), LoadConst(4), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(46), Pop, GetLocal(1), IndexLocal(0), LoadConst(5), LoadConst(6), ListPush, ToIterList, LoadConst(7), LoadConst(8), GetLocal(4), LenLocal(3), Lt, JumpIfFalse(38), Pop, GetLocal(4), IndexLocal(3), GetLocal(2), Print(1), LoadConst(9), Pop, GetLocal(4), LoadConst(10), Add, SetLocal(4), Pop, Charge(LoopIteration), Loop(20), PopN(3), GetLocal(1), LoadConst(11), Add, SetLocal(1), Pop, Charge(LoopIteration), Loop(7), PopN(3), Return] constants=[Dict({}), Str(\"a\"), Int(1), Int(0), Null, List([]), Int(1), Int(0), Null, Null, Int(1), Int(1)] max_locals=6",
+                "[Charge(Statement), Charge(Expression), LoadConst(0), Charge(Expression), LoadConst(1), Charge(Expression), LoadConst(2), DictInsert, ToIterList, LoadConst(3), LoadConst(4), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(57), Charge(LoopIteration), Pop, GetLocal(1), IndexLocal(0), Charge(Statement), Charge(Expression), LoadConst(5), Charge(Expression), LoadConst(6), ListPush, ToIterList, LoadConst(7), LoadConst(8), GetLocal(4), LenLocal(3), Lt, JumpIfFalse(50), Charge(LoopIteration), Pop, GetLocal(4), IndexLocal(3), Charge(Statement), Charge(Expression), Charge(Invocation), Charge(Expression), GetLocal(2), Print(1), LoadConst(9), Pop, GetLocal(4), LoadConst(10), Add, SetLocal(4), Pop, Loop(28), PopN(3), GetLocal(1), LoadConst(11), Add, SetLocal(1), Pop, Loop(11), PopN(3), Return] constants=[Dict({}), Str(\"a\"), Int(1), Int(0), Null, List([]), Int(1), Int(0), Null, Null, Int(1), Int(1)] max_locals=6",
             ],
             &[
-                "[LoadConst(0), LoadConst(1), ListPush, ToIterList, LoadConst(2), LoadConst(3), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(28), Pop, GetLocal(1), IndexLocal(0), MakeClosure(0), Charge(UserCall), PrepareCall, GetLocal(3), ValidateCall(0), Call(0), Pop, PopN(1), GetLocal(1), LoadConst(4), Add, SetLocal(1), Pop, Charge(LoopIteration), Loop(6), PopN(3), Return] constants=[List([]), Int(1), Int(0), Null, Int(1)] max_locals=4",
-                "[GetUpvalue(0), ReturnValue, LoadConst(0), ReturnValue] constants=[Null] max_locals=1",
+                "[Charge(Statement), Charge(Expression), LoadConst(0), Charge(Expression), LoadConst(1), ListPush, ToIterList, LoadConst(2), LoadConst(3), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(36), Charge(LoopIteration), Pop, GetLocal(1), IndexLocal(0), Charge(Statement), Charge(Expression), MakeClosure(0), Charge(Operation), Charge(Statement), Charge(Expression), Charge(Invocation), PrepareCall, GetLocal(3), ValidateCall(0), Call(0), Pop, PopN(1), GetLocal(1), LoadConst(4), Add, SetLocal(1), Pop, Loop(9), PopN(3), Return] constants=[List([]), Int(1), Int(0), Null, Int(1)] max_locals=4",
+                "[Charge(Statement), Charge(Expression), GetUpvalue(0), ReturnValue, LoadConst(0), ReturnValue] constants=[Null] max_locals=1",
             ],
             &[
-                "[MakeClosure(0), RegisterGlobal(\"f\", 0), Charge(UserCall), PrepareCall, GetLocal(0), ValidateCall(0), Call(0), Pop, Return] constants=[] max_locals=1",
-                "[LoadConst(0), LoadConst(1), ListPush, ToIterList, LoadConst(2), LoadConst(3), GetLocal(2), LenLocal(1), Lt, JumpIfFalse(28), Pop, GetLocal(2), IndexLocal(1), MakeClosure(0), Charge(UserCall), PrepareCall, GetLocal(4), ValidateCall(0), Call(0), Pop, PopN(1), GetLocal(2), LoadConst(4), Add, SetLocal(2), Pop, Charge(LoopIteration), Loop(6), PopN(3), LoadConst(5), ReturnValue] constants=[List([]), Int(1), Int(0), Null, Int(1), Null] max_locals=5",
-                "[GetUpvalue(0), ReturnValue, LoadConst(0), ReturnValue] constants=[Null] max_locals=1",
+                "[Charge(Statement), MakeClosure(0), RegisterGlobal(\"f\", 0), Charge(Statement), Charge(Expression), Charge(Invocation), PrepareCall, GetLocal(0), ValidateCall(0), Call(0), Pop, Return] constants=[] max_locals=1",
+                "[Charge(Statement), Charge(Expression), LoadConst(0), Charge(Expression), LoadConst(1), ListPush, ToIterList, LoadConst(2), LoadConst(3), GetLocal(2), LenLocal(1), Lt, JumpIfFalse(36), Charge(LoopIteration), Pop, GetLocal(2), IndexLocal(1), Charge(Statement), Charge(Expression), MakeClosure(0), Charge(Operation), Charge(Statement), Charge(Expression), Charge(Invocation), PrepareCall, GetLocal(4), ValidateCall(0), Call(0), Pop, PopN(1), GetLocal(2), LoadConst(4), Add, SetLocal(2), Pop, Loop(9), PopN(3), LoadConst(5), ReturnValue] constants=[List([]), Int(1), Int(0), Null, Int(1), Null] max_locals=5",
+                "[Charge(Statement), Charge(Expression), GetUpvalue(0), ReturnValue, LoadConst(0), ReturnValue] constants=[Null] max_locals=1",
             ],
         ];
         for (source, expected) in cases.iter().zip(golden) {
@@ -1624,11 +1667,10 @@ mod tests {
         }
     }
 
-    /// F2b-AT-02: `Loop` と `PrepareCall` の直前に、同じ line の `Charge` が必ず出る（while の
-    /// `continue` が出す `Loop` を含む）。どの jump も `Charge` と `Loop` / `PrepareCall` の間へ
-    /// 飛び込まない。
+    /// F2b-AT-02（F-2c で課金点を移した）: `PrepareCall` の直前に同じ line の `Charge(Invocation)` が出る。
+    /// loop iteration の `Charge` は body の直前にだけ出て、back-edge の `Loop` の直前には出ない。
     #[test]
-    fn f2b_at_02_charge_precedes_every_loop_and_prepare_call() {
+    fn f2c_charge_points_for_loops_and_calls() {
         use crate::budget::ChargeKind;
         let source = "fn f(x)\n  return x\nend\nlet i = 0\nwhile i < 3\n  i = i + 1\n  if i == 2\n    continue\n  end\n  f(i)\nend\nfor y in [1, 2]\n  f(y)\nend\n";
         let tokens = Lexer::new(source).tokenize();
@@ -1637,41 +1679,35 @@ mod tests {
             .compile(&program)
             .expect("compile に失敗")
             .into_inner();
-        fn check(chunk: &Chunk, loops: &mut usize, calls: &mut usize) {
+        fn check(chunk: &Chunk, iterations: &mut usize, calls: &mut usize) {
             for (i, op) in chunk.code.iter().enumerate() {
-                let expected = match op {
-                    OpCode::Loop(_) => {
-                        *loops += 1;
-                        ChargeKind::LoopIteration
-                    }
+                match op {
+                    // invocation は `PrepareCall` の直前（callee と引数の評価より前）。
                     OpCode::PrepareCall => {
                         *calls += 1;
-                        ChargeKind::UserCall
+                        assert_eq!(chunk.code[i - 1], OpCode::Charge(ChargeKind::Invocation));
+                        assert_eq!(chunk.lines[i - 1], chunk.lines[i]);
                     }
-                    _ => continue,
-                };
-                assert!(i > 0, "先頭に Loop / PrepareCall は出ない");
-                assert_eq!(chunk.code[i - 1], OpCode::Charge(expected));
-                assert_eq!(chunk.lines[i - 1], chunk.lines[i]);
-                for op in &chunk.code {
-                    match op {
-                        OpCode::Jump(t)
-                        | OpCode::JumpIfFalse(t)
-                        | OpCode::JumpIfFalseKeep(t)
-                        | OpCode::JumpIfTrueKeep(t)
-                        | OpCode::Loop(t) => assert_ne!(*t, i, "Charge と本体の間へ飛び込む"),
-                        _ => {}
+                    // loop iteration は body の直前（condition / 次の要素の判定の後）だけに出る。
+                    OpCode::Charge(ChargeKind::LoopIteration) => {
+                        *iterations += 1;
+                        assert!(matches!(chunk.code[i - 1], OpCode::JumpIfFalse(_)));
                     }
+                    // back-edge の `Loop` の直前には loop iteration を置かない（F-2c Q3 = A 規則 5）。
+                    OpCode::Loop(_) => {
+                        assert_ne!(chunk.code[i - 1], OpCode::Charge(ChargeKind::LoopIteration));
+                    }
+                    _ => {}
                 }
             }
             for proto in &chunk.prototypes {
-                check(&proto.chunk, loops, calls);
+                check(&proto.chunk, iterations, calls);
             }
         }
-        let (mut loops, mut calls) = (0, 0);
-        check(&chunk, &mut loops, &mut calls);
-        // while の back-edge と continue、for の back-edge、呼び出し 2 か所。
-        assert_eq!(loops, 3);
+        let (mut iterations, mut calls) = (0, 0);
+        check(&chunk, &mut iterations, &mut calls);
+        // while と for の body の先頭 1 か所ずつ、呼び出し 2 か所。
+        assert_eq!(iterations, 2);
         assert_eq!(calls, 2);
     }
 }

@@ -1997,17 +1997,20 @@ run_frames dispatch loop:
 push_call_frame(...):      # frame を積む唯一の経路（Call / callback。root frame は数えない）
   watchdog_tick(line)?     # (W2) frame の追加
 
-fuel の論理課金点（tree の現行課金点と同じ。各 1）:
-  (F1) ループの back-edge  : `Loop` 命令の直前の `Charge`（`Loop` は back-edge 専用にする。`for` の
-                             `continue` は前方 `Jump` で increment へ飛ばす。`Loop` 自体は課金しない）
-  (F2) user function 呼出し: `PrepareCall` の直前の `Charge`（呼び出し位置の line。深度検査の前。
-                             `PrepareCall` 自体は課金しない）
-  (F3) builtin の callback : `call_fn_value`（builtin 呼び出しの line）
+fuel の論理課金点（tree の課金点と同じ。値は実行予算・協調実行仕様 §4.1 の版 2 の表）:
+  (F1) ループの反復の開始 : body の先頭の `Charge(LoopIteration)`（`while` は条件の `JumpIfFalse` の後、
+                             `for` は次の要素の判定の後。`Loop` は back-edge 専用で、`Loop` 自体は課金しない。
+                             `for` の `continue` は前方 `Jump` で increment へ飛ばす）
+  (F2) 呼び出し           : `PrepareCall` の直前の `Charge(Invocation)`（呼び出し位置の line。深度検査の前。
+                             `PrepareCall` 自体は課金しない。builtin 経路も引数の評価の前に同じ `Charge`）
+  (F3) builtin の callback : `call_fn_value`（builtin 呼び出しの line。invocation）
+  ほか statement・expression・operation の `Charge`（compiler が文・式・演算の境界に出す）と、builtin の
+  実行が直接課金する host call attempt。どれも dispatch 自体は課金しない
 ```
 
-`charge`（旧 `count_step`）/ `max_steps` / `TSUMUGI_MAX_STEPS` / `step_limit` error の定義は変更しない。fuel を課金するのは (F1)〜(F3) だけで、tree の課金点（ループ反復・user function 呼び出し・callback 呼び出し）と 1 対 1 に対応する（VM は host function に対応しないため、tree の host call 課金点に当たるものはない）。深度上限（`MAX_USER_CALL_DEPTH`）は現行どおり `PrepareCall` と `Call` の両方で検査する。`PrepareCall` を省いた raw `Call` は fuel を課金しないが、(W2) で watchdog が進むため停止性は保たれる。
+`charge`（旧 `count_step`）/ `max_steps` / `TSUMUGI_MAX_STEPS` / `step_limit` error の定義は変更しない。fuel を課金するのは上の課金点だけで、tree の課金点と同じ順序・同じ line で 1 対 1 に対応する（[実行予算・協調実行仕様](execution-control.md) §14「F-2c 実装スライス」の判断 Q3 = A。VM は登録 host function に対応しないため、tree の登録 host function の課金点に当たるものはない）。深度上限（`MAX_USER_CALL_DEPTH`）は現行どおり `PrepareCall` と `Call` の両方で検査する。`PrepareCall` を省いた raw `Call` は fuel を課金しないが、(W2) で watchdog が進むため停止性は保たれる。
 
-watchdog の上限は `total_fuel × 2 + 16` とする。正規 compiler 出力では、(W1) の後退は (F1) の back-edge、(W2) の frame 追加は (F2)・(F3) か root frame に必ず伴うため、tick 数は「fuel 課金数 + root frame 数」を超えない。よって正規 compiler 出力では常に fuel の上限が先に効き、watchdog の上限は検証を通っていない chunk に対してだけ働く（この不変条件はテストで固定する）。
+watchdog の上限は `total_fuel × 2 + 16` とする。正規 compiler 出力では、(W1) の後退は (F1) の反復の開始を通った反復の back-edge、(W2) の frame 追加は (F2)・(F3) か root frame に必ず伴うため、tick 数は「fuel 課金数 + root frame 数」を超えない。よって正規 compiler 出力では常に fuel の上限が先に効き、watchdog の上限は検証を通っていない chunk に対してだけ働く（この不変条件はテストで固定する）。
 
 `VerifiedChunk` は VM・関数プロトタイプ・REPL 差し替えの各所で `Chunk` を置き換える。VM 内部の `require_*` ヘルパー（AUD-023）は削除せず defense-in-depth として残す。verifier を通した chunk では発火しないことをテストで確認する。
 

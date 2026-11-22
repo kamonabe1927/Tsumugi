@@ -197,7 +197,7 @@ impl LegacyBudgetEnv {
 
     /// clock を持たない VM 経路向け。§3.1 既定の上限に上書きを適用する。
     fn vm_budget(&self) -> BudgetConfig {
-        let mut budget = BudgetConfig::for_legacy(1_000_000, 1_000_000);
+        let mut budget = BudgetConfig::for_legacy(tsumugi::budget::DEFAULT_TOTAL_FUEL, 1_000_000);
         self.apply(&mut budget);
         budget
     }

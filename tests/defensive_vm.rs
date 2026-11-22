@@ -182,8 +182,8 @@ fn loop_control_outside_loop_opcodes_do_not_panic() {
 
 /// REV-006 層1 / F1-AT-06: `Jump(0)` 自己ループが instruction watchdog で有限停止する。
 ///
-/// F2b-AT-03: `Jump` は fuel を課金しない（fuel の課金点は back-edge の直前の `Charge`・`PrepareCall` の
-/// 直前の `Charge`・callback だけ。execution-control §14 F-1・F-2b）。停止させるのは fuel ではなく watchdog の (W1)「同じ frame で ip が
+/// F2b-AT-03・F2c-AT-05: `Jump` は fuel を課金しない（fuel の課金点は compiler が出す `Charge` と、builtin の
+/// 実行が直接課金する callback・host call attempt だけ。execution-control §14 F-1・F-2b・F-2c）。停止させるのは fuel ではなく watchdog の (W1)「同じ frame で ip が
 /// 後退・停滞」で、上限（`total_fuel × 2 + 16`）を超えると fuel と同じ `limit` error になる。
 #[test]
 fn jump_self_loop_halts_with_limit() {
@@ -239,7 +239,7 @@ fn watchdog_limit_is_not_catchable() {
     );
 }
 
-/// REV-006 層1 / F1-AT-06 / F2b-AT-03: 後方 `Loop(0)` 迂回ループが有限停止する（`Loop` 自体は fuel を
+/// REV-006 層1 / F1-AT-06 / F2b-AT-03 / F2c-AT-05: 後方 `Loop(0)` 迂回ループが有限停止する（`Loop` 自体は fuel を
 /// 課金しない。手組みで `Charge` を省いた `Loop` は watchdog の (W1) で `limit` として止まる）。
 #[test]
 fn backward_loop_halts_with_limit() {
@@ -401,4 +401,40 @@ fn psw_at_05_list_push_binding_without_snapshot_returns_error() {
     );
     chunk.emit(OpCode::Return, 1);
     run_expecting_internal_error("snapshot の無い ListPushBinding", chunk);
+}
+
+/// F2c-AT-05: 正規 compiler 出力の無限ループ・無限再帰は、版 2 の課金でも watchdog の上限
+/// （`total_fuel × 2 + 16`）より先に fuel の上限で止まる（ループの各反復は loop iteration 2 以上、
+/// 呼び出しは invocation 5 以上を払う）。
+#[test]
+fn f2c_at_05_fuel_limit_comes_before_watchdog() {
+    use tsumugi::compiler::Compiler;
+    use tsumugi::lexer::Lexer;
+    use tsumugi::parser::Parser;
+    let sources = [
+        "while true\nend\n",
+        "let i = 0\nwhile true\n  i = i + 1\n  if i > 0\n    continue\n  end\nend\n",
+        "for x in range(0, 1000000)\nend\n",
+        "fn f(n)\n  return f(n + 1)\nend\nf(0)\n",
+    ];
+    for source in sources {
+        let program = Parser::new(Lexer::new(source).tokenize())
+            .parse()
+            .expect("parse");
+        let chunk = Compiler::new().compile(&program).expect("compile");
+        let mut vm = Vm::new(chunk);
+        let fuel = 1000;
+        vm.set_max_steps(fuel);
+        let error = vm.run().expect_err("停止しませんでした");
+        assert_eq!(error.error_type(), "limit", "{source}: {}", error.message());
+        // fuel の上限で止まった（使い切る直前まで課金済み）。watchdog の tick は上限に達していない。
+        assert!(
+            vm.budget_usage().committed.fuel > fuel - 10,
+            "{source}: fuel ではなく別の上限で止まった"
+        );
+        assert!(
+            vm.watchdog_ticks() <= 2 * fuel + 16,
+            "{source}: watchdog の上限に先に達した"
+        );
+    }
 }

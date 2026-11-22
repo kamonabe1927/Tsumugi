@@ -397,7 +397,7 @@ fn vm_usage(source: &str) -> BudgetUsage {
 }
 
 /// VND-AT-05: 上限内の値だけを使う script の fuel・heap は、変更前（main）と同じ値のまま
-/// （深度の計算は課金しない）。
+/// （深度の計算は課金しない）。fuel は F-2c の版 2 の課金へ更新した（下の定数の注記）。
 #[test]
 fn vnd_at_05_usage_unchanged_within_limit() {
     let t = tree_usage(USAGE_SCRIPT);
@@ -415,7 +415,7 @@ fn vnd_at_05_usage_unchanged_within_limit() {
     );
 }
 
-const TREE_EXPECTED: (u64, u64, u64) = (242, 25204, 25204);
+const TREE_EXPECTED: (u64, u64, u64) = (3976, 25204, 25204);
 // fix-vm-builtin-call-lowering で、builtin 名の呼び出しの引数の bytecode を 2 経路で共有したため、
 // VM の bytecode_chunk の課金（64 + 16 × 命令数 + 32 × 定数数）が 640 byte 減った。fuel と tree の値、
 // bytecode 以外の heap は変わらない。
@@ -425,4 +425,7 @@ const TREE_EXPECTED: (u64, u64, u64) = (242, 25204, 25204);
 // F-2b で、compiler が `Loop` / `PrepareCall` の直前に `Charge` を 1 命令ずつ出すようになったため、
 // bytecode_chunk の課金（16 × 命令数）がこの script の 6 箇所（`while` 1・user function 呼び出し 5）で
 // 96 byte 増えた。fuel と tree の値、bytecode 以外の heap は変わらない。
-const VM_EXPECTED: (u64, u64, u64) = (242, 23684, 23684);
+// F-2c で、fuel は版 2 の課金（§4.1 の statement / expression / operation / invocation / loop iteration）で
+// 242 から 3976 になった（tree と VM で一致）。VM は compiler が出す `Charge` 命令が 90 個増え、
+// bytecode_chunk の課金（16 × 命令数）が 1440 byte 増えた。bytecode 以外の heap は変わらない。
+const VM_EXPECTED: (u64, u64, u64) = (3976, 25124, 25124);

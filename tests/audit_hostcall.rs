@@ -572,9 +572,12 @@ fn fbh_at_03_sinkless_path_unchanged() {
     let (with, with_bytes) = run(true);
     let (without, without_bytes) = run(false);
     assert!(with.contains("Completed"), "{with}");
+    // F-2c の版 2 の課金（§4.1）: `let` 3・`while` 41（文 1・条件 4 × 4・反復 3 ×（2 + 代入文 6））・
+    // `write_file` の文 19（文 1・call 式 1・invocation 5・引数 2・host call attempt 10）・
+    // `let c = read_file(..)` 19（文 1・call 式 1・invocation 5・引数 1・host call attempt 10・代入 1）。
     assert!(
-        with.contains("committed: BudgetCounters { fuel: 3,"),
-        "fuel が非 0: {with}"
+        with.contains("committed: BudgetCounters { fuel: 82,"),
+        "fuel が §4.1 の表の値でない: {with}"
     );
     assert_eq!(with, without, "usage を含む outcome が sink 有無で一致");
     assert_eq!(with_bytes, without_bytes);

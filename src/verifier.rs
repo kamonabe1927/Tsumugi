@@ -224,8 +224,8 @@ fn verify_chunk(chunk: &Chunk, upvalue_count: usize) -> Result<(), ChunkVerifyEr
                 }
             }
 
-            // (V10) `Charge` の種別。bytecode に出てよいのはループ反復と user function 呼び出しだけ
-            // （builtin callback は `call_fn_value` から直接課金し、host function は VM に無い。F-2b Q2 = A）。
+            // (V10) `Charge` の種別。host call attempt は builtin の実行（Rust 側）が直接課金するので
+            // bytecode に出てはならない（F-2b Q2 = A、F-2c で種別を §4.1 に付け直した）。
             OpCode::Charge(kind) => {
                 if !kind.allowed_in_bytecode() {
                     return Err(ChunkVerifyError::BadChargeKind);
@@ -550,8 +550,8 @@ mod tests {
         assert!(verify(chunk).is_ok());
     }
 
-    /// F2b-AT-02: bytecode に出てよい種別（ループ反復・user function 呼び出し）の `Charge` は通り、
-    /// 出てはならない種別（builtin callback・host function 呼び出し）は `BadChargeKind` で拒否される。
+    /// F2b-AT-02（F-2c で種別を §4.1 に付け直した）: bytecode に出てよい種別の `Charge` は通り、
+    /// 出てはならない種別（host call attempt。builtin の実行が直接課金する）は `BadChargeKind` で拒否される。
     #[test]
     fn f2b_at_02_verifier_rejects_charge_kinds_that_must_not_appear() {
         use crate::budget::ChargeKind;
@@ -561,15 +561,19 @@ mod tests {
             chunk.emit(OpCode::Return, 1);
             chunk
         };
-        for kind in [ChargeKind::LoopIteration, ChargeKind::UserCall] {
+        for kind in [
+            ChargeKind::Statement,
+            ChargeKind::Expression,
+            ChargeKind::Operation,
+            ChargeKind::Invocation,
+            ChargeKind::LoopIteration,
+        ] {
             assert!(verify(build(kind)).is_ok(), "{kind:?} は通るはず");
         }
-        for kind in [ChargeKind::BuiltinCallback, ChargeKind::HostCall] {
-            assert_eq!(
-                verify(build(kind)).err(),
-                Some(ChunkVerifyError::BadChargeKind),
-                "{kind:?} は拒否されるはず"
-            );
-        }
+        assert_eq!(
+            verify(build(ChargeKind::HostCallAttempt)).err(),
+            Some(ChunkVerifyError::BadChargeKind),
+            "HostCallAttempt は拒否されるはず"
+        );
     }
 }

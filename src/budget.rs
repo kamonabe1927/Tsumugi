@@ -35,8 +35,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// heap 論理サイズ表の revision。初期実装は 1 だけを受理する（§3.1 / §5.1）。
 pub const HEAP_ACCOUNTING_REVISION: u32 = 1;
 
-/// fuel 課金表（§4.1）の版。F-2c が課金表を移行するとき 2 へ上げる。
-pub const FUEL_ACCOUNTING_REVISION: u32 = 1;
+/// fuel 課金表（§4.1）の版。F-2c で §4.1 の主要 charge point へ移行して 2 にした。
+pub const FUEL_ACCOUNTING_REVISION: u32 = 2;
+
+/// 既定の `total_fuel`（§3.1）。版 `2` の課金で代表 script 集合を測って決めた（F-2c。最大は F1-AT-04 の
+/// 2 文ループ 1,000,000 反復の 18,000,029 で、それが通る最小の切りの良い値）。
+pub const DEFAULT_TOTAL_FUEL: u64 = 20_000_000;
 
 const MIB: u64 = 1_048_576;
 
@@ -199,46 +203,53 @@ impl MonotonicClock for SystemMonotonicClock {
 // config（§3 / §3.1）
 // =============================================================================
 
-/// fuel の課金点の種別（§4.1、F-2b）。
+/// fuel の課金点の種別（§4.1、F-2b・F-2c）。
 ///
-/// 版 `1` では今の課金点の種類ごとに 4 種別で、値はどれも 1（[`FuelSchedule::cost`]）。
-/// host function 呼び出しを invocation と host call のどちらに数えるかは F-2c で決める。
-/// VM の `Charge` opcode の payload にも使う（bytecode に出てよい種別は
+/// 版 `2` では §4.1 の主要 charge point ごとに 6 種別（値は [`FuelSchedule::cost`]）。
+/// 登録 host function の呼び出しは [`ChargeKind::Invocation`] と [`ChargeKind::HostCallAttempt`] の
+/// 両方を払う（F-2c Q2 = A）。どの AST ノードをいつ数えるかは execution-control §14「F-2c 実装
+/// スライス」の判断 Q3 = A。VM の `Charge` opcode の payload にも使う（bytecode に出てよい種別は
 /// [`ChargeKind::allowed_in_bytecode`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChargeKind {
-    /// `while` / `for` の 1 反復。
+    /// statement へ入る（1）。
+    Statement,
+    /// expression へ入る（1）。
+    Expression,
+    /// unary / binary / compare / index / assignment の論理 operation（1）。
+    Operation,
+    /// language-level function invocation（5）。user function・lambda・core builtin・callback・
+    /// 登録 host function で共通。
+    Invocation,
+    /// `while` / `for` の 1 反復の開始（2）。
     LoopIteration,
-    /// user function の呼び出し。
-    UserCall,
-    /// embedder が登録した host function の呼び出し（tree のみ）。
-    HostCall,
-    /// builtin の callback 呼び出し（`map` / `filter` / `each` など）。
-    BuiltinCallback,
+    /// host call attempt（10）。filesystem builtin・stdio・`env` / `now` / `exit`・登録 host function。
+    HostCallAttempt,
 }
 
 impl ChargeKind {
-    /// この種別の `Charge` が bytecode に出てよいか。ループ反復と user function 呼び出しだけが
-    /// compiler の挿入位置を持つ。callback は `Vm::call_fn_value` から直接課金する（F-2b Q5 = A）。
+    /// この種別の `Charge` が bytecode に出てよいか。host call attempt は builtin の実行
+    /// （Rust 側）が直接課金するので bytecode に出ない。callback の invocation も
+    /// `Vm::call_fn_value` から直接課金する（F-2b Q5 = A）。
     pub const fn allowed_in_bytecode(self) -> bool {
-        matches!(self, ChargeKind::LoopIteration | ChargeKind::UserCall)
+        !matches!(self, ChargeKind::HostCallAttempt)
     }
 }
 
 /// fuel の課金値の表（§4.1）。tree と VM が同じ表から課金する共有 API。
 ///
-/// 現在の表は `fuel_accounting_revision = 1` で、どの種別も 1。
+/// 現在の表は `fuel_accounting_revision = 2`。
 #[derive(Debug, Clone, Copy)]
 pub struct FuelSchedule;
 
 impl FuelSchedule {
-    /// 種別 `kind` の課金値（版 `1`）。
+    /// 種別 `kind` の課金値（版 `2`）。
     pub const fn cost(kind: ChargeKind) -> u64 {
         match kind {
-            ChargeKind::LoopIteration
-            | ChargeKind::UserCall
-            | ChargeKind::HostCall
-            | ChargeKind::BuiltinCallback => 1,
+            ChargeKind::Statement | ChargeKind::Expression | ChargeKind::Operation => 1,
+            ChargeKind::Invocation => 5,
+            ChargeKind::LoopIteration => 2,
+            ChargeKind::HostCallAttempt => 10,
         }
     }
 }
@@ -248,7 +259,7 @@ impl FuelSchedule {
 pub enum ConfigError {
     /// `heap_accounting_revision` が受理しない版（現状は 1 以外）。値は指定された版。
     UnsupportedHeapAccountingRevision(u32),
-    /// `fuel_accounting_revision` が受理しない版（現状は 1 以外）。値は指定された版。
+    /// `fuel_accounting_revision` が受理しない版（現状は 2 以外）。値は指定された版。
     UnsupportedFuelAccountingRevision(u32),
     /// deadline が別 clock domain の instant。
     ForeignClock,
@@ -314,7 +325,7 @@ impl BudgetConfig {
         Ok(Self {
             heap_accounting_revision: HEAP_ACCOUNTING_REVISION,
             fuel_accounting_revision: FUEL_ACCOUNTING_REVISION,
-            total_fuel: 1_000_000,
+            total_fuel: DEFAULT_TOTAL_FUEL,
             max_live_heap_bytes: 64 * MIB,
             max_string_allocations: 1_000_000,
             max_string_bytes: 64 * MIB,
@@ -472,7 +483,7 @@ impl BudgetConfig {
     /// config の妥当性を検証する（§3）。execution 作成前に呼ぶ。
     ///
     /// - `heap_accounting_revision` が 1 以外なら拒否（先に検査する）。
-    /// - `fuel_accounting_revision` が 1 以外なら拒否。
+    /// - `fuel_accounting_revision` が 2 以外なら拒否。
     /// - deadline が `clock` と別 domain なら拒否。
     /// - deadline が `clock.now()` 以前なら拒否。
     pub fn validate(&self, clock: &dyn MonotonicClock) -> Result<(), ConfigError> {
@@ -2615,9 +2626,9 @@ mod tests {
         let clock = FakeClock::new();
         let config = BudgetConfig::standard(&clock).unwrap();
         assert_eq!(config.heap_accounting_revision, 1);
-        // F2a-AT-01: fuel の会計版の既定は 1。
-        assert_eq!(config.fuel_accounting_revision, 1);
-        assert_eq!(config.total_fuel, 1_000_000);
+        // F2c-AT-04: fuel の会計版の既定は 2、既定 total_fuel は版 2 で測った値。
+        assert_eq!(config.fuel_accounting_revision, 2);
+        assert_eq!(config.total_fuel, 20_000_000);
         assert_eq!(config.max_live_heap_bytes, 64 * 1_048_576);
         assert_eq!(config.max_single_string_bytes, 8 * 1_048_576);
         assert_eq!(config.max_source_count, 1_025);
@@ -2638,11 +2649,17 @@ mod tests {
             config.validate(&clock),
             Err(ConfigError::UnsupportedHeapAccountingRevision(2))
         );
+        // F2c-AT-04: 旧版 1 は旧課金で動くのではなく拒否される。未来の版 3 も拒否される。
         let mut config = BudgetConfig::standard(&clock).unwrap();
-        config.fuel_accounting_revision = 2;
+        config.fuel_accounting_revision = 1;
         assert_eq!(
             config.validate(&clock),
-            Err(ConfigError::UnsupportedFuelAccountingRevision(2))
+            Err(ConfigError::UnsupportedFuelAccountingRevision(1))
+        );
+        config.fuel_accounting_revision = 3;
+        assert_eq!(
+            config.validate(&clock),
+            Err(ConfigError::UnsupportedFuelAccountingRevision(3))
         );
         config.heap_accounting_revision = 3;
         assert_eq!(

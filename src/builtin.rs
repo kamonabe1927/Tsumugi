@@ -23,7 +23,7 @@ impl Evaluator {
         line: usize,
     ) -> Result<(), TsumugiError> {
         // 再帰制限チェック（通常の関数呼び出しと同じガードを適用）
-        self.charge(crate::budget::ChargeKind::BuiltinCallback, line)?;
+        self.charge(crate::budget::ChargeKind::Invocation, line)?;
         if self.call_stack.len() >= super::MAX_USER_CALL_DEPTH {
             return Err(TsumugiError::call_depth_limit(
                 line,
@@ -158,6 +158,12 @@ impl Evaluator {
         args: &[Expr],
         line: usize,
     ) -> Result<Option<Value>, TsumugiError> {
+        // invocation（§4.1、F-2c Q3 = A 規則 4）: core builtin も引数の評価より前に 5 を払う。
+        // builtin 名でなければ（`Ok(None)` を返す名前）課金しない。
+        if name != "print" && !crate::builtin_registry::is_public_builtin(name) {
+            return Ok(None);
+        }
+        self.charge(crate::budget::ChargeKind::Invocation, line)?;
         crate::builtin_core::validate_context_builtin_call(
             name,
             args.len(),
@@ -190,6 +196,8 @@ impl Evaluator {
                 let Some(cell) = self.env.get_cell(name) else {
                     return Ok(None);
                 };
+                // 引数の識別子は読み取らないが expression 1 は払う（VM の `LenLocal` と同じ）。
+                self.charge(crate::budget::ChargeKind::Expression, line)?;
                 let collection = cell.borrow();
                 crate::builtin_core::builtin_len(std::slice::from_ref(&collection), line).map(Some)
             }
@@ -236,6 +244,8 @@ impl Evaluator {
             crate::builtin_core::render_fs_content_budgeted(name, &mut evaluated, &mut self.budget)
                 .map_err(|stop| self.control_stop_to_error(stop, line))?;
             let request_bytes = crate::builtin_core::host_call_request_bytes(name, &evaluated);
+            // host call attempt（§4.1、F-2c Q1 = A）は回数の課金の直前。
+            self.charge(crate::budget::ChargeKind::HostCallAttempt, line)?;
             self.budget
                 .charge_host_call_request(request_bytes, ExecutionPhase::Run)
                 .map_err(|stop| self.control_stop_to_error(stop, line))?;
@@ -406,7 +416,8 @@ impl Evaluator {
     ) -> Result<Value, TsumugiError> {
         let payload = parts.join(" ");
         // output（stdio host call）を課金する（§6.1、REV-015 Slice 2、I-O accounting）。
-        // payload を host へ渡す前に課金する。
+        // payload を host へ渡す前に課金する。host call attempt（§4.1、F-2c Q1 = A）はその直前。
+        self.charge(crate::budget::ChargeKind::HostCallAttempt, line)?;
         self.budget
             .charge_output(
                 crate::builtin_core::print_charge_bytes(&payload),
@@ -429,6 +440,8 @@ impl Evaluator {
                 ));
             }
         };
+        // host call attempt（§4.1、F-2c Q1 = A）は capability 判定より前。
+        self.charge(crate::budget::ChargeKind::HostCallAttempt, line)?;
         let value = crate::builtin_core::resolve_env(
             self.capabilities().environment(),
             key.as_str(),
@@ -456,6 +469,8 @@ impl Evaluator {
                 ));
             }
         };
+        // host call attempt（§4.1、F-2c Q1 = A）は capability 判定より前。
+        self.charge(crate::budget::ChargeKind::HostCallAttempt, line)?;
         let has_exit = self.capabilities().process_exit().is_some();
         let code = crate::builtin_core::resolve_exit(code, has_exit, line)?;
         // record_exit は pending_exit を載せ、catch 不可の ProcessExit 信号を返す。
@@ -532,6 +547,8 @@ impl Evaluator {
                 }
                 // C4（CAP-AT-07）: Stdin authority を consult する。未 grant は adapter call 0 の
                 // catch 可能な `capability` error。EOF は null、host 失敗は catch 可能な `host` error。
+                // host call attempt（§4.1、F-2c Q1 = A）は capability 判定・読み取りより前。
+                self.charge(crate::budget::ChargeKind::HostCallAttempt, line)?;
                 let value = crate::builtin_core::resolve_input(self.capabilities().stdin(), line)?;
                 // input（stdio host call）を課金する（§6.1、REV-015 Slice 2）。受け取った
                 // payload の byte 長を count と併せて課金する（EOF 時は 0 byte）。
@@ -569,6 +586,8 @@ impl Evaluator {
             "now" => {
                 // C3（CAP-AT-06）: Clock authority を consult する。system clock へは触れない。
                 crate::builtin_core::check_arity_count(name, args.len(), 0, line)?;
+                // host call attempt（§4.1、F-2c Q1 = A）は capability 判定より前。
+                self.charge(crate::budget::ChargeKind::HostCallAttempt, line)?;
                 let value = crate::builtin_core::resolve_now(self.capabilities().clock(), line)?;
                 Ok(Some(value))
             }
@@ -608,6 +627,8 @@ impl Evaluator {
         match name {
             "push" => {
                 let (cell, snapshot) = self.push_target_cell(&args[0], line)?;
+                // 第1引数の識別子の expression 1（§4.1。VM の builtin 経路の読み取りと同じ位置）。
+                self.charge(crate::budget::ChargeKind::Expression, line)?;
                 // 第1引数を snapshot として読んでから第2引数を評価し、同じbindingへ書き戻す。
                 let value = self.eval_expr(&args[1], line)?;
                 self.apply_push(&cell, snapshot, value, line).map(Some)
@@ -616,6 +637,8 @@ impl Evaluator {
                 let Expr::Ident(var_name) = &args[0] else {
                     unreachable!("pop target was validated before argument evaluation")
                 };
+                // 第1引数の識別子の expression 1（§4.1。VM の `pop` の引数の読み取りと同じ）。
+                self.charge(crate::budget::ChargeKind::Expression, line)?;
                 let cell = self
                     .env
                     .get_cell(var_name)

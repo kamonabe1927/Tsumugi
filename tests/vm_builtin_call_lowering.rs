@@ -329,11 +329,23 @@ fn vm_run(source: &str, fuel: u64) -> (BudgetUsage, Result<(), TsumugiError>) {
     (vm.budget_usage(), result)
 }
 
-/// 成功する最小の fuel 上限（tree で探す）。
+/// 成功する最小の fuel 上限（tree で探す）。F-2c の版 2 で必要 fuel が増えたので二分探索にした。
 fn min_success_fuel(source: &str) -> u64 {
-    (0..=500)
-        .find(|fuel| tree_run(source, *fuel).1.is_ok())
-        .expect("500 以内で成功しない")
+    let ok = |fuel: u64| tree_run(source, fuel).1.is_ok();
+    assert!(ok(100_000), "100,000 以内で成功しない");
+    let (mut lo, mut hi) = (0u64, 100_000u64);
+    if ok(0) {
+        return 0;
+    }
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if ok(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
 }
 
 /// builtin の入れ子と push の入れ子を loop と user 呼び出しの中に置いた script で、

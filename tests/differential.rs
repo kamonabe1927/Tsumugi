@@ -1240,7 +1240,8 @@ fn min_fuel(label: &str, run: impl Fn(u64) -> bool) -> u64 {
 }
 
 /// F1-AT-01/02/03/07、F2b-AT-01（課金点を `Charge` / `FuelSchedule` へ寄せても観測が変わらない）: 消費 fuel・上限境界・watchdog の非干渉を 1 script について検査する。
-fn assert_fuel_parity(label: &str, source: &str) {
+/// 両 engine で一致した消費 fuel（成功する最小の上限 N）を返す。
+fn assert_fuel_parity(label: &str, source: &str) -> u64 {
     let tree_ok = |n: u64| run_tree_single(source, Limits::Fuel(n)).1.is_ok();
     let vm_ok = |n: u64| run_vm_single(source, Limits::Fuel(n)).1.is_ok();
     let tree_fuel = min_fuel(&format!("{label} [tree]"), tree_ok);
@@ -1269,6 +1270,7 @@ fn assert_fuel_parity(label: &str, source: &str) {
         ticks <= tree_fuel + 1,
         "[{label}] watchdog の tick 数 {ticks} が fuel 課金数 {tree_fuel} + 1 を超えています (F1-AT-07)"
     );
+    tree_fuel
 }
 
 /// F1-AT-01: ループ系の消費 fuel が tree/VM で一致する。
@@ -1460,4 +1462,90 @@ fn ilg_at_05_graph_expansion_charge_parity() {
     assert_eq!(tree.committed.source_bytes, vm_usage.committed.source_bytes);
     assert_eq!(tree.committed.import_count, vm_usage.committed.import_count);
     assert_eq!(tree.committed.import_bytes, vm_usage.committed.import_bytes);
+}
+
+// =============================================================================
+// F-2c: §4.1 の主要 charge point（execution-control §14「F-2c 実装スライス」）
+// =============================================================================
+//
+// 版 2 の課金: statement 1・expression 1・operation 1・invocation 5・loop iteration 2・host call attempt 10。
+// どのノードをいつ数えるかは F-2c の判断 Q3 = A（実行した分だけを前順で数える）。期待値は §4.1 の表から
+// 手計算した値で、`assert_fuel_parity` が両 engine の N の一致・N−1 の terminal の一致・watchdog の
+// 非干渉もあわせて確かめる。
+
+/// F2c-AT-01: `while` / `for` / 入れ子 / `continue` / `break` の必要 fuel が §4.1 の表から手計算した値と
+/// 一致し、両 engine で同じ。
+#[test]
+fn f2c_at_01_loop_fuel_matches_hand_computed_table() {
+    let cases: &[(&str, &str, u64)] = &[
+        // let 3（文 1・式 1・代入 1）+ while 文 1 + 条件 4（式 3・比較 1）× 4 回 + 反復 3 ×（2 + 代入文 6）。
+        (
+            "while",
+            "let i = 0\nwhile i < 3\n  i = i + 1\nend\n",
+            3 + 1 + 4 * 4 + 3 * (2 + 6),
+        ),
+        // let 3 + for 文 1 + 反復元の List 式 4（1 回だけ）+ 反復 3 ×（2 + 代入文 6）。
+        (
+            "for",
+            "let s = 0\nfor x in [1, 2, 3]\n  s = s + x\nend\n",
+            3 + 1 + 4 + 3 * (2 + 6),
+        ),
+        // 外側 for: 文 1 + List 3。外側の反復ごとに 2 + let 3 + while 文 1 + 条件 4 × 3 + 内側の反復 2 ×（2 + 6）。
+        (
+            "入れ子",
+            "let s = 0\nfor x in [1, 2]\n  let j = 0\n  while j < 2\n    j = j + 1\n  end\nend\n",
+            3 + (1 + 3) + 2 * (2 + 3 + 1 + 4 * 3 + 2 * (2 + 6)),
+        ),
+        // while の continue は文 1 だけを払い、次の反復の開始で 2 を払う（条件は毎回 4）。
+        // 反復 3 回 × (2 + 代入文 6 + if 文 5)、continue 文 1 回、条件 4 回。
+        (
+            "while + continue",
+            "let i = 0\nwhile i < 3\n  i = i + 1\n  if i == 2\n    continue\n  end\nend\n",
+            3 + 1 + 4 * 4 + 3 * (2 + 6 + 5) + 1,
+        ),
+        // for 文 1 + List 5。x=1・3: 2 + if 5 + if 5 + 代入文 6、x=2: 2 + if 5 + continue 1、
+        // x=4: 2 + if 5 + if 5 + break 1（break で抜ける反復も 2 を払う）。
+        (
+            "for + continue + break",
+            "let n = 0\nfor x in [1, 2, 3, 4]\n  if x == 2\n    continue\n  end\n  if x == 4\n    break\n  end\n  n = n + x\nend\n",
+            3 + (1 + 5) + 2 * (2 + 5 + 5 + 6) + (2 + 5 + 1) + (2 + 5 + 5 + 1),
+        ),
+    ];
+    for (label, source, expected) in cases {
+        assert_eq!(
+            assert_fuel_parity(label, source),
+            *expected,
+            "[{label}] §4.1 の表から手計算した必要 fuel と違う"
+        );
+    }
+}
+
+/// F2c-AT-01: invocation は呼び出しの有無だけが違う 2 本の N の差が 5、loop iteration は反復回数だけが
+/// 違う 2 本の N の差が「反復数差 ×（2 + 1 反復分の condition / iterable と body の課金）」。
+#[test]
+fn f2c_at_01_invocation_and_iteration_differences() {
+    // `f` と `f()` はどちらも expression 1（callee が名前の call 式は callee を別に数えない）なので、
+    // 差は invocation 5 だけ（本体は空）。
+    let prelude = "fn f()\nend\n";
+    let plain = assert_fuel_parity("参照", &format!("{prelude}let g = f\n"));
+    let called = assert_fuel_parity("呼び出し", &format!("{prelude}let g = f()\n"));
+    assert_eq!(called - plain, 5, "user function の invocation");
+    // lambda も invocation 5。lambda の本体は空にできないので、本体の return 文 2（文 1・式 1）が加わる。
+    let plain = assert_fuel_parity("lambda 参照", "let h = fn() null end\nlet g = h\n");
+    let called = assert_fuel_parity("lambda 呼び出し", "let h = fn() null end\nlet g = h()\n");
+    assert_eq!(called - plain, 5 + 2, "lambda の invocation");
+    // callback は要素 1 つにつき invocation 5（`range` の引数だけが違い、AST の大きさは同じ）。
+    let cb = "fn f(x)\nend\n";
+    let two = assert_fuel_parity("callback 2", &format!("{cb}let r = map(range(0, 2), f)\n"));
+    let five = assert_fuel_parity("callback 5", &format!("{cb}let r = map(range(0, 5), f)\n"));
+    assert_eq!(five - two, 3 * 5, "callback の invocation");
+
+    // while: 1 反復 = 2 + 条件 4 + 本体の代入文 6。
+    let w = |n: u32| format!("let i = 0\nwhile i < {n}\n  i = i + 1\nend\n");
+    let diff = assert_fuel_parity("while 5", &w(5)) - assert_fuel_parity("while 3", &w(3));
+    assert_eq!(diff, 2 * (2 + 4 + 6), "while の反復");
+    // for: 反復元は 1 回だけ評価するので、1 反復 = 2 + 本体の代入文 6。
+    let f = |n: u32| format!("let s = 0\nfor x in range(0, {n})\n  s = s + x\nend\n");
+    let diff = assert_fuel_parity("for 7", &f(7)) - assert_fuel_parity("for 3", &f(3));
+    assert_eq!(diff, 4 * (2 + 6), "for の反復");
 }

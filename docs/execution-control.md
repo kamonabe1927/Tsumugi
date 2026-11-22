@@ -59,7 +59,7 @@ handle 経路を §3 の `ExecutionRequest` と組み込みAPI仕様 §8 の `Ex
 | callback なし bulk builtin の chunk 境界での slice yield の残り（fuel-bulk-chunk-yield で `join` / `contains`（List）/ `sort` の走査・描画キーは tree の poll 経路で 256 要素・16 KiB の chunk 境界を yield 可能点にした）。(1) per-element の fuel を課金しない bulk builtin（`range` / `keys` / `values` / `reverse` / `slice` / `split` / 文字列の繰り返し・連結 / 大きな collection のコピー等）は slice fuel で区切りが生じない。(2) スカラー要素（`Str` / `Int` / `Float` / `Bool` / `Null`）の List への `join` / `contains` と revision 0.20 以下の `sort` の描画キーは、要素の描画・等価判定が fuel を課金しないので chunk 境界があっても slice fuel では yield せず、1 回分を §4.2 の超過（collection / string 上限で有界）として扱う（Q4 = A）。(3) 1 つの値の描画（`to_str`、`join` の 1 要素）と `replace` / `path_join` は段階実行にしていない。chunk 前の確認は従来どおり各 charge の前の deadline / cancel だけ | §4.1/§4.2 | (1)(2) は §4.1 の per-element・UTF-8 の課金が入る F-2・`fuel-bulk-charge` の後（その課金が入れば (2) は chunk 境界が追加の仕組みなしで効く）、(3) は未設計 |
 | VM の式レベル continuation（VM の slice yield と continuation parity） | §9.3 | Slice 6（VM が experimental の間） |
 | script / host の明示 yield（`YieldReason::ExplicitYield`）。型はあるが trigger を配線していない | §9 | — |
-| §4.1 課金表の主要 charge point（statement / expression / operation 単位）への移行。現状の fuel は文・反復・呼び出しと一部 builtin の per-element だけ（課金は §3.1 の版 `1` 相当）。共有 `FuelSchedule`（`src/budget.rs`。種別はループ反復・user function 呼び出し・host function 呼び出し・builtin callback の 4 つで、版 `1` ではどれも 1）と VM の `Charge` opcode（`Loop` / `PrepareCall` の直前に出し、dispatch 自体は課金しない。bytecode に出てよい種別はループ反復と user function 呼び出しだけで、verifier が他を拒否する）は入った。statement / expression / operation / invocation 5 / loop iteration 2 / host call 10 の種別と値は未実装 | §4.1 | F-2c（移行） |
+| §4.1 課金表のうち UTF-8 payload（`ceil(bytes / 64)`）・AST node（1 / node）・`map` / `filter` / serialize の per-element の fuel。主要 charge point（statement / expression / operation / invocation 5 / loop iteration 2 / host call attempt 10）は F-2c で版 `2` として入ったが、これらは課金していない（per-element は比較・表示・`sort` だけ） | §4.1 | fuel-bulk-charge |
 | reservation オブジェクト（§7 の `reserve` が返し `commit(actual)` / `refund()` で settle する型）と、未 settle の drop を release build でも `InternalFailure(UnsettledReservation)` にする規則 7。現状の `Budget::reserve_all` は `Result<(), ControlStop>` を返し、`commit(resource, reserved, actual)`・`refund(resource, reserved)` に量を渡す形で、未 settle は検出しない。`actual > reserved` は規則 3 の拒否でなく `debug_assert` と `min` による丸めで扱う | §7 | budget-reservation-settle |
 | deadline の timer による waker の通知。§9.1 は deadline timer が状態を ready にした後で waker を呼び、host の busy-poll を不要とするが、deadline は poll の checkpoint（`src/engine.rs` の `checkpoint_terminal`）でしか観測せず、deadline に waker を結ぶ timer が無い（`src/engine.rs`・`src/scheduler.rs`・`src/host_pending.rs`・`src/budget.rs`）。`HostCallPending`・`AdmissionQueued` で待つ handle は、host が poll しない限り deadline の到達に気づけない。admission の昇格の wake（逸脱一覧の D-115 の行）とは別。loop:drift #429 D-138 | §9.1 | 未設計 |
 
@@ -274,8 +274,8 @@ per-item超過時の`BudgetExceeded`は`used = 0`、`reserved = 0`、`requested 
 | field | 既定値 |
 |---|---:|
 | `heap_accounting_revision` | 1 |
-| `fuel_accounting_revision` | 1 |
-| `total_fuel` | 1,000,000 fuel |
+| `fuel_accounting_revision` | 2 |
+| `total_fuel` | 20,000,000 fuel |
 | `max_live_heap_bytes` | 64 MiB |
 | `max_string_allocations` | 1,000,000 |
 | `max_string_bytes` | 64 MiB |
@@ -297,7 +297,7 @@ per-item超過時の`BudgetExceeded`は`used = 0`、`reserved = 0`、`requested 
 
 `MiB`は1,048,576 byteである。`heap_accounting_revision != 1`は`ConfigError::UnsupportedHeapAccountingRevision(u32)`でexecution作成前に拒否する。すべての上限は0を許し、該当操作を最初から禁止できる。deadlineだけは作成時点より後でなければならない。
 
-`fuel_accounting_revision`は§4.1の課金表（charge pointと課金値）の版である。`heap_accounting_revision`が§5.1の論理サイズ表の版であるのと対称で、`BudgetConfig`が`u32`で保持し、`BudgetConfig::standard`は既定を現行版にする。課金表を変える変更（charge pointの追加・課金値の変更）はこの値を1つ上げ、同時に受理する版を新版だけへ更新する（`heap_accounting_revision`と同じく、受理しない版はexecution作成前に`ConfigError`で拒否する）。会計版の不正は、どのfield（heapかfuelか）が不正かを呼び出し側が区別できる形のconfig errorで返す。heapは`ConfigError::UnsupportedHeapAccountingRevision(u32)`、fuelは`ConfigError::UnsupportedFuelAccountingRevision(u32)`で、値は指定された版である（§14「F-2 の sub-slice 分割」の判断Q3=A。判断役が選択（PR #470））。現在の差は冒頭の未実装範囲を見る。旧版の課金を再現する互換経路は持たない（alphaにつき後方互換無保証、旧版指定は拒否されるのであって旧課金で動くのではない）。fuelの会計版をこの専用fieldに分離するのは、`language_revision`（§17.8の全順序化などscriptから観測できる言語挙動の版）と会計の版を混ぜないためである。したがってfuel課金の変更で`language_revision`はbumpしない。初期版は`1`（F-1までの課金。F-2が§4.1の表へ移行するとき`2`へ上げる）。§4.1の「List / Dictの深度の読み直し」は版`1`に含める（そう決めた理由は§14「fix-value-depth-settle-quadratic 実装スライス」の決定記録を見る）。
+`fuel_accounting_revision`は§4.1の課金表（charge pointと課金値）の版である。`heap_accounting_revision`が§5.1の論理サイズ表の版であるのと対称で、`BudgetConfig`が`u32`で保持し、`BudgetConfig::standard`は既定を現行版にする。課金表を変える変更（charge pointの追加・課金値の変更）はこの値を1つ上げ、同時に受理する版を新版だけへ更新する（`heap_accounting_revision`と同じく、受理しない版はexecution作成前に`ConfigError`で拒否する）。会計版の不正は、どのfield（heapかfuelか）が不正かを呼び出し側が区別できる形のconfig errorで返す。heapは`ConfigError::UnsupportedHeapAccountingRevision(u32)`、fuelは`ConfigError::UnsupportedFuelAccountingRevision(u32)`で、値は指定された版である（§14「F-2 の sub-slice 分割」の判断Q3=A。判断役が選択（PR #470））。現在の差は冒頭の未実装範囲を見る。旧版の課金を再現する互換経路は持たない（alphaにつき後方互換無保証、旧版指定は拒否されるのであって旧課金で動くのではない）。fuelの会計版をこの専用fieldに分離するのは、`language_revision`（§17.8の全順序化などscriptから観測できる言語挙動の版）と会計の版を混ぜないためである。したがってfuel課金の変更で`language_revision`はbumpしない。初期版は`1`（F-1までの課金）。現在版は`2`で、§4.1の主要charge point（statement・expression・operation・invocation・loop iteration・host call attempt）の課金である（§14「F-2c 実装スライス」）。既定`total_fuel`は版`2`の課金で代表script集合を測り、それが通る最小の切りの良い値にした。§4.1の「List / Dictの深度の読み直し」は版`1`に含める（そう決めた理由は§14「fix-value-depth-settle-quadratic 実装スライス」の決定記録を見る）。
 
 ## 4. Fuel課金
 
@@ -3055,6 +3055,18 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   同じ back-edge に置く）は VM の `Charge` を動かさずに済む（原則 8）が、`break` で抜けた反復に 2 が課金されず「1 反復につき 2」と
   食い違い、F2c-AT-01 の反復数差の手計算が `break` の有無で変わる。operand の評価で失敗した演算にも operation を課金して
   「実行した分だけ」にならない（原則 5）。
+
+**判断の記録**（F-2c の実装 PR #485 のレビュー 80844b3 の S1。判断役が選択（PR #485）、Q1=A）:
+
+- **Q1 = A（実装と食い違う他の文書の記述を、この実装 PR で事実に合わせる）**: 対象はレビューが挙げた箇所だけで、
+  [言語仕様](language-spec.md)「実行安全性」の段落と「ステップ予算」の数え方・既定値、`README.ja.md` の既定値、
+  [Capability仕様](capability-model.md) の逸脱一覧の `HostCost` の行（「`HostCost` が課金に使われない」という逸脱の
+  中身は変えず、今の課金（invocation 5 と host call attempt 10）の記述だけを合わせる）。言語仕様は現行実装から
+  観測できる規範仕様で、実装との差は逸脱一覧にだけ書く。直さずにマージすると、版 2・20,000,000 の実装に対して
+  既定 1,000,000・「ループ反復 + 関数呼び出しの合計回数」の記述が逸脱一覧にも無いまま main に入る（[マニフェスト](manifesto.md)
+  原則 5・9）。正しい値と数え方は §3.1・§4.1 と上の Q1〜Q3 で決まっており新しい判断は要らず、文書 3 ファイルの
+  数行で済む（原則 8）。言語仕様の既定値は §3.1 を指し、現在の値を括弧で添える形にした。採らなかった案: B（この PR は
+  変えず、ずれの修正に回す）は、ずれと分かっているものをマージし、次の整合点検と別の PR まで文書が実装と違うままになる。
 
 **判断の記録**（設計 PR #470 の判断の候補。判断役が選択（PR #470）、Q1〜Q5=A）:
 

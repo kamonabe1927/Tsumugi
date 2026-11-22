@@ -157,23 +157,30 @@ fn vds_at_01_settle_charges_children_read_again() {
         assert_eq!(settle - control, n as u64, "Dict の上書き（n={n}）");
     }
 
-    // 読み直しの起きない操作は、スカラーを置き換える同じ形の操作と fuel が同じ。
+    // 読み直しの起きない操作は、スカラーを置き換える同じ形の操作と fuel が同じ。F-2c の版 2 では
+    // 文・式の課金（§4.1）が式の形で変わるので、その差（値の式の expression の数の差。push は
+    // call 式 1・invocation 5・引数 2 と index 代入の index 1・operation 1 の差も）を足して比べる。
     let n = 6;
     let base = list_with_deep_at(n, 0);
     let control = fuel(&format!("{base}xs[1] = 0\n"));
-    for (label, stmt) in [
-        ("同じ深度の値を入れる", "xs[0] = [[2]]"),
-        ("より深い値を入れる", "xs[0] = [[[2]]]"),
-        ("最も深くない子を置き換える", "xs[2] = [1]"),
-        ("push", "push(xs, [[3]])"),
+    for (label, stmt, main_charge_delta) in [
+        ("同じ深度の値を入れる", "xs[0] = [[2]]", 2),
+        ("より深い値を入れる", "xs[0] = [[[2]]]", 3),
+        ("最も深くない子を置き換える", "xs[2] = [1]", 1),
+        ("push", "push(xs, [[3]])", 7),
     ] {
-        assert_eq!(fuel(&format!("{base}{stmt}\n")), control, "{label}");
+        assert_eq!(
+            fuel(&format!("{base}{stmt}\n")),
+            control + main_charge_delta,
+            "{label}"
+        );
     }
     // 同じ深度の子が残る取り除き（最も深い子が 2 つ）。
     let two = "let xs = [0, [[1]], 0, [[1]]]\n";
+    // `let` の List 式の expression の差（`[[1]]` 3 と `0` 1）の 2 を足して比べる（F-2c）。
     assert_eq!(
         fuel(&format!("{two}pop(xs)\n")),
-        fuel("let xs = [0, [[1]], 0, 0]\npop(xs)\n"),
+        fuel("let xs = [0, [[1]], 0, 0]\npop(xs)\n") + 2,
         "同じ深度の子が残る pop"
     );
     assert_eq!(
@@ -189,9 +196,10 @@ fn vds_at_01_settle_charges_children_read_again() {
         "Dict の新しい key"
     );
     // VM だけが内部で読み直す Dict リテラルの重複 key は課金しない（tree と一致し、重複しない形と同じ）。
+    // F-2c の版 2 では値の式 `[[1]]` の expression 3 と `1` の 1 の差 2 を足して比べる（§4.1）。
     assert_eq!(
         fuel("let d = {\"a\": [[1]], \"b\": 1, \"a\": 1}\n"),
-        fuel("let d = {\"a\": 1, \"b\": 1, \"c\": 1}\n"),
+        fuel("let d = {\"a\": 1, \"b\": 1, \"c\": 1}\n") + 2,
         "Dict リテラルの重複 key"
     );
 }

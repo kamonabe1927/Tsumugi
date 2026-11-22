@@ -965,15 +965,15 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 
 外部操作の権限は冒頭の「外部操作の権限」と[Capability Model仕様](capability-model.md)に従う。以下は誤操作や過剰な資源消費を抑えるためのdefense-in-depth機構であり、敵対的なスクリプトを隔離するセキュリティ境界ではない。非信頼コードを実行する場合は、非rootプロセス、権限制限されたコンテナ、read-only filesystem、CPU・メモリ・実行時間上限などOS側の分離を併用する。
 
-構文とASTは深度256、非循環import chainはroot scriptを除いて128に制限し、parser・compiler・evaluatorがhost stackを消費する前にエラー化する。実行中に作るListとDictの入れ子の深さも256に制限し、値の破棄・比較・表示がhost stackを使い切る前に、値を作る時点で拒否する。ステップ予算はloop反復と関数・callback呼び出しを中心に数え、構文解析、コンパイル、直線的な大量コード、重いbuiltin、I/O待ちは包括的に制限しない。文字列・source・live heap・入出力の量は、ステップ予算とは別の包括budgetで実行ごとに制限する（[実行予算・協調実行仕様](execution-control.md) §3.1）。filesystem制御にもsymlinkのTOCTOU制約がある。
+構文とASTは深度256、非循環import chainはroot scriptを除いて128に制限し、parser・compiler・evaluatorがhost stackを消費する前にエラー化する。実行中に作るListとDictの入れ子の深さも256に制限し、値の破棄・比較・表示がhost stackを使い切る前に、値を作る時点で拒否する。ステップ予算（fuel）は実行した文・式・演算・関数とcallbackの呼び出し・loop反復・host call（[実行予算・協調実行仕様](execution-control.md) §4.1）を数えるので、直線的な大量コードも制限する。構文解析、コンパイル、一部の重いbuiltin（要素ごとの課金が無いもの）、I/O待ちは包括的に制限しない。文字列・source・live heap・入出力の量は、ステップ予算とは別の包括budgetで実行ごとに制限する（[実行予算・協調実行仕様](execution-control.md) §3.1）。filesystem制御にもsymlinkのTOCTOU制約がある。
 
 ### ステップ予算
 
-CLI では環境変数 `TSUMUGI_MAX_STEPS` でループ反復 + 関数呼び出しの合計回数に上限を設定する。超過すると catch できない停止（`limit`）になる（[実行予算・協調実行仕様](execution-control.md) §2 の不変条件 3）。デフォルト実行系と `--vm` の両方、ファイル・標準入力・REPL のすべての経路に同じく効く。
+CLI では環境変数 `TSUMUGI_MAX_STEPS` でステップ予算（fuel の合計。数え方は[実行予算・協調実行仕様](execution-control.md) §4.1 の課金表）に上限を設定する。超過すると catch できない停止（`limit`）になる（[実行予算・協調実行仕様](execution-control.md) §2 の不変条件 3）。デフォルト実行系と `--vm` の両方、ファイル・標準入力・REPL のすべての経路に同じく効く。
 
 この環境変数を含む `TSUMUGI_MAX_*` による上限の上書きは非推奨の互換入口であり、設定すると起動時に標準エラーへ警告が1回出る（[実行予算・協調実行仕様](execution-control.md)第13節）。数値として解釈できない値は無視され、既定値が使われる。組み込みAPIはこれらの環境変数を読まず、ホストが明示した予算を使う。
 
-- デフォルト: 1,000,000（百万ステップ）
+- デフォルト: [実行予算・協調実行仕様](execution-control.md) §3.1 の `total_fuel`（現在は 20,000,000）
 - REPLでは入力単位で予算をリセットする。1つの入力から呼ばれた関数・callback・importは同じ予算を共有する
 - 例: `TSUMUGI_MAX_STEPS=5000000`
 
