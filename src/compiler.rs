@@ -5,6 +5,7 @@ use std::rc::Rc;
 use crate::ast::{
     BinOpKind, Expr, FStrExprPart, Program, Stmt, UnaryOpKind, validate_program_depth,
 };
+use crate::budget::ChargeKind;
 use crate::chunk::{Chunk, ChunkBuildError, FunctionPrototype};
 use crate::error::TsumugiError;
 use crate::opcode::{CaptureDesc, MutationTarget, OpCode};
@@ -446,6 +447,8 @@ impl Compiler {
         self.end_scope(line);
 
         // ループ先頭に戻る
+        self.chunk
+            .emit(OpCode::Charge(ChargeKind::LoopIteration), line);
         self.chunk.emit(OpCode::Loop(loop_start), line);
 
         // ループ脱出先をパッチ
@@ -541,6 +544,8 @@ impl Compiler {
         self.chunk.emit(OpCode::Pop, line);
 
         // ループ先頭に戻る
+        self.chunk
+            .emit(OpCode::Charge(ChargeKind::LoopIteration), line);
         self.chunk.emit(OpCode::Loop(loop_start), line);
 
         // 脱出先パッチ
@@ -617,6 +622,8 @@ impl Compiler {
 
         if continue_resolved {
             // while: 飛び先が確定している。back-edge はループ文の行で課金する（tree と同じ）。
+            self.chunk
+                .emit(OpCode::Charge(ChargeKind::LoopIteration), loop_line);
             self.chunk.emit(OpCode::Loop(continue_target), loop_line);
         } else {
             // for: 飛び先（インクリメント位置）は前方なので、前方 Jump を仮で発行して後でパッチ
@@ -947,6 +954,7 @@ impl Compiler {
 
         // --- user 経路の前処理（引数より前） ---
         self.patch_jump(user_jump)?;
+        self.chunk.emit(OpCode::Charge(ChargeKind::UserCall), line);
         self.chunk.emit(OpCode::PrepareCall, line);
         if let Expr::Ident(callee_name) = callee {
             self.compile_name_read(callee_name, line, true);
@@ -1041,6 +1049,7 @@ impl Compiler {
     ) -> Result<(), TsumugiError> {
         // step/depth検査 → callee評価 → callable/arity検査 → 引数評価 → Call
         let arg_count = args.len();
+        self.chunk.emit(OpCode::Charge(ChargeKind::UserCall), line);
         self.chunk.emit(OpCode::PrepareCall, line);
         if let Expr::Ident(name) = callee {
             // 未解決calleeもcompile errorにせずruntime global lookupへ落とす。
@@ -1582,21 +1591,21 @@ mod tests {
         // 変更前（隠しローカルの名前が `__collection__` / `__index__` のとき）の命令列。
         let golden: [&[&str]; 5] = [
             &[
-                "[LoadConst(0), LoadConst(1), ListPush, LoadConst(2), ListPush, ToIterList, LoadConst(3), LoadConst(4), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(25), Pop, GetLocal(1), IndexLocal(0), GetLocal(2), Print(1), LoadConst(5), Pop, GetLocal(1), LoadConst(6), Add, SetLocal(1), Pop, Loop(8), PopN(3), Return] constants=[List([]), Int(1), Int(2), Int(0), Null, Null, Int(1)] max_locals=3",
+                "[LoadConst(0), LoadConst(1), ListPush, LoadConst(2), ListPush, ToIterList, LoadConst(3), LoadConst(4), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(26), Pop, GetLocal(1), IndexLocal(0), GetLocal(2), Print(1), LoadConst(5), Pop, GetLocal(1), LoadConst(6), Add, SetLocal(1), Pop, Charge(LoopIteration), Loop(8), PopN(3), Return] constants=[List([]), Int(1), Int(2), Int(0), Null, Null, Int(1)] max_locals=3",
             ],
             &[
-                "[LoadConst(0), ToIterList, LoadConst(1), LoadConst(2), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(23), Pop, GetLocal(1), IndexLocal(0), GetLocal(2), LoadConst(3), Eq, JumpIfFalse(16), Jump(17), Jump(23), GetLocal(1), LoadConst(4), Add, SetLocal(1), Pop, Loop(4), PopN(3), Return] constants=[Str(\"ab\"), Int(0), Null, Str(\"a\"), Int(1)] max_locals=3",
+                "[LoadConst(0), ToIterList, LoadConst(1), LoadConst(2), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(24), Pop, GetLocal(1), IndexLocal(0), GetLocal(2), LoadConst(3), Eq, JumpIfFalse(16), Jump(17), Jump(24), GetLocal(1), LoadConst(4), Add, SetLocal(1), Pop, Charge(LoopIteration), Loop(4), PopN(3), Return] constants=[Str(\"ab\"), Int(0), Null, Str(\"a\"), Int(1)] max_locals=3",
             ],
             &[
-                "[LoadConst(0), LoadConst(1), LoadConst(2), DictInsert, ToIterList, LoadConst(3), LoadConst(4), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(44), Pop, GetLocal(1), IndexLocal(0), LoadConst(5), LoadConst(6), ListPush, ToIterList, LoadConst(7), LoadConst(8), GetLocal(4), LenLocal(3), Lt, JumpIfFalse(37), Pop, GetLocal(4), IndexLocal(3), GetLocal(2), Print(1), LoadConst(9), Pop, GetLocal(4), LoadConst(10), Add, SetLocal(4), Pop, Loop(20), PopN(3), GetLocal(1), LoadConst(11), Add, SetLocal(1), Pop, Loop(7), PopN(3), Return] constants=[Dict({}), Str(\"a\"), Int(1), Int(0), Null, List([]), Int(1), Int(0), Null, Null, Int(1), Int(1)] max_locals=6",
+                "[LoadConst(0), LoadConst(1), LoadConst(2), DictInsert, ToIterList, LoadConst(3), LoadConst(4), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(46), Pop, GetLocal(1), IndexLocal(0), LoadConst(5), LoadConst(6), ListPush, ToIterList, LoadConst(7), LoadConst(8), GetLocal(4), LenLocal(3), Lt, JumpIfFalse(38), Pop, GetLocal(4), IndexLocal(3), GetLocal(2), Print(1), LoadConst(9), Pop, GetLocal(4), LoadConst(10), Add, SetLocal(4), Pop, Charge(LoopIteration), Loop(20), PopN(3), GetLocal(1), LoadConst(11), Add, SetLocal(1), Pop, Charge(LoopIteration), Loop(7), PopN(3), Return] constants=[Dict({}), Str(\"a\"), Int(1), Int(0), Null, List([]), Int(1), Int(0), Null, Null, Int(1), Int(1)] max_locals=6",
             ],
             &[
-                "[LoadConst(0), LoadConst(1), ListPush, ToIterList, LoadConst(2), LoadConst(3), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(26), Pop, GetLocal(1), IndexLocal(0), MakeClosure(0), PrepareCall, GetLocal(3), ValidateCall(0), Call(0), Pop, PopN(1), GetLocal(1), LoadConst(4), Add, SetLocal(1), Pop, Loop(6), PopN(3), Return] constants=[List([]), Int(1), Int(0), Null, Int(1)] max_locals=4",
+                "[LoadConst(0), LoadConst(1), ListPush, ToIterList, LoadConst(2), LoadConst(3), GetLocal(1), LenLocal(0), Lt, JumpIfFalse(28), Pop, GetLocal(1), IndexLocal(0), MakeClosure(0), Charge(UserCall), PrepareCall, GetLocal(3), ValidateCall(0), Call(0), Pop, PopN(1), GetLocal(1), LoadConst(4), Add, SetLocal(1), Pop, Charge(LoopIteration), Loop(6), PopN(3), Return] constants=[List([]), Int(1), Int(0), Null, Int(1)] max_locals=4",
                 "[GetUpvalue(0), ReturnValue, LoadConst(0), ReturnValue] constants=[Null] max_locals=1",
             ],
             &[
-                "[MakeClosure(0), RegisterGlobal(\"f\", 0), PrepareCall, GetLocal(0), ValidateCall(0), Call(0), Pop, Return] constants=[] max_locals=1",
-                "[LoadConst(0), LoadConst(1), ListPush, ToIterList, LoadConst(2), LoadConst(3), GetLocal(2), LenLocal(1), Lt, JumpIfFalse(26), Pop, GetLocal(2), IndexLocal(1), MakeClosure(0), PrepareCall, GetLocal(4), ValidateCall(0), Call(0), Pop, PopN(1), GetLocal(2), LoadConst(4), Add, SetLocal(2), Pop, Loop(6), PopN(3), LoadConst(5), ReturnValue] constants=[List([]), Int(1), Int(0), Null, Int(1), Null] max_locals=5",
+                "[MakeClosure(0), RegisterGlobal(\"f\", 0), Charge(UserCall), PrepareCall, GetLocal(0), ValidateCall(0), Call(0), Pop, Return] constants=[] max_locals=1",
+                "[LoadConst(0), LoadConst(1), ListPush, ToIterList, LoadConst(2), LoadConst(3), GetLocal(2), LenLocal(1), Lt, JumpIfFalse(28), Pop, GetLocal(2), IndexLocal(1), MakeClosure(0), Charge(UserCall), PrepareCall, GetLocal(4), ValidateCall(0), Call(0), Pop, PopN(1), GetLocal(2), LoadConst(4), Add, SetLocal(2), Pop, Charge(LoopIteration), Loop(6), PopN(3), LoadConst(5), ReturnValue] constants=[List([]), Int(1), Int(0), Null, Int(1), Null] max_locals=5",
                 "[GetUpvalue(0), ReturnValue, LoadConst(0), ReturnValue] constants=[Null] max_locals=1",
             ],
         ];
@@ -1613,5 +1622,56 @@ mod tests {
                 "{name} が識別子として書ける"
             );
         }
+    }
+
+    /// F2b-AT-02: `Loop` と `PrepareCall` の直前に、同じ line の `Charge` が必ず出る（while の
+    /// `continue` が出す `Loop` を含む）。どの jump も `Charge` と `Loop` / `PrepareCall` の間へ
+    /// 飛び込まない。
+    #[test]
+    fn f2b_at_02_charge_precedes_every_loop_and_prepare_call() {
+        use crate::budget::ChargeKind;
+        let source = "fn f(x)\n  return x\nend\nlet i = 0\nwhile i < 3\n  i = i + 1\n  if i == 2\n    continue\n  end\n  f(i)\nend\nfor y in [1, 2]\n  f(y)\nend\n";
+        let tokens = Lexer::new(source).tokenize();
+        let program = Parser::new(tokens).parse().expect("parse に失敗");
+        let chunk = Compiler::new()
+            .compile(&program)
+            .expect("compile に失敗")
+            .into_inner();
+        fn check(chunk: &Chunk, loops: &mut usize, calls: &mut usize) {
+            for (i, op) in chunk.code.iter().enumerate() {
+                let expected = match op {
+                    OpCode::Loop(_) => {
+                        *loops += 1;
+                        ChargeKind::LoopIteration
+                    }
+                    OpCode::PrepareCall => {
+                        *calls += 1;
+                        ChargeKind::UserCall
+                    }
+                    _ => continue,
+                };
+                assert!(i > 0, "先頭に Loop / PrepareCall は出ない");
+                assert_eq!(chunk.code[i - 1], OpCode::Charge(expected));
+                assert_eq!(chunk.lines[i - 1], chunk.lines[i]);
+                for op in &chunk.code {
+                    match op {
+                        OpCode::Jump(t)
+                        | OpCode::JumpIfFalse(t)
+                        | OpCode::JumpIfFalseKeep(t)
+                        | OpCode::JumpIfTrueKeep(t)
+                        | OpCode::Loop(t) => assert_ne!(*t, i, "Charge と本体の間へ飛び込む"),
+                        _ => {}
+                    }
+                }
+            }
+            for proto in &chunk.prototypes {
+                check(&proto.chunk, loops, calls);
+            }
+        }
+        let (mut loops, mut calls) = (0, 0);
+        check(&chunk, &mut loops, &mut calls);
+        // while の back-edge と continue、for の back-edge、呼び出し 2 か所。
+        assert_eq!(loops, 3);
+        assert_eq!(calls, 2);
     }
 }

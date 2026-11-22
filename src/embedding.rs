@@ -5562,7 +5562,7 @@ mod tests {
     /// EMB-AT-21: fuel 上限を超えると BudgetExceeded terminal になり、RuntimeError にはしない。
     ///
     /// `small_fuel_budget` で fuel を極小に絞り、ループ反復で超過させる
-    /// （単純な `let` の羅列は count_step を呼ばないためループを使う）。
+    /// （単純な `let` の羅列は charge を呼ばないためループを使う）。
     #[test]
     fn e11_budget_exceeded_is_terminal_not_runtime_error() {
         // fuel=5 の極小 budget。ループ反復で step 上限に達する。

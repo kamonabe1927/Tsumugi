@@ -422,4 +422,7 @@ const TREE_EXPECTED: (u64, u64, u64) = (242, 25204, 25204);
 // fix-push-snapshot-writeback で、push の builtin 経路の第 1 引数の位置を、定数 `Null`（命令 1 + 定数 1）
 // から binding の snapshot の読み取り（命令 1）へ置き換えたため、push の呼び出し箇所 1 つにつき定数 1 つぶん
 // （32 byte）減った（この script の push は 1 箇所）。実行時の課金は変わらない。
-const VM_EXPECTED: (u64, u64, u64) = (242, 23588, 23588);
+// F-2b で、compiler が `Loop` / `PrepareCall` の直前に `Charge` を 1 命令ずつ出すようになったため、
+// bytecode_chunk の課金（16 × 命令数）がこの script の 6 箇所（`while` 1・user function 呼び出し 5）で
+// 96 byte 増えた。fuel と tree の値、bytecode 以外の heap は変わらない。
+const VM_EXPECTED: (u64, u64, u64) = (242, 23684, 23684);

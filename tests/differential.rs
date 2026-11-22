@@ -1199,7 +1199,7 @@ fn min_fuel(label: &str, run: impl Fn(u64) -> bool) -> u64 {
     hi
 }
 
-/// F1-AT-01/02/03/07: 消費 fuel・上限境界・watchdog の非干渉を 1 script について検査する。
+/// F1-AT-01/02/03/07、F2b-AT-01（課金点を `Charge` / `FuelSchedule` へ寄せても観測が変わらない）: 消費 fuel・上限境界・watchdog の非干渉を 1 script について検査する。
 fn assert_fuel_parity(label: &str, source: &str) {
     let tree_ok = |n: u64| run_tree_single(source, Limits::Fuel(n)).1.is_ok();
     let vm_ok = |n: u64| run_vm_single(source, Limits::Fuel(n)).1.is_ok();

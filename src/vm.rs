@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::budget::{BudgetConfig, BudgetLedger, ControlStop, ExecutionPhase};
+use crate::budget::{
+    BudgetConfig, BudgetLedger, ChargeKind, ControlStop, ExecutionPhase, FuelSchedule,
+};
 use crate::chunk::Chunk;
 use crate::error::TsumugiError;
 use crate::limits::MAX_USER_CALL_DEPTH;
@@ -110,7 +112,7 @@ pub struct Vm {
     /// rollback journal entry の heap 課金が上限を超えたとき、次の per-instruction step
     /// 課金境界で surface する保留エラー（REV-015 PR-d）。checkpoint 記録は `pop` など
     /// 多数の infallible 経路から呼ばれるため、その場で `Result` を返さず、ここへ退避し
-    /// て `count_step` で `BudgetExceeded(HeapBytes)` を返す。既定上限では発生しない。
+    /// て `charge` で `BudgetExceeded(HeapBytes)` を返す。既定上限では発生しない。
     pending_heap_stop: Option<ControlStop>,
 
     /// instruction watchdog の tick 数（semantic-decisions §17.7 層1、execution-control §14 F-1）。
@@ -620,7 +622,7 @@ impl Vm {
                 .ok_or_else(|| internal_error(0, "命令に対応する行番号がありません"))?;
             self.frame_mut(line)?.ip += 1;
 
-            // fuel は論理課金点（Loop の back-edge・PrepareCall・callback）でだけ課金する
+            // fuel は論理課金点（Loop の back-edge・PrepareCall の直前の Charge と callback）でだけ課金する
             // （execution-control §14 F-1）。全命令ごとには、保留中の heap 超過を表に出す
             // 検査だけを行う。停止性は fuel ではなく instruction watchdog が担う（下記 (W1)、
             // および push_call_frame の (W2)）。
@@ -794,14 +796,14 @@ impl Vm {
         self.watchdog_ticks
     }
 
-    /// ステップ（fuel）を 1 課金し、上限チェックする（REV-015 Slice 1）。
+    /// ステップ（fuel）を [`FuelSchedule`] の種別の値で課金し、上限チェックする（REV-015 Slice 1・F-2b）。
     ///
-    /// 課金点は tree と同じ (F1) `Loop` の back-edge・(F2) `PrepareCall`・(F3) callback
-    /// （execution-control §14 F-1）。
-    fn count_step(&mut self, line: usize) -> Result<(), TsumugiError> {
+    /// 課金点は tree と同じ (F1) `Loop` の back-edge の直前の `Charge`・(F2) `PrepareCall` の直前の
+    /// `Charge`・(F3) callback（`call_fn_value` から直接。execution-control §14 F-1、F-2b Q5 = A）。
+    fn charge(&mut self, kind: ChargeKind, line: usize) -> Result<(), TsumugiError> {
         self.surface_pending_heap_stop(line)?;
         self.budget
-            .charge_fuel(1, ExecutionPhase::Run)
+            .charge_fuel(FuelSchedule::cost(kind), ExecutionPhase::Run)
             .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
     }
 
@@ -1454,10 +1456,14 @@ impl Vm {
                     self.set_ip(target, line)?;
                 }
             }
+            OpCode::Charge(kind) => {
+                // (F1)(F2) fuel の論理課金点。compiler が `Loop` / `PrepareCall` の直前に出す。
+                // dispatch 自体は課金せず、種別の値だけを課金する（§4.1）。
+                self.charge(kind, line)?;
+            }
             OpCode::Loop(target) => {
-                // (F1) ループの back-edge で fuel を 1 課金する（tree の「本体 1 反復の完了後・
-                // 次反復の判定前」と同じ）。`Loop` は back-edge 専用（for の continue は前方 Jump）。
-                self.count_step(line)?;
+                // (F1) ループの back-edge。fuel は直前の `Charge(LoopIteration)` が課金済みで、
+                // `Loop` 自体は課金しない。`Loop` は back-edge 専用（for の continue は前方 Jump）。
                 self.set_ip(target, line)?;
             }
             OpCode::GetUpvalue(index) => {
@@ -1525,9 +1531,9 @@ impl Vm {
                 });
             }
             OpCode::PrepareCall => {
-                // (F2) user function 呼び出しで fuel を 1 課金する（tree と同じく深度検査の前）。
-                // 深度上限は PrepareCall と Call の両方で検査する（raw Call でも迂回させない）。
-                self.count_step(line)?;
+                // (F2) user function 呼び出しの fuel は直前の `Charge(UserCall)` が課金済み（tree と
+                // 同じく深度検査の前）。深度上限は PrepareCall と Call の両方で検査する（raw Call でも
+                // 迂回させない）。
                 if self.active_user_frame_count() >= MAX_USER_CALL_DEPTH {
                     return Err(TsumugiError::call_depth_limit(line, MAX_USER_CALL_DEPTH));
                 }
@@ -1864,7 +1870,7 @@ impl Vm {
     ///
     /// checkpoint 記録は `pop` など多数の infallible 経路から呼ばれるため、その場で
     /// `Result` を返さず、超過時は `pending_heap_stop` へ退避して次の per-instruction
-    /// step 課金境界（[`Vm::count_step`]）で surface する。保持する旧 value の到達
+    /// step 課金境界（[`Vm::charge`]）で surface する。保持する旧 value の到達
     /// payload（List/Dict/String body）は shared backing の `Tracked` が entry の握る
     /// `Rc` で生き続けるため既に live heap に計上されており、ここで再課金しない（§5.2）。
     /// 台帳を持たない文脈では untracked（無課金）で包む。
@@ -2405,7 +2411,7 @@ impl Vm {
         line: usize,
     ) -> Result<Value, TsumugiError> {
         // (F3) builtin の callback 呼び出しで fuel を 1 課金する（tree と同じく深度検査の前）。
-        self.count_step(line)?;
+        self.charge(ChargeKind::BuiltinCallback, line)?;
         if self.active_user_frame_count() >= MAX_USER_CALL_DEPTH {
             return Err(TsumugiError::call_depth_limit(line, MAX_USER_CALL_DEPTH));
         }

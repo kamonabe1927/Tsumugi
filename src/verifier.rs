@@ -72,6 +72,8 @@ pub enum ChunkVerifyError {
     BadOperand,
     /// try 構造（SetupTry / TeardownTry の対応）が不正（V9）。
     BadTryStructure,
+    /// bytecode に出てはならない種別の `Charge`（builtin callback・host function 呼び出し。V10）。
+    BadChargeKind,
 }
 
 impl ChunkVerifyError {
@@ -102,6 +104,9 @@ impl ChunkVerifyError {
             }
             ChunkVerifyError::BadOperand => "bytecode 検証に失敗しました: operand が不正です",
             ChunkVerifyError::BadTryStructure => "bytecode 検証に失敗しました: try 構造が不正です",
+            ChunkVerifyError::BadChargeKind => {
+                "bytecode 検証に失敗しました: Charge の種別が不正です"
+            }
         }
     }
 }
@@ -216,6 +221,14 @@ fn verify_chunk(chunk: &Chunk, upvalue_count: usize) -> Result<(), ChunkVerifyEr
             OpCode::SetupTry(t) => {
                 if !jump_target_ok(*t) {
                     return Err(ChunkVerifyError::BadJumpTarget);
+                }
+            }
+
+            // (V10) `Charge` の種別。bytecode に出てよいのはループ反復と user function 呼び出しだけ
+            // （builtin callback は `call_fn_value` から直接課金し、host function は VM に無い。F-2b Q2 = A）。
+            OpCode::Charge(kind) => {
+                if !kind.allowed_in_bytecode() {
+                    return Err(ChunkVerifyError::BadChargeKind);
                 }
             }
 
@@ -535,5 +548,28 @@ mod tests {
         chunk.emit(OpCode::Pop, 1);
         chunk.emit(OpCode::Return, 1);
         assert!(verify(chunk).is_ok());
+    }
+
+    /// F2b-AT-02: bytecode に出てよい種別（ループ反復・user function 呼び出し）の `Charge` は通り、
+    /// 出てはならない種別（builtin callback・host function 呼び出し）は `BadChargeKind` で拒否される。
+    #[test]
+    fn f2b_at_02_verifier_rejects_charge_kinds_that_must_not_appear() {
+        use crate::budget::ChargeKind;
+        let build = |kind: ChargeKind| {
+            let mut chunk = Chunk::new();
+            chunk.emit(OpCode::Charge(kind), 1);
+            chunk.emit(OpCode::Return, 1);
+            chunk
+        };
+        for kind in [ChargeKind::LoopIteration, ChargeKind::UserCall] {
+            assert!(verify(build(kind)).is_ok(), "{kind:?} は通るはず");
+        }
+        for kind in [ChargeKind::BuiltinCallback, ChargeKind::HostCall] {
+            assert_eq!(
+                verify(build(kind)).err(),
+                Some(ChunkVerifyError::BadChargeKind),
+                "{kind:?} は拒否されるはず"
+            );
+        }
     }
 }

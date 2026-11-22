@@ -199,6 +199,50 @@ impl MonotonicClock for SystemMonotonicClock {
 // config（§3 / §3.1）
 // =============================================================================
 
+/// fuel の課金点の種別（§4.1、F-2b）。
+///
+/// 版 `1` では今の課金点の種類ごとに 4 種別で、値はどれも 1（[`FuelSchedule::cost`]）。
+/// host function 呼び出しを invocation と host call のどちらに数えるかは F-2c で決める。
+/// VM の `Charge` opcode の payload にも使う（bytecode に出てよい種別は
+/// [`ChargeKind::allowed_in_bytecode`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChargeKind {
+    /// `while` / `for` の 1 反復。
+    LoopIteration,
+    /// user function の呼び出し。
+    UserCall,
+    /// embedder が登録した host function の呼び出し（tree のみ）。
+    HostCall,
+    /// builtin の callback 呼び出し（`map` / `filter` / `each` など）。
+    BuiltinCallback,
+}
+
+impl ChargeKind {
+    /// この種別の `Charge` が bytecode に出てよいか。ループ反復と user function 呼び出しだけが
+    /// compiler の挿入位置を持つ。callback は `Vm::call_fn_value` から直接課金する（F-2b Q5 = A）。
+    pub const fn allowed_in_bytecode(self) -> bool {
+        matches!(self, ChargeKind::LoopIteration | ChargeKind::UserCall)
+    }
+}
+
+/// fuel の課金値の表（§4.1）。tree と VM が同じ表から課金する共有 API。
+///
+/// 現在の表は `fuel_accounting_revision = 1` で、どの種別も 1。
+#[derive(Debug, Clone, Copy)]
+pub struct FuelSchedule;
+
+impl FuelSchedule {
+    /// 種別 `kind` の課金値（版 `1`）。
+    pub const fn cost(kind: ChargeKind) -> u64 {
+        match kind {
+            ChargeKind::LoopIteration
+            | ChargeKind::UserCall
+            | ChargeKind::HostCall
+            | ChargeKind::BuiltinCallback => 1,
+        }
+    }
+}
+
 /// execution 作成時の設定エラー（§3）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {

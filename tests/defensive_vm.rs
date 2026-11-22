@@ -182,8 +182,8 @@ fn loop_control_outside_loop_opcodes_do_not_panic() {
 
 /// REV-006 層1 / F1-AT-06: `Jump(0)` 自己ループが instruction watchdog で有限停止する。
 ///
-/// `Jump` は fuel を課金しない（fuel の課金点は back-edge `Loop`・`PrepareCall`・callback だけ。
-/// execution-control §14 F-1）。停止させるのは fuel ではなく watchdog の (W1)「同じ frame で ip が
+/// F2b-AT-03: `Jump` は fuel を課金しない（fuel の課金点は back-edge の直前の `Charge`・`PrepareCall` の
+/// 直前の `Charge`・callback だけ。execution-control §14 F-1・F-2b）。停止させるのは fuel ではなく watchdog の (W1)「同じ frame で ip が
 /// 後退・停滞」で、上限（`total_fuel × 2 + 16`）を超えると fuel と同じ `limit` error になる。
 #[test]
 fn jump_self_loop_halts_with_limit() {
@@ -239,8 +239,8 @@ fn watchdog_limit_is_not_catchable() {
     );
 }
 
-/// REV-006 層1 / F1-AT-06: 後方 `Loop(0)` 迂回ループが有限停止する（`Loop` は back-edge として
-/// fuel を課金するので fuel の上限で止まる。watchdog も同時に進む）。
+/// REV-006 層1 / F1-AT-06 / F2b-AT-03: 後方 `Loop(0)` 迂回ループが有限停止する（`Loop` 自体は fuel を
+/// 課金しない。手組みで `Charge` を省いた `Loop` は watchdog の (W1) で `limit` として止まる）。
 #[test]
 fn backward_loop_halts_with_limit() {
     let mut chunk = Chunk::new();
@@ -258,7 +258,7 @@ fn backward_loop_halts_with_limit() {
     );
 }
 
-/// REV-006 層1 / F1-AT-06: `PrepareCall` を省いた raw `Call` の再帰ループが有限停止する。
+/// REV-006 層1 / F1-AT-06 / F2b-AT-03: `PrepareCall` を省いた raw `Call` の再帰ループが有限停止する。
 ///
 /// raw `Call` は fuel を課金しないが、frame を積むたびに watchdog の (W2) が進む。深度上限
 /// （先に到達）または watchdog の上限（`limit`）のいずれかで必ず有限停止し、host panic しない。

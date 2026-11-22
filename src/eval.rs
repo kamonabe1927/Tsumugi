@@ -2,7 +2,9 @@
 mod builtin;
 
 use crate::ast::*;
-use crate::budget::{BudgetConfig, BudgetLedger, ControlStop, ExecutionPhase};
+use crate::budget::{
+    BudgetConfig, BudgetLedger, ChargeKind, ControlStop, ExecutionPhase, FuelSchedule,
+};
 use crate::env::Env;
 use crate::error::{TraceFrame, TsumugiError};
 use crate::limits::MAX_USER_CALL_DEPTH;
@@ -313,7 +315,7 @@ struct ExprFrame {
     /// 評価済みの operand（operand stack）。call は callee・引数の順、二項は左・右、単項は 1 個。
     /// 長さが式 cursor（次に評価する子の位置）を表す。
     operands: Vec<Value>,
-    /// call: `count_step` と深度検査を済ませたか。
+    /// call: `charge` と深度検査を済ませたか。
     started: bool,
     /// call: callable / arity 検査を済ませたか。
     checked: bool,
@@ -577,7 +579,7 @@ pub struct Evaluator {
     /// スタックへ Call frame を積み、`run_driver(stop_depth)` が自分より上だけを回す。
     frames: Vec<Frame>,
     /// この slice（1 回の `poll`）の開始時の台帳の commit 済み fuel（fuel-bulk-chunk-yield Q1 = A、§4.2）。
-    /// slice の使用量は「現在の commit 済み fuel − この値」で数える。`count_step` の 1 だけでなく、
+    /// slice の使用量は「現在の commit 済み fuel − この値」で数える。`charge` の 1 だけでなく、
     /// builtin が台帳へ直接課金する per-element fuel も slice の使用量に入る。
     slice_fuel_base: u64,
     /// この slice で消費を許す fuel 上限（§4.2）。`None` は slice 制限なし（同期 `run` /
@@ -1063,16 +1065,16 @@ impl Evaluator {
         self.loader.set_base_dir(path);
     }
 
-    /// ステップ（fuel）を 1 課金し、上限チェックする（REV-015 Slice 1）。
+    /// ステップ（fuel）を [`FuelSchedule`] の種別の値で課金し、上限チェックする（REV-015 Slice 1・F-2b）。
     ///
     /// 既存挙動どおり、total fuel 上限到達時は `step_limit` エラーを call trace 付きで返す。
     /// 課金した 1 は台帳の commit 済み fuel として slice 使用量（§4.2）にも入る（fuel-bulk-chunk-yield
     /// Q1 = A）。slice 上限の判定は yield 可能な文/反復境界（driver）で行うため、ここでは課金だけ行い
     /// yield はしない（式の途中で
     /// yield すると Rust 再帰スタックを保存できず resume 不能になるため）。
-    fn count_step(&mut self, line: usize) -> Result<(), TsumugiError> {
+    fn charge(&mut self, kind: ChargeKind, line: usize) -> Result<(), TsumugiError> {
         self.budget
-            .charge_fuel(1, ExecutionPhase::Run)
+            .charge_fuel(FuelSchedule::cost(kind), ExecutionPhase::Run)
             .map_err(|stop| self.control_stop_to_error(stop, line))
     }
 
@@ -2072,7 +2074,7 @@ impl Evaluator {
             heap_charge: 0,
         });
         // 関数呼び出しは式の途中（Rust 再帰）から再入するため、この活性は yield せず
-        // 完了させる（`can_yield = false`）。slice fuel の消費はここでも count_step で
+        // 完了させる（`can_yield = false`）。slice fuel の消費はここでも charge で
         // 加算され、呼び出しから戻ったあとトップレベル driver の境界で yield 判定される。
         match self.run_driver(base, false)? {
             DriveOutcome::Done(result) => Ok(result),
@@ -2173,7 +2175,7 @@ impl Evaluator {
 
             // ループ frame は cursor が本体末尾に達したら「1 反復完了」として扱い、
             // 次反復（condition 再評価 / 次 item）へ進む。advance 中のエラー（condition
-            // 再評価・末尾 count_step・反復スコープ/束縛の課金）も、文実行中のエラーと同じく
+            // 再評価・末尾 charge・反復スコープ/束縛の課金）も、文実行中のエラーと同じく
             // 最も近い try/catch へ渡す。従来はループ全体が try 本体で実行されたため、これらの
             // エラーも catch されていた（tree/VM parity）。
             if top.cursor >= top.stmts.len() {
@@ -2338,9 +2340,9 @@ impl Evaluator {
                 charge_step,
             } => {
                 // 直前反復の本体を実行し終えていれば、次反復判定の前に fuel を課金する
-                // （従来 while の末尾 count_step と同じ順序・タイミング）。
+                // （従来 while の末尾 charge と同じ順序・タイミング）。
                 if charge_step {
-                    self.count_step(line)?;
+                    self.charge(ChargeKind::LoopIteration, line)?;
                 }
                 // condition は site.owner（clone した Block ローカル）越しに読む。この借用は
                 // self.frames ではなくローカル `site` に紐づくので、eval_expr（&mut self）を
@@ -2381,7 +2383,7 @@ impl Evaluator {
                 next_item,
             } => {
                 if charge_step {
-                    self.count_step(line)?;
+                    self.charge(ChargeKind::LoopIteration, line)?;
                 }
                 match next_item {
                     Some(item) => {
@@ -2957,7 +2959,7 @@ impl Evaluator {
     ///
     /// 1 段は「operand を 1 つ評価する（または子の式 frame を積む）」か「揃った operand で演算を
     /// 適用して値を受け渡し先へ届ける」のどちらか。段の間が式の yield 可能点になる。call は同期経路の
-    /// `prepare_call` と同じ順序（`count_step` → 深度検査 → callee → callable / arity 検査 → 引数を
+    /// `prepare_call` と同じ順序（`charge` → 深度検査 → callee → callable / arity 検査 → 引数を
     /// 左から → 束縛 → call trace）で進め、本体は driver 上の Call frame で実行する。
     fn step_expr(&mut self) -> Result<Option<FlowSignal>, TsumugiError> {
         let (owner, stmt_index, slot, path, line) = {
@@ -3186,7 +3188,7 @@ impl Evaluator {
 
     /// builtin・host function に解決された call の式 frame を 1 段進める（tree-expr-continuation-e3）。
     ///
-    /// 最初の段で同期経路と同じ前処理（arity 検査・`push` の代入先解決・`count_step`・cooperative の
+    /// 最初の段で同期経路と同じ前処理（arity 検査・`push` の代入先解決・`charge`・cooperative の
     /// 格納結果の消費）を行い、引数を左から 1 つずつ評価する。揃ったら同期経路と共有する適用関数
     /// （`apply_*`）で結果を作る。引数の境界が yield 可能点になり、builtin・host function の本体は
     /// 1 段で完了まで実行する。
@@ -3228,14 +3230,14 @@ impl Evaluator {
                         "callback target in step_target_call",
                     ));
                 }
-                CallTarget::Host => self.count_step(line)?,
+                CallTarget::Host => self.charge(ChargeKind::HostCall, line)?,
                 CallTarget::Cooperative => {
-                    // resume 中の格納結果は count_step と引数の評価より前に消費する（同期経路と同じ）。
+                    // resume 中の格納結果は charge と引数の評価より前に消費する（同期経路と同じ）。
                     if let Some((_call_id, result)) = self.resumed_host_call.take() {
                         let value = self.finish_cooperative_result(name, result, line)?;
                         return self.finish_expr_frame(value);
                     }
-                    self.count_step(line)?;
+                    self.charge(ChargeKind::HostCall, line)?;
                 }
             }
         }
@@ -4602,7 +4604,7 @@ impl Evaluator {
     /// 関数呼び出しの前処理（tree-expr-continuation-e1 で `eval_call` から分離）。
     ///
     /// builtin / cooperative host / 登録 host function に解決されたら値まで評価して
-    /// [`CallPrep::Done`] を返す。ユーザー関数なら `count_step` → 深度検査 → callee 評価 →
+    /// [`CallPrep::Done`] を返す。ユーザー関数なら `charge` → 深度検査 → callee 評価 →
     /// callable 検査 → arity 検査 → 引数評価 → `push_call_frame` → captured / self-binding /
     /// 引数の束縛 → call trace の push まで行い、本体を実行する材料を [`CallPrep::User`] で返す。
     /// 同期経路（`eval_call`）と driver 上の文レベル呼び出しが同じ順序を共有する。
@@ -4643,7 +4645,7 @@ impl Evaluator {
             && self.env.get_cell(name).is_none()
             && self.host_registry.contains_name(name)
         {
-            self.count_step(line)?;
+            self.charge(ChargeKind::HostCall, line)?;
             // 引数を評価してから host function へ渡す（呼び出し側で評価順を確定する）。
             let mut arg_values = Vec::with_capacity(args.len());
             for arg in args {
@@ -4710,10 +4712,10 @@ impl Evaluator {
             .map_err(|stop| self.control_stop_to_error(stop, line))
     }
 
-    /// ユーザー関数呼び出しの入口: `count_step` → 深度検査（同期経路と式 frame で共有する段、
+    /// ユーザー関数呼び出しの入口: `charge` → 深度検査（同期経路と式 frame で共有する段、
     /// tree-expr-continuation-e2a）。
     fn begin_user_call(&mut self, line: usize) -> Result<(), TsumugiError> {
-        self.count_step(line)?;
+        self.charge(ChargeKind::UserCall, line)?;
         if self.call_stack.len() >= MAX_USER_CALL_DEPTH {
             return Err(TsumugiError::call_depth_limit(line, MAX_USER_CALL_DEPTH));
         }
@@ -4796,7 +4798,7 @@ impl Evaluator {
     ///
     /// 1. resume 中（`resumed_host_call` が `Some`）なら、adapter を二度呼ばず格納結果を式結果へ
     ///    写す（同じ文の再評価、単一 pending 前提）。
-    /// 2. それ以外は `count_step` → 引数評価 → capability/arity 検査 → `start(ctx, args)`:
+    /// 2. それ以外は `charge` → 引数評価 → capability/arity 検査 → `start(ctx, args)`:
     ///    - `Ready(Ok(v))` → 値を tracked 化して返す。
     ///    - `Ready(Err(AdapterError))` → §4.4 の写像（`host` error / catch 不能 terminal）。
     ///    - `Pending(ticket)`:
@@ -4815,7 +4817,7 @@ impl Evaluator {
             return self.finish_cooperative_result(name, result, line);
         }
 
-        self.count_step(line)?;
+        self.charge(ChargeKind::HostCall, line)?;
         // 引数を評価してから adapter へ渡す（評価順を確定する）。
         let mut arg_values = Vec::with_capacity(args.len());
         for arg in args {
@@ -4825,7 +4827,7 @@ impl Evaluator {
     }
 
     /// 評価済みの引数で cooperative host function を `start` する（同期経路と式 frame で共有、
-    /// tree-expr-continuation-e3）。`resumed_host_call` の消費と `count_step`・引数の評価は呼び出し側。
+    /// tree-expr-continuation-e3）。`resumed_host_call` の消費と `charge`・引数の評価は呼び出し側。
     fn start_cooperative_call(
         &mut self,
         name: &str,
@@ -5282,7 +5284,7 @@ mod tests {
     }
 
     /// 小 slice で確実に複数回 yield させるための、fuel を消費するループ本体。
-    /// ループ反復は `count_step` を呼ぶため、単純な `let` の羅列と違い slice fuel を使う。
+    /// ループ反復は `charge` を呼ぶため、単純な `let` の羅列と違い slice fuel を使う。
     const YIELDING_LOOP: &str = "let i = 0\nwhile i < 8\n  i = i + 1\nend\n";
 
     /// yield を跨いで積んだ binding が、正常完了時に commit される（§10 規則1・7）。
