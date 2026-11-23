@@ -3110,7 +3110,7 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
 #### fuel-bulk-charge の sub-slice 分割（fuel-bulk-charge-a / -b / -c）
 
 > 状態: **未実装**（設計のみ。2026-11-23 の設計 PR #501 で割り方を書いた。割り方と
-> fuel-bulk-charge-a の課金の規則は判断の候補 Q1・Q2 にしてあり、判断役の選択を本小節の末尾に記録する）。
+> fuel-bulk-charge-a の課金の規則は判断役が選択（PR #501、Q1・Q2=A）。判断の記録は fuel-bulk-charge-a 小節の後ろ）。
 > 各 sub-slice の進捗は [`slices.toml`](slices.toml) の `fuel-bulk-charge-a` / `-b` / `-c` を正とする。
 > `slices.toml` の `fuel-bulk-charge` は sub-slice のエントリに置き換えた（元の id は残さない。「fuel-bulk-charge が
 > done」は a・b・c がともに done を意味する）。上の小節で `fuel-bulk-charge` と書いた延期先は a〜c 全体を指す。
@@ -3134,7 +3134,7 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
 - 受入基準は、仕組みごとに課金点・値・tree/VM の一致・境界・版と既定 `total_fuel` を確かめると 10 個を超える。
 - 規模: (1) 約 300〜450 行、(2) 約 400〜600 行、(3) 約 200〜350 行の見込みで、合わせて §14.1 の 1000 行を超える。
 
-**割り方（判断の候補 Q1。推奨は A）**: 仕組みごとに 3 本へ割り、a（per-element）→ b（UTF-8 payload）→
+**割り方（判断 Q1 = A）**: 仕組みごとに 3 本へ割り、a（per-element）→ b（UTF-8 payload）→
 c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR で `fuel_accounting_revision` を 1 つ上げ、既定
 `total_fuel` を代表 script 集合（上の「F-2 実装スライス」小節）で測り直す（a で 2 → 3、b で 3 → 4、c で 4 → 5）。
 版の bump と既定 `total_fuel` の更新を同じ PR で行う「F-2 実装スライス」の「スライス分割の指針」の制約は各 sub-slice で
@@ -3145,7 +3145,7 @@ c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR
 ##### fuel-bulk-charge-a 実装スライス（`map` / `filter` / `each` と要素を作る・複製する操作の per-element fuel、版 2 → 3）
 
 - **範囲**: §4.1 の「collection element を走査・copy・生成 1 / element」を、次の操作に両 engine の同じ論理位置・同じ値・
-  同じ line で課金する（規則は判断の候補 Q2。推奨 A のとおりに書く）。課金は `ChargeKind` に per-element の種別
+  同じ line で課金する（規則は判断 Q2 = A）。課金は `ChargeKind` に per-element の種別
   （例: `Element`、`FuelSchedule::cost` は 1）を足して `FuelSchedule` から取る。bytecode には出さず、builtin・値の
   操作（Rust 側）が直接課金する（`ChargeKind::allowed_in_bytecode` は偽。host call attempt と同じ扱い）。
   - `map` / `filter` / `each`: 第 1 引数の List の要素 1 つを callback へ渡す直前に 1（走査）。callback の invocation 5
@@ -3206,6 +3206,34 @@ c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR
   `apply_pure_core_builtin`）と VM（`src/vm.rs` の `exec_builtin`）の境界で、同じ共有 helper が引数から数えた n を払う。
 - 式 frame の段階実行（e4）の `map` / `filter` / `each` は yield を跨ぐので、要素の課金は「次の要素を callback へ渡す」
   位置で 1 回だけ行い、resume で同じ要素を 2 回課金しない。
+
+**判断の記録**（設計 PR #501 の判断の候補。判断役が選択（PR #501）、Q1・Q2=A）:
+
+- **Q1 = A（仕組みごとに a → b → c の直列に割り、各 sub-slice が課金点を足す同じ PR で版を 1 つ上げ、既定 `total_fuel` を
+  測り直す）**: §3.1 は「課金表を変える変更（charge point の追加・課金値の変更）はこの値を 1 つ上げ」とし、各 PR がそのとおりに
+  なる。「F-2 実装スライス」の「スライス分割の指針」（版の bump と既定 `total_fuel` の更新は同一 PR）も a・b・c のそれぞれで
+  守れる。どの版でも課金点と値が揃うので、各 PR が「成功する最小の上限 N」の差を両 engine で確かめられる（[マニフェスト](manifesto.md)
+  原則 5・9、優先順位の表「再現可能な検証」）。版 `2` 自体が §4.1 の一部だけを課金する版として未実装範囲に記録されており、
+  版 `3`・`4` も同じ扱いで説明できる。旧版の拒否が 3 回起きるのは alpha の後方互換無保証（マニフェスト「目指さないもの」）の範囲。
+  採らなかった案: B（a〜c は値 0 の課金点を足し、4 本目の d で値を入れて版を 1 回だけ上げる）は、値 0 の課金点が fuel に現れず、
+  a〜c の PR では数えた量を test 用の hook でしか確かめられない（原則 9）。charge point を足しながら版を上げないのは §3.1 の
+  文言とも合いにくい。PR #470 の Q1 = A は観測を変えない置き換え（既存の期待値が無改変で緑）を先に入れる形で、課金点そのものを
+  足す今回とは事情が違い、3 つの仕組みの値を d の 1 本で一度に有効にすると期待値の変化の原因を切り分けにくい。C（割らない）は
+  loop-runbook §14.1 に収まらず、documentation-guide「ready の条件」4 を満たさない。
+- **Q2 = A（`map` / `filter` / `each` は要素を callback へ渡す直前に 1、要素を作る・複製する builtin と COW の複製・`for` の
+  Dict・Str の反復列は要素数 n を確保の前に 1 回で払う）**: §4.1 の「collection element を走査・copy・生成 1 / element」を、
+  同じ要素を 2 回数えずに全部の経路へ同じ規則で当てられ、要素数に比例する仕事が版 `3` で fuel に現れる（原則 3）。確保・複製の
+  前に払うので、上限を超える仕事を始めてから止まることがない（原則 1。§4.1 の深度の読み直しの行「値を変える前（COW の複製の前）に
+  課金する」・§5.3「確保する前に確かめる」と同じ向き）。両 engine の共有 helper で同じ位置・値になる（原則 5）。
+  - **前提の読み**: `max_collection_elements` の検査 → fuel n の順は、別々の検査を順に行うもので、§7.2 の「同一 atomic
+    reservation」の複数超過の優先順位（Fuel が先頭）の対象ではない。したがって `max_collection_elements` と fuel の両方を
+    超える `range` などは collection の上限の error になり（FBCa-AT-04）、§7.2 と食い違わない。この読みで選んだ。
+  - n を 1 回で払う間に chunk ごとの cancel / deadline の確認（§4.1）が入らない点は、既存の未実装範囲（fuel-bulk-chunk-yield の
+    残り、`max_collection_elements` で有界）のままで、この選択で新しく増える逸脱ではない。
+  採らなかった案: B（`map` / `filter` / `each` だけに課金）は、`range` / `keys` / `values` / COW の複製が fuel に現れないまま
+  版 `3` を固定することになり、マニフェストに反しうる（原則 3）。C（走査と生成を別に数える）は、同じ要素の課金が経路で 1〜2 と
+  変わり、`range`（生成だけ）との釣り合いの説明が増える（原則 5・8）。callback の invocation 5 が要素ごとに既にかかるので、
+  結果への追加を別に数えなくても仕事は fuel に現れる。
 
 ### fix-contains-budgeted-equality 実装スライス（`contains` の等価判定を予算付き比較へ）
 

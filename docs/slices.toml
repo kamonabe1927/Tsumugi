@@ -559,7 +559,7 @@ order      = 28
 
 # fuel-bulk-charge は 1 PR に収まらない（触る仕組み 3・受入基準 10 超・src/ 約 900〜1400 行、loop-runbook §14.1）ため
 # fuel-bulk-charge-a / -b / -c に分割した（spec「fuel-bulk-charge の sub-slice 分割」、設計 PR #501。
-# 割り方と a の課金の規則は判断の候補 Q1・Q2）。元の id は置き換えて残さない。「fuel-bulk-charge が done」は a・b・c がともに done。
+# 割り方と a の課金の規則は判断役が選択（PR #501、Q1・Q2=A））。元の id は置き換えて残さない。「fuel-bulk-charge が done」は a・b・c がともに done。
 # 各 sub-slice は同じ PR で fuel_accounting_revision を 1 つ上げ、既定 total_fuel を測り直す（a: 2→3、b: 3→4、c: 4→5）。
 # 空きを作るため、audit-strict-cbor-c2・c3・c4 と audit-sink-required を 43・44・45・46 → 45・46・47・48 に付け直した（相対順は変えていない）。
 # 見積もり: a は src/ 約 300〜450 行、触る仕組みは fuel の課金点（per-element）1 つ、受入基準 5。
