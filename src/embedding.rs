@@ -2093,12 +2093,11 @@ impl Engine {
     /// REPL 専用の実行入口（crate 内部、E7 のハイブリッド統合）。
     ///
     /// 挙動は [`Self::run`] と同じ（transaction・poison・再入検査・import は link が確かめた graph
-    /// から展開・capability 注入・`exit` 写像）だが、**budget のライフサイクルだけが異なる**:
+    /// から展開・capability 注入・`exit` 写像）だが、REPL の budget の扱いは次のとおり:
     ///
     /// - REPL の各 submission は 1 execution で、その submission の request が所有する有限 budget で
     ///   実行する（embedding-api §12「REPLのbudget」）。同じ [`ExecutionContext`] を submission 間で
-    ///   再利用する前提で、初回 submission は通常どおり budget/clock/cancellation を install し、
-    ///   2 回目以降は台帳を作り直さず、使用量（committed・reserved・peaks）を 0 から数え直す。
+    ///   再利用する前提で、budget/clock/cancellation を install し、台帳は作り直さず、使用量（committed・reserved・peaks）を 0 から数え直す。
     ///   submission をまたいで引き継ぐのは context（live heap を含む）だけで、live heap は
     ///   baseline として submission の `max_live_heap_bytes` で判定される。
     /// - 既存の REPL 統合テスト（`source_bytes_cumulative_limit_gates_across_inputs_in_both_engines` /
@@ -2106,8 +2105,8 @@ impl Engine {
     ///   `output_bytes_limit_gates_print_in_both_engines` /
     ///   `string_bytes_cumulative_limit_gates_shared_builtin_in_both_engines`）が、1 行ずつの
     ///   submission ごとの判定を固定している。
-    /// - file/stdin の one-shot [`Self::run`]（呼び出しごとに budget config を再構築）とは**意図的に
-    ///   別経路**であり、[`Self::run`] の挙動は一切変えない。
+    /// - budget のライフサイクルは [`Self::run`] と同じ（台帳を作り直さず持ち越す。
+    ///   fix-link-context-baseline-charge）。違いは REPL が監査 sink を使わない点だけである。
     ///
     /// # 可視性（内部 shim であり公開契約ではない）
     ///
@@ -5799,8 +5798,8 @@ mod tests {
         );
     }
 
-    /// 同一 context で連続実行しても budget 残量が前 run に汚染されない（reset_budget が
-    /// counters を作り直す。REV-015 最終形移行 §11.2）。
+    /// 同一 context で連続実行しても budget 残量が前 run に汚染されない（据え直しが
+    /// counters を 0 に戻す。REV-015 最終形移行 §11.2）。
     #[test]
     fn e11_reset_budget_isolates_fuel_between_runs() {
         let engine = Engine::builder().build().unwrap();
@@ -5828,11 +5827,11 @@ mod tests {
         }
     }
 
-    /// finding 1 回帰テスト: request が所有する cancellation token が reset_budget をまたいでも
+    /// finding 1 回帰テスト: request が所有する cancellation token が budget の据え直しをまたいでも
     /// 有効であり続け、cancel すると実行が Cancelled へ落ちる（§3.2・finding 1）。
     ///
     /// host は run の前に token を作り `.cancellation(token.clone())` で request に載せる。
-    /// `run_inner` は冒頭で `reset_budget` を呼び、request の token を ledger へ install
+    /// `run_inner` は冒頭で budget を据え直し、request の token を ledger へ install
     /// （継承ではなく置換）する。host clone と install token は同一 `Arc` を共有するので、
     /// run 前に握った token の `cancel()` が reset をまたいで実行で観測される。
     #[test]
@@ -5843,7 +5842,7 @@ mod tests {
         // run の前に token を作り、clone を保持しつつ request に載せる。
         let token = CancellationToken::new();
 
-        // standard_request() は内部で新しい budget/clock を作り、run_inner が reset_budget で
+        // standard_request() は内部で新しい budget/clock を作り、run_inner が据え直しで
         // request token を install する。その install（reset）をまたいで、保持 token の cancel が
         // 観測されることを確認する。
         assert!(
@@ -5865,11 +5864,11 @@ mod tests {
                 ),
                 ExecutionOutcome::Cancelled { .. }
             ),
-            "reset_budget をまたいで request-owned token の cancel が観測されるべき"
+            "据え直しをまたいで request-owned token の cancel が観測されるべき"
         );
     }
 
-    /// pre-cancel が返す usage は空（reset_budget 直後・baseline 課金前。finding 3）。
+    /// pre-cancel が返す usage は空（据え直し直後・baseline 課金前。finding 3）。
     #[test]
     fn e11_pre_cancel_usage_is_empty() {
         let engine = Engine::builder().build().unwrap();
@@ -7619,6 +7618,15 @@ mod lcb_tests {
         let mut fresh = ExecutionContext::new(&engine);
         let (o, _) = go(&engine, &mut fresh, src, loose, false);
         let alone = completed(&o);
+        // peak は「big の baseline + 2 回目の Link の分」（+ 100 byte の cell 等の余裕、実測の差は 64）を
+        // 超えない。1 回目の AST（数百 byte）が残れば超える。
+        assert!(
+            second.peak_heap_bytes <= list + alone.peak_heap_bytes + 100,
+            "1 回目の AST が peak に残っている: {} vs {} + {}",
+            second.peak_heap_bytes,
+            list,
+            alone.peak_heap_bytes
+        );
         assert_eq!(second.committed, alone.committed);
         assert_eq!(second.reserved, alone.reserved);
     }
@@ -7686,8 +7694,8 @@ mod lcb_tests {
         let (o, _) = go(&engine, &mut closure, probe, loose, false);
         let live_closure = completed(&o).live_heap_bytes;
         assert!(
-            live_closure > live_direct,
-            "closure の分を含む: {live_closure} vs {live_direct}"
+            live_closure - live_direct > heap_size::tree_function(0),
+            "closure の retained code（§5.3 A-1）の分も含む: {live_closure} vs {live_direct}"
         );
     }
 }
