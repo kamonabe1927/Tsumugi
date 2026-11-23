@@ -765,6 +765,93 @@ manifesto-check-ambient-surface（[Capability Model仕様](capability-model.md) 
     Q1=A で採らなかった案 B と同じ弱点を範囲の定義の側に残す（原則 9）。除かれるのは build に入らないコードだけなので、ambient の側を広いまま残しても原則 2 の裏付けは強まらないため採らない。
     判断の外の気付き（判断役のコメント）を受け、`#[cfg(test)]` と item が同じ行にある場合（`src/embedding.rs` 2229 行）の扱いを実装範囲 3 と NHA-AT-01 に明記した。2 つの検査に同時に効く切り出しの誤りで `run_audited_inner` の本体を丸ごと除かないためである。
 
+### fix-link-request-budget-charge 実装スライス（`Engine::link` で `LinkRequest` の budget に source/import の count・bytes を課金し上限を判定する）
+
+loop:drift #352 の D-62 を直す（親 REV-015）。§5 は `LinkRequest` が [実行予算・協調実行仕様](execution-control.md) の有限 `BudgetConfig` を所有し、
+source/module/import の count・bytes を同文書の `BudgetUsage` へ課金すると定めるが、`Engine::link` は課金も上限判定もしない（本書の逸脱一覧の §5 の行）。
+本スライスは §5 の目標の文を変えず、`Engine::link` の側を目標に合わせる。
+
+下の実装範囲は、PR の「判断の候補」Q1〜Q4 の推奨案（各 A）で書いている。判断役が別の案を選んだら、その内容と理由をこの小節に反映する。
+
+- **前提（設計時点の main 3b1fc4c で確かめたこと）**:
+  - `Engine::link`（`src/embedding.rs` の `link_inner`・`resolve_module_imports`・`read_module_source`）は、`request.budget` を
+    `link_call_context` で resolver の `CapabilityCallContext` へ deadline と `max_import_bytes`（remaining-bytes の器）として渡すだけで、
+    `BudgetLedger` を作らず `charge_source`・`charge_import` を呼ばない。`LinkError::BudgetExceeded` は resolver が
+    `AdapterError::Control(ControlStop::BudgetExceeded)` を返したとき（`adapter_error_to_link_error`）にしか出ない。
+  - source/import の課金は run の `Link` フェーズで `ExecutionRequest` の budget に行う（tree は `src/eval.rs` の `charge_link_graph`、
+    VM は `src/vm.rs` の `charge_link_graph`。root を `charge_source`、初めて展開した module ごとに `charge_source` と `charge_import`）。
+    [Capability Model仕様](capability-model.md) §10 の目標の文も「課金はこれまでどおりrunの`Link`フェーズ」とする。
+  - `LinkRequest::new` を呼ぶのは、CLI の 4 か所（`src/main.rs` の tree file/stdin・tree REPL・VM REPL・VM file/stdin。どれも
+    `LegacyBudgetEnv` から作った同じ `BudgetConfig` を link と run の両方へ渡す）、scheduler の handle 経路（`src/engine.rs` の
+    初回 poll の `Link` フェーズ。`evaluator.budget_config()` を渡す）、テストである。
+  - CLI の `print_link_error` は `LinkError::BudgetExceeded` を `リンクエラー: {:?}` の Debug 表示で出す。scheduler の handle 経路の
+    `link_failure_outcome` は `control_stop_to_error` で budget 系の error に写す（PR #480 の Q1=A）。
+  - `BudgetLedger::new(config, cancellation)` は clock を持たず、`set_clock` しなければ deadline を判定しない。`LinkRequest` は clock を持たない。
+- **実装範囲**:
+  1. `Engine::link` は、engine・revision・backend の検証と step 0 の cancel の確認のあと、resolver の取得より前に、`request.budget` と
+     `request.cancellation` から link 専用の `BudgetLedger` を 1 つ作る（clock は据えない）。この台帳は link の間だけ使い、`LinkedScript` にも
+     run にも渡さない。
+  2. root source を [実行予算・協調実行仕様](execution-control.md) §5.3 のとおり `source_count` の 1 本目として、`CompiledScript` の
+     root source の生 UTF-8 byte 長で `charge_source(_, ExecutionPhase::Link)` する。import 0 件の script（resolver の有無を問わず、空 graph を返す経路）でも
+     課金し、超えたら空 graph を返さず失敗する（Q2）。root の課金は resolver を呼ぶ前なので、root で超えたら resolver call は 0 である。
+  3. 各 import は、`read_module_source` で読み終えて同じ `ModuleId` の hash の照合（既解決なら `continue`）を通ったあと、UTF-8 の検証と
+     module 単体の parse より前に、その module の生 byte 長で `charge_source` と `charge_import` をこの順に行う（Q4）。既解決の `ModuleId`
+     （同じ module の 2 回目の import、diamond）は §5.3 の cache hit なので課金しない。
+  4. 課金の `ControlStop` は既存の `adapter_error_to_link_error` と同じ写像で `LinkError` にする（`BudgetExceeded` → `LinkError::BudgetExceeded`、
+     `Cancelled` → `LinkError::Cancelled`）。`BudgetExceeded.phase` は `Link` である。複数の resource が同時に超えたときの primary は
+     `charge_source`・`charge_import` の既存の §7.2 の優先順位のままにする。
+  5. run の `Link` フェーズの `ExecutionRequest` への課金（tree・VM の `charge_link_graph`）は変えない（Q1）。`Engine::run` が返す
+     `BudgetUsage` の source/import の値も変わらない。
+  6. CLI（`src/main.rs`）は `LinkError::BudgetExceeded(exceeded)` を、run の `BudgetExceeded` と同じ文言で出す（Q3）。
+     `tsumugi::budget::control_stop_to_error(ControlStop::BudgetExceeded(exceeded), 0, 0)` の `TsumugiError` の message を、file/stdin は
+     `exit_code_for_outcome` の `BudgetExceeded` と同じ形で stderr に出して exit 1、REPL（tree・VM）は `report_repl_error` と同じ
+     `  エラー: …` の形で出して次の入力へ進む。`LinkError` は行番号を持たないので行番号は付けない。それ以外の `LinkError` の表示は変えない。
+  7. `link_call_context` と `Engine::link` の doc comment の「課金しない」「器のみ」の記述を、本スライスの挙動に合わせて直す。
+- **範囲外**:
+  - module source を chunk で読む途中で N+1 byte を溜める前に止めること（[Capability Model仕様](capability-model.md) §10 の「Phase 3の
+    module/total limit NならN+1を蓄積する前に停止する」と CAP-AT-17 の byte の境界。同仕様の逸脱一覧の C11 の行）。本スライスは読み終えた
+    module の byte 長で課金する。resolver へ渡す remaining-bytes の値も変えない。
+  - link 中の deadline の判定（`LinkRequest` は clock を持たず、link の台帳は deadline を見ない。resolver の `CapabilityCallContext` が
+    `request.budget.deadline` を運ぶ今の形は変えない）。
+  - imported module record・AST の heap の課金（execution-control §5.3 の heap は run の `Link` フェーズの課金のまま）。
+  - link の課金の監査 event（[決定性・実行時監査仕様](determinism-and-audit.md)。`Engine::link` は監査 event を出さない今の形のまま）。
+  - REPL の session 累積の budget（逸脱一覧の REPL の budget の行。fix-repl-submission-budget）。link の台帳は submission ごとに作るので、
+    REPL で前の submission が展開した module を再び import すると、link では課金し run では cache hit として課金しない。
+  - `ExecutionOutcome` に `LinkError` を足すこと（逸脱一覧の 1 行目）。
+- **観測される変化**:
+  - `LinkRequest` の budget の source/import の上限を超える script は、`Engine::link` が `Err(LinkError::BudgetExceeded(_))` を返す
+    （D-62 の再現: import_count=0 で 1 module を import すると、今は `Ok`、変更後は `ImportCount` の `BudgetExceeded`）。
+  - CLI は link と run に同じ budget を渡すので、`TSUMUGI_MAX_*` の source/import の上限を超える実行は run の `Link` フェーズでなく link で止まる。
+    stderr の文言（`import の本数が上限を超えました` など）と exit code は変わらず、行番号の接頭辞（`N行目: `）が付かなくなる。
+    VM REPL は link で止まるので、超えた submission で `charge_link_graph` まで進まない。
+  - scheduler の handle 経路は、初回 poll の link で超えたとき、既存の `link_failure_outcome` の budget 系の error になる（今は run 側の課金で同じ種類の error）。
+  - 上記以外の既存テストの期待値は変えない。変える必要が出たら実装を止めて判断待ちにする。
+- **受入基準（fix-link-request-budget-charge）**:
+  - **LRB-AT-01**（import の課金と境界）: `LinkRequest` の budget の `max_import_count`・`max_import_bytes`・`max_source_count`・
+    `max_source_bytes`・`max_single_source_bytes` のそれぞれで、N（ちょうど）なら `Engine::link` が `Ok`、N+1 相当なら
+    `Err(LinkError::BudgetExceeded(e))` で `e.resource` がその resource、`e.phase` が `Link` になる。D-62 の再現（import_count=0・import_bytes=1 で
+    1 module を import）は `Err` になる。確かめ方: `src/embedding.rs` の link の unit test（既存の in-memory resolver の helper を使う）。
+  - **LRB-AT-02**（root の課金）: root source が `max_single_source_bytes` を超える script と `max_source_count = 0` の budget は、import 0 件でも
+    `Engine::link` が `BudgetExceeded`（`SingleSourceBytes`・`SourceCount`）を返し、import を含む script では resolver の呼び出しが 0 回である。
+    確かめ方: 呼び出しを数える resolver を使う unit test。
+  - **LRB-AT-03**（数え方と順序）: 同じ module を 2 回 import する script と diamond の graph で、import 1 本ぶんの上限（`max_import_count` = 異なる module の数）なら
+    `Ok` になる（cache hit を数えない）。UTF-8 でない module と構文の不正な module は、`max_import_bytes` がその module の byte 長より小さければ
+    `InvalidModule` でなく `BudgetExceeded` になる（parse の前に課金する）。上限内で link と run を通した `Engine::run` の `BudgetUsage` の
+    source/import の値は今と同じである（`tests/differential.rs` の source/import の一致の test が変更なしで通る）。確かめ方: unit test と `cargo test`。
+  - **LRB-AT-04**（CLI、tree・VM の両方）: `tests/integration.rs` の `import_count_limit_gates_file_execution`（`for use_vm`）と REPL の
+    `TSUMUGI_MAX_SINGLE_SOURCE_BYTES`・`TSUMUGI_MAX_SOURCE_BYTES` の test が期待値を変えずに通る。加えて、tree・`--vm` の file/stdin と REPL で
+    link で止まる上限超過（例: `TSUMUGI_MAX_IMPORT_BYTES=1`）の stderr に budget の文言が出て `リンクエラー:` が出ず、file/stdin は exit 1、
+    REPL は次の入力へ進むことを subprocess test で確かめる。
+  - **LRB-AT-05**（handle 経路）: scheduler の handle 経路で `max_import_count = 0` の budget の import が、初回 poll の link で budget 系の error
+    （kind `source_limit`）になり 1 文も実行しない。確かめ方: `tests/scheduler_api.rs` に、実際の resolver（`BudgetStopResolver` のような
+    resolver 側の停止でなく link 側の課金）で確かめる test を足す。
+- **想定の変更規模**: 本体（`#[cfg(test)]` を除く `src/`）は `src/embedding.rs` が +30〜60 行（台帳の作成、root と各 module の課金、
+  doc comment）、`src/main.rs` が +15〜30 行（`LinkError::BudgetExceeded` の表示を file/stdin と REPL で分ける）。テストは unit test と
+  subprocess test で +150〜250 行。受入基準は 5 項目、触る仕組みは「link 層の budget 課金」1 つ（CLI の変更はその結果の表示だけ）で、
+  [開発ループ手順書](loop-runbook.md) §14.1 に収まる。done にする実装 PR で、本書の逸脱一覧の §5 の `LinkRequest` の budget の行を削除する。
+  範囲外に残すもの（link 中の deadline、chunk の途中の N+1）はそれぞれ既存の行・延期先（C11）で追えるので、新しい行は足さない見込み。
+- **依存**: なし。
+
 ## 15. 受入基準
 
 | ID | Phase | 基準 |

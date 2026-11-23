@@ -757,8 +757,10 @@ order      = 29
 [[slice]]
 id         = "fix-link-request-budget-charge"
 title      = "Engine::link で LinkRequest の budget に source/module/import の count・bytes を課金し上限を判定する（embedding-api §5、loop:drift #352 D-62）"
-status     = "todo"
+status     = "ready"
 parent     = "REV-015"
+spec       = { doc = "docs/embedding-api.md", section = "fix-link-request-budget-charge 実装スライス（`Engine::link` で `LinkRequest` の budget に source/import の count・bytes を課金し上限を判定する）" }
+acceptance = ["LRB-AT-01..05"]
 order      = 30
 
 [[slice]]
