@@ -513,6 +513,9 @@ fn wlc_at_04_cwd_colon_does_not_affect_relative_paths() {
         let base = TestDir::new("wlc04");
         let cwd = base.path.join("x:y");
         std::fs::create_dir_all(&cwd).unwrap();
+        // macOS の temp_dir は symlink（/var → /private/var）を含み、子の CWD は解決済みになる。
+        // CWD と TSUMUGI_SANDBOX を同じ解決済み path に揃える。
+        let cwd = std::fs::canonicalize(&cwd).unwrap();
         std::fs::write(cwd.join("f.txt"), b"ok").unwrap();
         let sandbox = cwd.to_str().unwrap();
         let envs = [("TSUMUGI_SANDBOX", sandbox), ("TSUMUGI_ENV_ALLOW", "*")];

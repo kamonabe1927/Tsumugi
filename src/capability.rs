@@ -3143,13 +3143,17 @@ mod tests {
     #[test]
     fn legacy_translate_rejects_colon_component_ads() {
         // §5.5 / Finding 7 / AC-5: legacy translator も Component::Normal 内の `:` を拒否する。
-        // drive prefix（Component::Prefix）は collect 前に除外されるため ADS の `:` だけが落ちる。
+        // 検査は絶対化前の script の文字列の component に対して行う（Normal 内の `:` だけが落ちる）。
         // route 対象の root は不要（`:` 検査は root ループより前で行う）。
         let translator = LegacyFsTranslator {
             entries: Vec::new(),
         };
         assert_eq!(
             translator.translate("/base/foo.txt:stream"),
+            Err(PathError::ColonInComponent)
+        );
+        assert_eq!(
+            translator.translate("d/a:b"),
             Err(PathError::ColonInComponent)
         );
         // `:` を含まない path は（route 先が無いので）None を返し、拒否はされない。
