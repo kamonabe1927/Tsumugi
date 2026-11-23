@@ -3107,6 +3107,106 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
   マニフェストに反しうる（原則 5）。`PrepareCall` 経由の呼び出しと区別する仕組みも増える（原則 8）。C（文言を F-2b を
   ready にする回に回す）は、実装できない文言を正本に残し、その回で同じ判断をやり直すことになる（原則 9）。
 
+#### fuel-bulk-charge の sub-slice 分割（fuel-bulk-charge-a / -b / -c）
+
+> 状態: **未実装**（設計のみ。2026-11-23 の設計 PR（`docs/fuel-bulk-charge`）で割り方を書いた。割り方と
+> fuel-bulk-charge-a の課金の規則は判断の候補 Q1・Q2 にしてあり、判断役の選択を本小節の末尾に記録する）。
+> 各 sub-slice の進捗は [`slices.toml`](slices.toml) の `fuel-bulk-charge-a` / `-b` / `-c` を正とする。
+> `slices.toml` の `fuel-bulk-charge` は sub-slice のエントリに置き換えた（元の id は残さない。「fuel-bulk-charge が
+> done」は a・b・c がともに done を意味する）。上の小節で `fuel-bulk-charge` と書いた延期先は a〜c 全体を指す。
+
+`fuel-bulk-charge` の範囲は、冒頭の未実装範囲の §4.1 の行のとおり、§4.1 の課金表のうち版 `2`（F-2c）で課金して
+いない 3 つの行である。(1) collection element を走査・copy・生成する 1 / element のうち、比較・表示・`sort`・
+`join` / `contains`・深度の読み直し以外（`map` / `filter` と、要素を作る・複製する builtin と COW の複製）、
+(2) UTF-8 payload の scan・copy・encode/decode の `ceil(bytes / 64)`（string・source・I/O・host payload）、
+(3) compile・import link 中の AST node 生成の 1 / node。
+
+**§14.1 に収まらない理由**（main 87166f4 で確かめた）:
+
+- 触る仕組みが 3 つある。(1) は builtin の境界と値の COW（`src/builtin.rs` の `builtin_collection` と式 frame の
+  段階実行、`src/vm.rs` の `exec_builtin` の `map` / `filter` / `each`、`src/builtin_core.rs` の `dispatch` が呼ぶ
+  `range` / `keys` / `values` / `slice` / `reverse` / `split`、`src/value.rs` の `detach_list` / `detach_dict`）。
+  (2) は budget の byte の課金（`src/budget.rs` の `charge_string` / `charge_source` / `charge_input` /
+  `charge_output` / `charge_host_call_request` / `charge_host_response_bytes` と、それを呼ばない scan だけの
+  string builtin、host function の引数・結果の変換）。(3) は compile と link（`src/parser.rs`・`src/module.rs`・
+  `src/embedding.rs` の `Engine::link`。今の fuel は execution の台帳だけにあり、compile・link の fuel の払い手が
+  決まっていない）。
+- 受入基準は、仕組みごとに課金点・値・tree/VM の一致・境界・版と既定 `total_fuel` を確かめると 10 個を超える。
+- 規模: (1) 約 300〜450 行、(2) 約 400〜600 行、(3) 約 200〜350 行の見込みで、合わせて §14.1 の 1000 行を超える。
+
+**割り方（判断の候補 Q1。推奨は A）**: 仕組みごとに 3 本へ割り、a（per-element）→ b（UTF-8 payload）→
+c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR で `fuel_accounting_revision` を 1 つ上げ、既定
+`total_fuel` を代表 script 集合（上の「F-2 実装スライス」小節）で測り直す（a で 2 → 3、b で 3 → 4、c で 4 → 5）。
+版の bump と既定 `total_fuel` の更新を同じ PR で行う「F-2 実装スライス」の「スライス分割の指針」の制約は各 sub-slice で
+守る。順は §4.1 の表と本スライスの元の title の並びに合わせ、すでに builtin の per-element 課金と chunk の仕組み
+（fuel-bulk-chunk-yield）がある (1) を先にする。b・c の範囲の細部（scan だけの builtin の扱い、compile・link の fuel の
+払い手と上限）は、それぞれを ready にする設計 PR で決める。
+
+##### fuel-bulk-charge-a 実装スライス（`map` / `filter` / `each` と要素を作る・複製する操作の per-element fuel、版 2 → 3）
+
+- **範囲**: §4.1 の「collection element を走査・copy・生成 1 / element」を、次の操作に両 engine の同じ論理位置・同じ値・
+  同じ line で課金する（規則は判断の候補 Q2。推奨 A のとおりに書く）。課金は `ChargeKind` に per-element の種別
+  （例: `Element`、`FuelSchedule::cost` は 1）を足して `FuelSchedule` から取る。bytecode には出さず、builtin・値の
+  操作（Rust 側）が直接課金する（`ChargeKind::allowed_in_bytecode` は偽。host call attempt と同じ扱い）。
+  - `map` / `filter` / `each`: 第 1 引数の List の要素 1 つを callback へ渡す直前に 1（走査）。callback の invocation 5
+    （F-2c）とは別に払う。`map` の結果の要素と `filter` が残す要素の追加は数えない（同じ要素の走査と生成を 2 回数えない）。
+    tree は同期経路（`src/builtin.rs` の `builtin_collection`）と式 frame の段階実行（tree-expr-continuation-e4）の両方、
+    VM は `src/vm.rs` の `exec_builtin` で、同じ順に課金する。
+  - 要素を作る・複製する builtin（`range` / `keys` / `values` / List の `slice` / List の `reverse` / `split`）: 結果の要素数 n を
+    1 回の課金で払う。順は arity・型の検査 → `max_collection_elements` の検査 → fuel n → 結果の確保。n が引数から
+    決まるもの（`range` / `keys` / `values` / `slice` / `reverse`）は `dispatch` の前に、`split` は区切りの走査
+    （UTF-8 の scan で b の範囲）の後・結果の List を作る前に払う。Str の `slice` / `reverse` は要素でなく UTF-8 の
+    copy なので b の範囲。
+  - COW の複製: `Value::detach_list` / `detach_dict`（`src/value.rs`）が共有中の backing を複製するとき、複製する
+    要素（entry）数を複製の前に 1 回で払う（`push`・`pop`・index 代入が共有中の値を書き換えるとき）。共有していない
+    値は複製しないので 0。List / Dict の深度の読み直し（§4.1、版 `1` から）は今の位置と値のまま、その後に複製を払う。
+  - `for` の Dict・Str の反復列の生成（`Value::new_iter_str_list`）: 作る要素数を、要素数の検査の後・backing の確保の前に
+    1 回で払う。List の反復列は共有するので 0（fix-for-iter-snapshot-charge）。
+  - 版: `fuel_accounting_revision` を 2 → 3 にし（受理する版を `3` だけにする）、`BudgetConfig::standard` を `3` に
+    する。既定 `total_fuel` は代表 script 集合を版 `3` で測り、通る最小の切りの良い値にする（今の 20,000,000 で
+    通るなら変えない）。
+- **範囲外**:
+  - 既に per-element を課金している比較・表示・`sort`・`join` / `contains`・深度の読み直し（値も位置も変えない）。
+  - UTF-8 payload（string builtin・文字列の連結・f-string・source・I/O・host payload）と serialize（host function の
+    引数・結果の変換、監査の値）は fuel-bulk-charge-b。AST node は fuel-bulk-charge-c。
+  - List / Dict リテラルの構築（要素は式として F-2c で課金済み）、`len` / `has_key` など要素を走査しない builtin。
+  - 1 回の課金 n が slice の残量を超える場合の yield。tree の poll 経路は yield 可能点でだけ slice を確かめるので、
+    1 回分は §4.2 の超過（`max_collection_elements` で有界）として扱う。chunk 境界の yield の追加は
+    fuel-bulk-chunk-yield の延期（冒頭の未実装範囲）のまま。VM の slice yield（Slice 6）。
+- **受入基準**:
+  - **FBCa-AT-01**: `map` / `filter` / `each` で、要素数だけが 1 違う 2 本の script の「成功する最小の上限 N」の差が
+    1 + callback 1 回分（invocation 5 と本体の課金）で、両 engine で一致する。tree は同期経路と poll 経路（式 frame）の
+    両方で同じ N になる（`tests/differential.rs`）。
+  - **FBCa-AT-02**: `range` / `keys` / `values` / List の `slice` / List の `reverse` / `split` で、結果の要素数だけが k 違う
+    2 本の N の差が k で、両 engine で一致する（`tests/differential.rs`）。
+  - **FBCa-AT-03**: 共有中の List / Dict への `push`・`pop`・index 代入と、Dict・Str の `for` で、複製・生成する要素数
+    だけが k 違う 2 本の N の差が k で、共有していない値では差が 0 になり、両 engine で一致する。
+  - **FBCa-AT-04**: FBCa-AT-01〜03 の各 script で N は両 engine とも成功、N − 1 は両 engine とも fuel の上限で失敗し、
+    stdout・stderr（line・trace を含む）・exit code が一致する。`max_collection_elements` と fuel の両方を超える
+    `range` は collection の上限の error になる（検査の順）。
+  - **FBCa-AT-05**: `BudgetConfig::standard` の `fuel_accounting_revision` は `3` で、`2` は execution 作成前に
+    `UnsupportedFuelAccountingRevision(2)` で拒否される。既定 `total_fuel` で代表 script 集合が両 engine で成功し、
+    各 script の消費 fuel を実装 PR 本文に記録する。fuel の期待値を持つ既存テストを新しい課金へ更新して両 engine で緑で、
+    watchdog の停止性ケースは fuel 上限が先に来る。`language_revision` は変わらない。
+- **文書**（実装 PR）: §3.1 の表と本文の現在版（`3` と per-element の課金）、[次期意味論・実装決定](semantic-decisions.md)
+  §17.7.3 の fuel の論理課金点、[言語仕様](language-spec.md) の「ステップ予算」の数え方、`src/budget.rs` の `ChargeKind`・
+  `FuelSchedule` の doc を合わせる。冒頭の未実装範囲の §4.1 の行は、per-element の部分を消して b・c の範囲に絞る。
+  未実装範囲の bulk builtin の行の (1) から、本スライスで per-element を課金した builtin を外す。
+- **想定の変更規模**: `src/` 約 300〜450 行（`ChargeKind`・`FuelSchedule`・版と既定値 約 40、`map` / `filter` / `each` の
+  tree 2 経路と VM 約 80、要素数の課金の共有 helper と tree・VM の `dispatch` 境界 約 120、COW の複製と反復列 約 40、
+  doc 約 30）、触る仕組みは fuel の課金点 1 つ（F-2c と同じ数え方）、受入基準 5。1000 行を超える見込みになったら、
+  実装に入る前に止めて報告する（§14.1）。
+
+**設計時の注記**（main 87166f4 で確かめた。実装で読み違えやすい点）:
+
+- 今の per-element の課金は `budget.charge_fuel(1, phase)` などの直接呼び（`src/builtin_core.rs` の `bulk_step` の
+  `SortScan`、`src/value.rs` の比較・深度の読み直し）で、`FuelSchedule` を通らない。本スライスは足す課金だけを
+  `FuelSchedule` から取り、既存の直接呼びは変えない（値も位置も同じ）。
+- `dispatch`（`src/builtin_core.rs`）は budget を受け取らない。要素数の課金は tree（`src/builtin.rs` の
+  `apply_pure_core_builtin`）と VM（`src/vm.rs` の `exec_builtin`）の境界で、同じ共有 helper が引数から数えた n を払う。
+- 式 frame の段階実行（e4）の `map` / `filter` / `each` は yield を跨ぐので、要素の課金は「次の要素を callback へ渡す」
+  位置で 1 回だけ行い、resume で同じ要素を 2 回課金しない。
+
 ### fix-contains-budgeted-equality 実装スライス（`contains` の等価判定を予算付き比較へ）
 
 issue #290 から作ったスライス（不具合の修正、`slices.toml` の `fix-contains-budgeted-equality`）。issue の仕分けで「受け入れ」とし、判断は要らないとした部分である（[言語仕様](language-spec.md)「等価比較」の「この規則は`contains`のように等価判定を使う組み込み関数でも共有する」で直し方が決まる）。
