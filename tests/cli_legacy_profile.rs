@@ -476,3 +476,67 @@ fn legacy_dangling_final_symlink_write_and_append_are_denied() {
         }
     }
 }
+
+/// WLC-AT-03: grant 済み（`TSUMUGI_SANDBOX`）でも、中間の `<ASCII 1 文字>:` の component は
+/// catch 可能な `argument` error（`ファイルパスの形式が不正です`）になる。tree と VM。
+#[test]
+fn wlc_at_03_colon_component_is_argument_error_with_grant() {
+    for use_vm in [false, true] {
+        let dir = TestDir::new("wlc03");
+        let abs = dir.path.join("a:b").to_str().unwrap().replace('\\', "/");
+        for path in [abs.as_str(), "d/a:b"] {
+            let r = run_legacy(
+                use_vm,
+                &dir.path,
+                &format!("print(read_file(\"{}\"))", path),
+                &[
+                    ("TSUMUGI_SANDBOX", dir.as_str()),
+                    ("TSUMUGI_ENV_ALLOW", "*"),
+                ],
+            );
+            assert!(!r.status_ok, "[vm={use_vm}] {path}: {}", r.stdout);
+            assert!(
+                r.stderr.contains("ファイルパスの形式が不正です"),
+                "[vm={use_vm}] {path}: {}",
+                r.stderr
+            );
+        }
+    }
+}
+
+/// WLC-AT-04: CWD の component の `:` は検査しない。CWD を `x:y` にしても `:` を含まない相対 path は
+/// 通り、`a:b` は `argument` になる。Windows はディレクトリ名に `:` を使えないので Unix だけ。
+#[cfg(unix)]
+#[test]
+fn wlc_at_04_cwd_colon_does_not_affect_relative_paths() {
+    for use_vm in [false, true] {
+        let base = TestDir::new("wlc04");
+        let cwd = base.path.join("x:y");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("f.txt"), b"ok").unwrap();
+        let sandbox = cwd.to_str().unwrap();
+        let envs = [("TSUMUGI_SANDBOX", sandbox), ("TSUMUGI_ENV_ALLOW", "*")];
+        let r = run_legacy_in(
+            use_vm,
+            &base.path,
+            "print(read_file(\"f.txt\"))",
+            &envs,
+            Some(&cwd),
+        );
+        assert!(r.status_ok, "[vm={use_vm}]: {}", r.stderr);
+        assert_eq!(r.stdout, "ok");
+        let r = run_legacy_in(
+            use_vm,
+            &base.path,
+            "print(read_file(\"a:b\"))",
+            &envs,
+            Some(&cwd),
+        );
+        assert!(!r.status_ok);
+        assert!(
+            r.stderr.contains("ファイルパスの形式が不正です"),
+            "[vm={use_vm}]: {}",
+            r.stderr
+        );
+    }
+}

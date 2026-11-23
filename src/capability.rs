@@ -1020,7 +1020,8 @@ impl LegacyFsTranslator {
 
 /// legacy profile の script path の lexical 検査（root を引かない部分、§14.3）。
 ///
-/// 空・NUL・component 内の `:`（Windows ADS / stream 指定、§5.5）を [`PathError`] にし、通れば CWD 基準で
+/// 空・NUL・script の文字列の component 内の `:`（Windows ADS / stream 指定、§5.5）・Windows の root を伴わない
+/// drive prefix を、絶対化より前に [`PathError`] にし、通れば CWD 基準で
 /// lexical 絶対化した path とその normal component 列を返す。[`LegacyFsTranslator::translate`] と、
 /// filesystem を grant しない legacy の set の形式検査（fix-fs-path-syntax-before-grant）が共有する。
 pub(crate) fn legacy_lexical_check(
@@ -1032,6 +1033,25 @@ pub(crate) fn legacy_lexical_check(
     if script_path.contains('\0') {
         return Err(PathError::ContainsNul);
     }
+    // script 自身の文字列の component を、CWD 基準の絶対化より前に検査する（§8.5・§14.3）。
+    // 絶対化後の component 列は CWD を含み、Windows の `PathBuf::push` が `a:b` のような
+    // 中間の component を drive prefix と読んで path 全体を置き換えるので、後では検査しない。
+    let mut components = std::path::Path::new(script_path).components().peekable();
+    while let Some(c) = components.next() {
+        match c {
+            // root（`\`）を伴わない prefix（`a:b`・`C:x`）は drive ごとの current directory に
+            // 依る形式なので受け付けない。Unix にはこの component は現れない。
+            std::path::Component::Prefix(_) => {
+                if !matches!(components.peek(), Some(std::path::Component::RootDir)) {
+                    return Err(PathError::Absolute);
+                }
+            }
+            std::path::Component::Normal(s) if s.to_string_lossy().contains(':') => {
+                return Err(PathError::ColonInComponent);
+            }
+            _ => {}
+        }
+    }
     let abs = absolutize_lexical(std::path::Path::new(script_path));
     let abs_components: Vec<String> = abs
         .components()
@@ -1040,11 +1060,6 @@ pub(crate) fn legacy_lexical_check(
             _ => None,
         })
         .collect();
-    // drive prefix は `Component::Prefix` として上の filter_map で除外済みなので、
-    // `Component::Normal` 内に残る `:` だけを拒否すればよい（Finding 7）。
-    if abs_components.iter().any(|c| c.contains(':')) {
-        return Err(PathError::ColonInComponent);
-    }
     Ok((abs, abs_components))
 }
 
@@ -3139,6 +3154,60 @@ mod tests {
         );
         // `:` を含まない path は（route 先が無いので）None を返し、拒否はされない。
         assert_eq!(translator.translate("/base/foo.txt"), Ok(None));
+    }
+
+    #[test]
+    fn wlc_at_01_legacy_lexical_check_rejects_colon_in_any_component() {
+        // WLC-AT-01: script の文字列の中間の component の `:` を、全 OS で ColonInComponent にする。
+        #[cfg(unix)]
+        let abs_mid = "/base/a:b/x";
+        #[cfg(windows)]
+        let abs_mid = "C:\\base\\a:b\\x";
+        let translator = LegacyFsTranslator {
+            entries: Vec::new(),
+        };
+        for p in ["d/a:b", "d/a:/x", "d/a:b/../x", abs_mid, "d/foo.txt:stream"] {
+            assert_eq!(
+                legacy_lexical_check(p).map(|_| ()),
+                Err(PathError::ColonInComponent),
+                "{p}"
+            );
+            assert_eq!(
+                translator.translate(p),
+                Err(PathError::ColonInComponent),
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn wlc_at_02_legacy_lexical_check_leading_drive_relative() {
+        // WLC-AT-02: 先頭の `a:b` は全 OS で Err。variant は Unix が ColonInComponent、Windows が Absolute。
+        assert!(legacy_lexical_check("a:b").is_err());
+        #[cfg(unix)]
+        assert_eq!(
+            legacy_lexical_check("a:b").map(|_| ()),
+            Err(PathError::ColonInComponent)
+        );
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                legacy_lexical_check("a:b").map(|_| ()),
+                Err(PathError::Absolute)
+            );
+            assert_eq!(
+                legacy_lexical_check("C:x").map(|_| ()),
+                Err(PathError::Absolute)
+            );
+            assert!(legacy_lexical_check("C:\\x").is_ok());
+        }
+    }
+
+    #[test]
+    fn wlc_legacy_lexical_check_ignores_cwd_components() {
+        // CWD の component は検査しない（Q1=A）。`:` を含まない相対 path は通る。
+        assert!(legacy_lexical_check("f.txt").is_ok());
+        assert!(legacy_lexical_check("d/../f.txt").is_ok());
     }
 
     #[test]
