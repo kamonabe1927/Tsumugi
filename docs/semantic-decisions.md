@@ -1,6 +1,6 @@
 # Tsumugi — 次期意味論・実装決定
 
-最終更新: 2026-11-23
+最終更新: 2026-11-24
 
 設計ステータス: **次期仕様確定（本文）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -23,7 +23,7 @@ Q2=A。当時の[開発ループ手順書](loop-runbook.md) §7.5）。理由: �
 | 逸脱内容 | 対象の節(§) | 発生スライス |
 |---|---|---|
 | user call の評価順が目標と違う。目標（§5.1・§17.5.2）は「動的 callee を先に一度だけ評価・分類し、user callable の場合だけ step と深度を検査する」（callee 先行）だが、実装は現行の [言語仕様](language-spec.md)「ユーザー定義関数の呼び出し順序」のとおり「step と深度を検査してから callee を評価する」。tree（`src/eval.rs` の user call の準備で `begin_user_call` が callee の評価より前）と VM で同じで、深度 128 の内側で `[print("x"), g][1](…)` を呼ぶと、両 backend とも `x` を出さずに `overflow` になる。深度の境界値（128 user frame、§5.1）は両 backend で目標どおり。callee 先行への切り替えは `LanguageRevision` を上げる破壊的変更で、まだスライスが無い（ロードマップの REV-012 の `callee-precedence`） | §5.1・§17.5 | —（本ガイド導入前からの実装） |
-| scheduler の handle 経路（`Engine::create_execution` / `start`）では、link 時の深度拒否（`LinkError::DepthExceeded { limit: 128 }`）が alpha の `ExecutionOutcome` に `LinkError::DepthExceeded` の形で出ず、kind `import` の `TsumugiError`（`import のネストが深すぎます (上限: 128)`、`IMPORT_DEPTH`）を載せた terminal の `LinkError` になる。目標（§3.4 の「import chain深度上限」の行）は runtime error にしない拒否である。1 文も実行しない点は同じ。alpha が `LinkError` を構造化して返す形は [組み込みAPI仕様](embedding-api.md) E10 の統合で解消する。link 由来の他の失敗（解決の失敗は `{code}` を入れる形、循環は `import.cycle`）の写像は下の §3.4 の写像の段落に記録した | §3.4 | fix-handle-import-from-link |
+| scheduler の handle 経路（`Engine::create_execution` / `start`）では、link 時の深度拒否（`LinkError::DepthExceeded { limit: 128 }`）が alpha の `ExecutionOutcome` に `LinkError::DepthExceeded` の形で出ず、kind `import` の `TsumugiError`（`import に失敗しました: import のネストが深すぎます (上限: 128)`、`IMPORT_DEPTH`）を載せた terminal の `LinkError` になる。目標（§3.4 の「import chain深度上限」の行）は runtime error にしない拒否である。1 文も実行しない点は同じ。alpha が `LinkError` を構造化して返す形は [組み込みAPI仕様](embedding-api.md) E10 の統合で解消する。link 由来の他の失敗（解決の失敗は `{code}` を入れる形、循環は `import.cycle`）の写像は下の §3.4 の写像の段落に記録した | §3.4 | fix-handle-import-from-link |
 | VM の Dict リテラルの構築が途中で深度を読み直す。目標（§21.3 の「リテラル」）は作り終えたときに 1 回だけ要約することだが、VM の `OpCode::DictInsert`（`src/vm.rs`）は値を入れるたびに backing の深度の要約を更新し（`Value::index_set_tracked_uncharged_settle`、`src/value.rs`）、重複した key で最も深い値を浅い値に上書きすると全 entry の保存済み深度を読み直す（fuel は課金しない）。リテラルをループで評価すると、読み直しの時間が fuel に比例しない。tree（`src/eval.rs` の `Expr::Dict`）は最後に 1 回だけ要約するので読み直さない。fix スライス fix-vm-dict-literal-depth-settle で直す（issue #374） | §21.3 | fix-value-nesting-depth-limit |
 | 未実装範囲: VM dispatch の分割。`src/vm.rs` の `Vm::dispatch` は今も 1 つの match で、カテゴリ別の private handler に分けていない | §14.1 | —（未着手） |
 | 未実装範囲: tree `exec_stmt` の分割。`src/eval.rs` の `exec_stmt` は今も Stmt の各種を 1 つの関数で扱い、private helper に分けていない | §14.2 | —（未着手） |
@@ -108,6 +108,7 @@ message内の型名は `Int`、`Float`、`Str`、`Bool`、`Null`、`List`、`Dic
 | `let` / 関数値 / class値のID割当不能 | `internal` | `内部エラー: {id_kind} を割り当てできません` |
 | Intの0除算・剰余 | `zero_division` | `ゼロ除算` |
 | 算術演算の対象型不正 | `type` | `演算子 {op} は {left_type} と {right_type} に適用できません` |
+| 単項演算の対象型不正 | `type` | `演算子 {op} は {operand_type} に適用できません` |
 | 大小比較の対象型不正 | `type` | `比較演算子 {op} は {left_type} と {right_type} に適用できません` |
 | List indexがIntでない | `type` | `List のインデックスは Int である必要があります: {actual_type}` |
 | Str indexがIntでない | `type` | `Str のインデックスは Int である必要があります: {actual_type}` |
@@ -152,6 +153,7 @@ message内の型名は `Int`、`Float`、`Str`、`Bool`、`Null`、`List`、`Dic
 | filesystem capability拒否 | `sandbox` | `ファイルシステム操作が許可されていません` |
 | filesystem pathの形式不正（safe profileの絶対パス・`.`・`..` など。capabilityの検査より先） | `argument` | `ファイルパスの形式が不正です` |
 | host function capability拒否 | `capability` | `host function の実行が許可されていません: {name}` |
+| 登録host functionのarity不一致 | `argument` | `{name} の引数個数が契約と一致しません: 実際 {actual}` |
 | host adapter失敗 | `host` | `host function の実行に失敗しました: {name} ({category})` |
 | 文字列からFloatへ変換不能 | `conversion` | `to_float で Float に変換できません: 数値として解釈できません` |
 | 値のネスト深度上限（§21.3） | `overflow` | `値のネストが深すぎます (上限: 256)` |
@@ -182,6 +184,10 @@ message内の型名は `Int`、`Float`、`Str`、`Bool`、`Null`、`List`、`Dic
 scheduler の handle 経路（alpha `Engine`）の link 失敗の写像は、PR #480 の Q1=A（判断役が選択（PR #480））で次のとおり決めた。import先のparse失敗（`LinkError::InvalidModule`）は上の「import先のparse失敗」のテンプレート（`{module}` は論理 ID）で、parse error の詳細（先頭の診断の行番号とメッセージ）を cause として message の末尾に保持する（REV-020）。link 時の予算超過（`LinkError::BudgetExceeded`）は import の error にせず、alpha の慣例どおり budget 系の error にして超過した resource を保つ。理由: 同じ import の失敗が入口によって違う診断にならないようにする（[マニフェスト](manifesto.md) 原則 5）、停止理由を観測できるようにする（原則 6・7）、写像を spec とテスト（`tests/scheduler_api.rs`）に固定する（原則 9）。採らなかった案: parse の cause を落としたまま逸脱として載せるだけにする案（原則 5 に反しうる）、alpha の公開 `ExecutionOutcome` に構造化した link 失敗の変種を足す案（[実行予算・協調実行仕様](execution-control.md) §1.1 に反しうる。E10 の仕事）。PR #480 の Q2=A（判断役が選択（PR #480））で、残りも次のとおり決めた。解決の失敗（`LinkError::Resolve`）は `import に失敗しました: モジュールを読み込めません: {code}`（`IMPORT_UNREADABLE`）。`{code}` は host が作る検証済みの `HostErrorCode`（先頭が ASCII 小文字、以降 `[a-z0-9_.-]`、64 byte 以内）で、host path・specifier を運ばない。上の「import先が存在しない・読めない」の行の `{module}` は目標のままで、`LinkError::Resolve` が module の ID を持たないため、この経路だけが `{code}` を入れる（逸脱）。循環（`LinkError::Cycle`）は上の新しい行（message_id `import.cycle`、末尾の番号で追加）。深度（`LinkError::DepthExceeded`）は今の文言 `import に失敗しました: import のネストが深すぎます (上限: {limit})`（`import.depth`）を、この経路の写像として記録する。理由: 既存の文言と ID を使い、新しい tag は循環の 1 つだけにして、tag と文言を 1:1 に保つ（原則 5・9）、循環を解決失敗と別の ID で区別できる（原則 6・7）。採らなかった案: embedding の公開 `LinkError::Resolve` に module の ID を持たせる案（公開型の変更で範囲外。原則 5・8 に反しうる）、今の文言のまま逸脱として載せる案（`IMPORT_UNREADABLE` が 2 つの文言になり 1:1 に反する。原則 5・9）。link の `Cycle` と言語仕様「循環 import」の食い違い（capability-model §18）は、ここでは決めていない。
 
 「stdout書込失敗」の行は、loop:drift #487 の D-145 を受けて、`io`（`標準出力への書き込みに失敗しました`）から実装の `host` に書き直した（Q1=A、判断役が選択（issue #487））。理由: `print` は Stdout adapter を通る adapter-backed builtin で、[Capability Model仕様](capability-model.md) §4 と同じ表の「host adapter失敗」の行が adapter の失敗を `host` とするので、stdout だけ `io` にすると規則が 2 つに割れる（[マニフェスト](manifesto.md) 原則 5）。実装は tree・`--vm` とも `host` で、`tests/integration.rs` が固定している（原則 9）。採らなかった案B（実装を `io` に戻す）は capability-model §4 の規則を割るため採らない（原則 5・8）。「`exit` の引数が2個以上」の行は、同じ issue の D-147 を受けて実装（message_id `argument.exit_arity`）に合わせて足した（機械的なずれ。§10.1 の `exit` の記述も合わせた）。同じ issue の D-144 で、上に挙げた link の `Cycle` と言語仕様「循環 import」の食い違いは、言語仕様を link 時の拒否に合わせる案（Q1=A）で決まった（[言語仕様](language-spec.md)「循環 import」）。
+
+「単項演算の対象型不正」の行は、loop:drift #503 の D-150 を受けて実装（`TsumugiError::unary_type`、message_id `type.unary`）と[言語仕様](language-spec.md)の canonical 表に合わせて足した（機械的なずれ。tree・`--vm` とも同じ文言）。
+
+「登録host functionのarity不一致」の行は、loop:drift #503 の D-152 を受けて、今の実装（`TsumugiError::host_function_arity`、kind `argument`、message_id `argument.host_function_arity`）を記録して足した（Q1=A、判断役が選択（issue #503））。理由: 下の段落のとおりこの表は言語core runtime error constructorの全inventoryで、新しいcore constructorは既存行へ対応付けるか新しい行を足すと定めている。`host_function_arity` は独自の message_id を持つcore constructorなので、行が無いのは文書側の欠けだった（[マニフェスト](manifesto.md) 原則5の tag と文言の 1:1、原則9）。kind `argument`・catch 可能は [Capability Model仕様](capability-model.md) §11.2 規則1（不一致はcatch可能な通常argument error）と一致し、挙動は spec の既存の決定の中にある。同じ表の「`exit` の引数が2個以上」の行（#487 D-147）が、builtin arity の共通の文言でない専用の文言を実装に合わせて足した前例で、形がそろう。実装と公開 message を変えず変更が最小で（原則8）、文言を固定するテスト（`tests/host_function_arity_error.rs`）を足して検証できるようにした（原則9）。期待個数を出さないのは、host の descriptor（`Exact`/`Range`）を公開 message に出さないためである。採らなかった案B（builtin arity の共通の文言 `期待 {expected}, 実際 {actual}` に実装をそろえる `fix` スライスを足す）は、その文言が期待個数を 1 つの値とする前提で `Arity::Range` にそのまま入らず、文言の種類を減らす利点が Range では成り立たないうえ、観測できる message の変更と `fix` スライスが要るのに得られる保証が無い（kind・catch 可否・拒否は A でも同じ）。host の descriptor を公開 message に出す向きを求める決定も spec に無いため採らない。この行は文言と kind の記録で、§3.7 の検査順（symbol/arity → capability）と実装（capability → arity）の差には触れない（その差は [Capability Model仕様](capability-model.md) の逸脱一覧の §11.2 の行、loop:drift #420 D-107 にある）。
 
 deadline超過とcancellationは canonical error ではなく script から見えない terminal なので（§3.3）、この表に行を持たない。
 
