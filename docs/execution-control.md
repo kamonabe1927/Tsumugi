@@ -3157,9 +3157,10 @@ c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR
     決まるもの（`range` / `keys` / `values` / `slice` / `reverse`）は `dispatch` の前に、`split` は区切りの走査
     （UTF-8 の scan で b の範囲）の後・結果の List を作る前に払う。Str の `slice` / `reverse` は要素でなく UTF-8 の
     copy なので b の範囲。
-  - COW の複製: `Value::detach_list` / `detach_dict`（`src/value.rs`）が共有中の backing を複製するとき、複製する
-    要素（entry）数を複製の前に 1 回で払う（`push`・`pop`・index 代入が共有中の値を書き換えるとき）。共有していない
-    値は複製しないので 0。List / Dict の深度の読み直し（§4.1、版 `1` から）は今の位置と値のまま、その後に複製を払う。
+  - COW の複製: `Value::detach_list` / `detach_dict`（`src/value.rs`）が backing を複製するときは常に、複製する
+    要素（entry）数を複製の前に 1 回で払う（`push`・`pop`・index 代入が値を書き換えるとき。共有中の backing と、
+    一意所有でも untracked（`id == 0`）の backing の両方。判断 Q3 = A）。複製しない値（一意所有かつ tracked で、
+    in place で書き換える）は 0。List / Dict の深度の読み直し（§4.1、版 `1` から）は今の位置と値のまま、その後に複製を払う。
   - `for` の Dict・Str の反復列の生成（`Value::new_iter_str_list`）: 作る要素数を、要素数の検査の後・backing の確保の前に
     1 回で払う。List の反復列は共有するので 0（fix-for-iter-snapshot-charge）。
   - 版: `fuel_accounting_revision` を 2 → 3 にし（受理する版を `3` だけにする）、`BudgetConfig::standard` を `3` に
@@ -3180,7 +3181,9 @@ c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR
   - **FBCa-AT-02**: `range` / `keys` / `values` / List の `slice` / List の `reverse` / `split` で、結果の要素数だけが k 違う
     2 本の N の差が k で、両 engine で一致する（`tests/differential.rs`）。
   - **FBCa-AT-03**: 共有中の List / Dict への `push`・`pop`・index 代入と、Dict・Str の `for` で、複製・生成する要素数
-    だけが k 違う 2 本の N の差が k で、共有していない値では差が 0 になり、両 engine で一致する。
+    だけが k 違う 2 本の N の差が k で、複製しない値（一意所有かつ tracked）では差が 0 になり、両 engine で一致する。
+    `range` の結果・List / Dict リテラルなどへの最初の `push` も両 engine の N で比べ、tree と VM で複製の有無
+    （`id == 0` かどうか）が揃っていることを確かめる。揃わなければ実装を止めて報告する（判断 Q3 = A）。
   - **FBCa-AT-04**: FBCa-AT-01〜03 の各 script で N は両 engine とも成功、N − 1 は両 engine とも fuel の上限で失敗し、
     stdout・stderr（line・trace を含む）・exit code が一致する。`max_collection_elements` と fuel の両方を超える
     `range` は collection の上限の error になる（検査の順）。
@@ -3204,10 +3207,18 @@ c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR
   `FuelSchedule` から取り、既存の直接呼びは変えない（値も位置も同じ）。
 - `dispatch`（`src/builtin_core.rs`）は budget を受け取らない。要素数の課金は tree（`src/builtin.rs` の
   `apply_pure_core_builtin`）と VM（`src/vm.rs` の `exec_builtin`）の境界で、同じ共有 helper が引数から数えた n を払う。
+- `detach_*` は `id.0 != 0 && strong == 1 && weak == 0` のときだけ in place で書き換え、それ以外（共有中、または
+  untracked の `id == 0`）は複製する。builtin の結果は tree（`src/builtin.rs`）・VM（`src/vm.rs` の `exec_builtin`）とも
+  `BudgetLedger::track_result`（`src/budget.rs`）で tracked に包み直され、VM の List / Dict リテラルの定数
+  （`src/compiler.rs` の `Tracked::constant`）も `LoadConst` で `track_result` を通り、tree のリテラルは `new_list` で
+  初めから tracked である。したがって読んだ範囲では、`range` / `keys` / `split` の結果やリテラルを一意所有のまま
+  書き換えても `id == 0` のまま `detach_*` に届かず、複製は 0 になる見込みである（判断 Q3 の判断役のコメントで確かめ、
+  設計役も main 87166f4 で読んで確かめた事実）。`id == 0` の backing が書き換えに届く経路が残っていれば、そこでも
+  複製の要素数を払う。課金点は `detach_*` の複製の枝 1 か所で、同じ枝の §5.2 COW の heap（`Tracked::new`）と揃える。
 - 式 frame の段階実行（e4）の `map` / `filter` / `each` は yield を跨ぐので、要素の課金は「次の要素を callback へ渡す」
   位置で 1 回だけ行い、resume で同じ要素を 2 回課金しない。
 
-**判断の記録**（設計 PR #501 の判断の候補。判断役が選択（PR #501）、Q1・Q2=A）:
+**判断の記録**（設計 PR #501 の判断の候補。判断役が選択（PR #501）、Q1〜Q3=A）:
 
 - **Q1 = A（仕組みごとに a → b → c の直列に割り、各 sub-slice が課金点を足す同じ PR で版を 1 つ上げ、既定 `total_fuel` を
   測り直す）**: §3.1 は「課金表を変える変更（charge point の追加・課金値の変更）はこの値を 1 つ上げ」とし、各 PR がそのとおりに
@@ -3234,6 +3245,20 @@ c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR
   版 `3` を固定することになり、マニフェストに反しうる（原則 3）。C（走査と生成を別に数える）は、同じ要素の課金が経路で 1〜2 と
   変わり、`range`（生成だけ）との釣り合いの説明が増える（原則 5・8）。callback の invocation 5 が要素ごとに既にかかるので、
   結果への追加を別に数えなくても仕事は fuel に現れる。
+
+- **Q3 = A（COW の複製は、複製が起きるときは常に複製する要素（entry）数を複製の前に払う。`id == 0` の backing も含む）**:
+  判断役が選択（PR #501）。レビュー（982adf5）の指摘 1 で、`detach_*` が共有中だけでなく一意所有の untracked（`id == 0`）の
+  backing も最初の書き換えで複製するのに、小節が「共有していない値は複製しないので 0」としていた食い違いから作った候補。
+  §4.1 の「collection element を走査・copy・生成 1 / element」は copy を誰の backing かで分けておらず、起きた複製を例外なく
+  fuel に出せる（原則 3）。課金点は `detach_list` / `detach_dict` の複製の枝 1 か所で済み、同じ枝が §5.2 COW の heap
+  （`Tracked::new`）を既に課金しているので、fuel と heap が「複製した」という同じ事実に揃う（原則 8）。tree と VM で
+  `id == 0` かどうかが食い違う場合は FBCa-AT-03 の N の比較で見つかり、揃わなければ実装を止める条件を付けたので、engine 差を
+  版 `3` に固定しない（原則 5・9、優先順位の表「一貫した意味論」「再現可能な検証」）。builtin の結果とリテラルは
+  `track_result` を通るため、読んだ範囲では一意所有の書き換えで `id == 0` の複製は起きない見込みで（上の設計時の注記）、
+  A の規則と FBCa-AT-03 の確かめはこの事実でもそのまま成り立つ。採らなかった案: B（共有中の複製だけを払い、一意所有の
+  untracked の複製は 0）は、複製という同じ仕事を所有の状態で課金したりしなかったりする分岐が `detach_*` に増え、heap は課金
+  するのに fuel は 0 という食い違いが残る（原則 8）。`id == 0` で要素を持つ backing が書き換えに届く経路があれば、要素数に
+  比例する複製が fuel に現れない（原則 3 に反しうる）。
 
 ### fix-contains-budgeted-equality 実装スライス（`contains` の等価判定を予算付き比較へ）
 
