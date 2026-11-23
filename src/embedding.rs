@@ -1890,12 +1890,6 @@ pub enum ContextError {
 pub struct ExecutionContext {
     engine_id: EngineId,
     evaluator: Evaluator,
-    /// REPL run 入口（`run_for_repl`）が、この context で既に budget を install 済みか（E7）。
-    ///
-    /// `false`（初回 submission）なら通常の `reset_budget`（config 再構築）で install し、`true`
-    /// （2 回目以降）なら `rearm_budget_for_repl`（使用量を 0 から数え直し・live heap は持ち越し）で張り直す。
-    /// 通常の `run`（file/stdin one-shot）はこの field を参照しない。
-    repl_budget_installed: bool,
     /// InternalFailure で poison されたか（第10節 規則4）。true の間は実行・状態操作を拒否する。
     poisoned: bool,
     /// 実行中フラグ（第10節 規則: 同 context への再入は許さない）。
@@ -1924,7 +1918,6 @@ impl ExecutionContext {
         Self {
             engine_id: engine.id(),
             evaluator,
-            repl_budget_installed: false,
             poisoned: false,
             running: false,
             #[cfg(test)]
@@ -2073,7 +2066,7 @@ impl Engine {
         // [`Self::run_audited`] を使う（`ExecutionOutcome` は `AuditFailure` を表現できないため、
         // 既存の `InternalFailure` には畳まず別 surface で返す）。
         if self.config.audit_sink.is_none() {
-            let outcome = self.run_guarded(linked, context, request, false);
+            let outcome = self.run_guarded(linked, context, request);
             context.running = false;
             if matches!(outcome, ExecutionOutcome::InternalFailure { .. }) {
                 context.poisoned = true;
@@ -2141,8 +2134,8 @@ impl Engine {
         }
         context.running = true;
         // REPL は監査 sink を使わない（engine builder に sink を設定しない）ため、常に no-sink の
-        // guarded 経路を通す。`repl=true` で budget ライフサイクルだけ REPL 用に切り替える。
-        let outcome = self.run_guarded(linked, context, request, true);
+        // guarded 経路を通す。budget のライフサイクルは `Engine::run` と同じ（台帳を持ち越す）。
+        let outcome = self.run_guarded(linked, context, request);
         context.running = false;
         if matches!(outcome, ExecutionOutcome::InternalFailure { .. }) {
             context.poisoned = true;
@@ -2189,7 +2182,7 @@ impl Engine {
         }
         context.running = true;
         let audited = if self.config.audit_sink.is_none() {
-            AuditedOutcome::Outcome(Box::new(self.run_guarded(linked, context, request, false)))
+            AuditedOutcome::Outcome(Box::new(self.run_guarded(linked, context, request)))
         } else {
             self.run_audited_inner(
                 linked,
@@ -2256,10 +2249,9 @@ impl Engine {
         linked: &LinkedScript,
         context: &mut ExecutionContext,
         request: ExecutionRequest,
-        repl: bool,
     ) -> ExecutionOutcome {
         match catch_host_unwind(AssertUnwindSafe(|| {
-            self.run_inner(linked, context, request, repl)
+            self.run_inner(linked, context, request)
         })) {
             Ok(outcome) => outcome,
             Err(fault_id) => ExecutionOutcome::InternalFailure {
@@ -2303,7 +2295,7 @@ impl Engine {
             // 呼び出し規約違反（sink 未設定で呼ばれた）。従来経路へフォールバック。
             None => {
                 return AuditedOutcome::Outcome(Box::new(
-                    self.run_guarded(linked, context, request, false),
+                    self.run_guarded(linked, context, request),
                 ));
             }
         };
@@ -2582,19 +2574,19 @@ impl Engine {
         delivery: &mut AuditDelivery,
     ) -> AuditDrive {
         // budget/capability/registry install（pre-cancel は命令0 の Cancelled terminal）。
-        let slice_fuel = match self.install_execution_state(context, request, false) {
+        let slice_fuel = match self.install_execution_state(context, request) {
             Ok(slice_fuel) => slice_fuel,
             // pre-cancel: script work 0。評価器 buffer は空なので flush 不要。Terminal を出す。
             Err(pre_cancel) => return AuditDrive::Terminal(pre_cancel),
         };
         // audit drain queue の per-execution 上限を張る（Phase 6 B-2、§10.2）。install
-        // （reset_budget）が計器を外した後に、この実行の envelope 固定部と共に設定する。
+        // （据え直し）が計器を外した後に、この実行の envelope 固定部と共に設定する。
         context.evaluator.set_audit_queue(
             self.audit_budget.max_pending_bytes,
             crate::audit::estimate_envelope_overhead_bytes(&delivery.language_revision),
         );
         // Phase 6 R-1: host-call payload 構築へ注入 redaction policy を渡す（§9.1 / R-AT-04）。
-        // set_audit_queue と同じく install（reset_budget）後に設定する。
+        // set_audit_queue と同じく install（据え直し）後に設定する。
         context
             .evaluator
             .set_redaction_policy(self.redaction_policy.clone());
@@ -2687,7 +2679,6 @@ impl Engine {
         linked: &LinkedScript,
         context: &mut ExecutionContext,
         request: ExecutionRequest,
-        repl: bool,
     ) -> ExecutionOutcome {
         // 実行前の整合検証と Program 再構築（案 A）。失敗は precondition 由来の InternalFailure。
         // file/stdin の run も REPL も、link が確かめた graph から import を展開する（capability-model §10）。
@@ -2703,7 +2694,7 @@ impl Engine {
             panic!("injected run-boundary panic (test only)");
         }
 
-        self.execute_program(context, &program, root_source_bytes, &graph, request, repl)
+        self.execute_program(context, &program, root_source_bytes, &graph, request)
     }
 
     /// 実行前の engine/context 整合検証と、保持 source からの Program 再構築（案 A）。
@@ -2778,11 +2769,10 @@ impl Engine {
         root_source_bytes: u64,
         graph: &crate::module::GraphModules,
         request: ExecutionRequest,
-        repl: bool,
     ) -> ExecutionOutcome {
         // budget/capability/registry を install し slice_fuel を決める（pre-cancel は命令0 の
         // Cancelled を返す）。no-sink 経路はここから従来どおり同期 loop で terminal まで回す。
-        let slice_fuel = match self.install_execution_state(context, request, repl) {
+        let slice_fuel = match self.install_execution_state(context, request) {
             Ok(slice_fuel) => slice_fuel,
             Err(pre_cancel) => return *pre_cancel,
         };
@@ -2806,37 +2796,26 @@ impl Engine {
         &self,
         context: &mut ExecutionContext,
         request: ExecutionRequest,
-        repl: bool,
     ) -> Result<u64, Box<ExecutionOutcome>> {
         // request は有限 budget・deadline clock・cancellation token を必須所有する
         // （REV-015 最終形移行 Slice 2）。実行直前に 3 つとも評価器へ install する。
         // domain / accounting revision / deadline(>now) は ExecutionRequest::new が構築時に
         // 検証済みなので、ここで InternalFailure へ落ちる domain-mismatch 経路は存在しない。
-        // reset_budget は request が所有する token を ledger へ install（継承ではなく置換）する
+        // `rearm_budget_for_repl` は request が所有する token を ledger へ install（継承ではなく置換）する
         // ため、host が run 前に `.cancellation(token.clone())` で載せた token は同一 Arc を共有し、
-        // reset をまたいでも実行中に cancel が観測される（finding 1）。pre-run cancel 判定より前に
+        // 据え直しをまたいでも実行中に cancel が観測される（finding 1）。pre-run cancel 判定より前に
         // 置くことで、pre-cancel で返す usage も「この request の budget」に対するものになる。
         //
-        // REPL 経路（`repl=true`）だけ budget ライフサイクルが異なる: 初回 submission は通常どおり
-        // reset_budget で install し、2 回目以降は台帳を作り直さず、使用量を 0 から数え直して
-        // live heap だけ持ち越す（`rearm_budget_for_repl`）。各 submission はその request が所有する
-        // budget で実行する（embedding-api §12「REPLのbudget」、`run_for_repl` の doc）。
-        if repl && context.repl_budget_installed {
-            context.evaluator.rearm_budget_for_repl(
-                request.budget,
-                request.clock,
-                request.cancellation.clone(),
-            );
-        } else {
-            context.evaluator.reset_budget(
-                request.budget,
-                request.clock,
-                request.cancellation.clone(),
-            );
-            if repl {
-                context.repl_budget_installed = true;
-            }
-        }
+        // heap 台帳は作り直さず持ち越す（fix-link-context-baseline-charge、execution-control §5.2・
+        // §14）。前の execution の artifact token を先に release し、使用量と peaks を 0 から数え直し、
+        // context に残る値の live heap は新 execution の baseline としてそのまま残る（同じ台帳に 1 回だけ
+        // 課金済みなので二重に数えない）。baseline が上限を超えれば Link の最初の heap 課金で
+        // `BudgetExceeded(HeapBytes)` になり 1 文も実行しない。REPL の 2 回目以降の submission と同じ操作。
+        context.evaluator.rearm_budget_for_repl(
+            request.budget,
+            request.clock,
+            request.cancellation.clone(),
+        );
 
         // pre-run cancel（EMB-AT-12）: install 済み token が最初の poll より前に cancel 済みなら、
         // script 命令を1つも実行せずに Cancelled terminal を返す（"pre-cancel は命令0"）。
@@ -2845,8 +2824,8 @@ impl Engine {
         // install した token の cancel 状態を見る。監査 wiring では Started 発行後にこの判定へ
         // 到達するので、pre-cancel も Started+Terminal(Cancelled) を持つ（§8）。
         if request.cancellation.is_cancelled() {
-            // 命令0なので usage は空（reset_budget 直後・baseline 課金前。committed/reserved/live
-            // とも 0）。finding 3。
+            // 命令0なので usage の committed/reserved は 0。live は context に残る値の baseline
+            // （新しい context なら 0）。finding 3。
             return Err(Box::new(ExecutionOutcome::Cancelled {
                 usage: context.evaluator.budget_usage(),
             }));
@@ -7390,5 +7369,325 @@ mod rsb_tests {
             second.live_heap_bytes
         );
         assert!(second.peak_heap_bytes < first.peak_heap_bytes);
+    }
+}
+
+/// fix-link-context-baseline-charge（LCB-AT-01〜04、tree の facade）: `Engine::run`・`run_audited` は heap 台帳を
+/// 作り直さず持ち越し、context に残る値を新 execution の baseline として判定・usage に含める。
+#[cfg(test)]
+mod lcb_tests {
+    use super::*;
+    use crate::budget::{BudgetConfig, BudgetResource, FakeClock, MonotonicClock, heap_size};
+    use crate::capability::CapabilitySet;
+    use std::sync::Arc;
+
+    const BIG: &str = "let big = range(0, 20000)\n";
+
+    /// 全 test で 1 つの clock を共有する（budget の deadline の domain を request と揃える）。
+    fn loose() -> (BudgetConfig, Arc<dyn MonotonicClock>) {
+        thread_local! {
+            static CLOCK: Arc<dyn MonotonicClock> = Arc::new(FakeClock::new());
+        }
+        let clock = CLOCK.with(Arc::clone);
+        let budget = BudgetConfig::standard(clock.as_ref()).expect("budget");
+        (budget, clock)
+    }
+
+    fn with_live(mut b: BudgetConfig, live: u64) -> BudgetConfig {
+        b.max_live_heap_bytes = live;
+        b
+    }
+
+    /// stdout を capture して 1 回 run する。`audited` なら `run_audited` を使い sink の Terminal も返す。
+    fn go(
+        engine: &Engine,
+        ctx: &mut ExecutionContext,
+        text: &str,
+        budget: BudgetConfig,
+        audited: bool,
+    ) -> (ExecutionOutcome, String) {
+        let (_, clock) = loose();
+        let script = engine
+            .compile(
+                Source::new(SourceId::new("lcb").expect("id"), text),
+                &CompileOptions {
+                    retain_source: true,
+                },
+            )
+            .expect("compile");
+        let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let caps = || {
+            CapabilitySet::builder()
+                .stdout(Arc::new(super::tests::CapturingOutput {
+                    policy_id: std::num::NonZeroU128::new(11).expect("non-zero"),
+                    sink: Arc::clone(&sink),
+                }))
+                .expect("grant stdout")
+                .build()
+        };
+        let link_request = LinkRequest::new(
+            ExecutionId::new(std::num::NonZeroU128::new(1).expect("1")),
+            caps(),
+            budget,
+        );
+        let linked = engine.link(&script, link_request).expect("link");
+        let request = ExecutionRequest::new(budget, clock)
+            .expect("req")
+            .with_capabilities(caps())
+            .with_execution_id(ExecutionId::new(std::num::NonZeroU128::new(2).expect("2")));
+        let outcome = if audited {
+            match engine.run_audited(&linked, ctx, request) {
+                AuditedOutcome::Outcome(o) => *o,
+                other => panic!("監査成立を期待: {other:?}"),
+            }
+        } else {
+            engine.run(&linked, ctx, request)
+        };
+        let out = String::from_utf8(sink.lock().unwrap().clone()).expect("utf8");
+        (outcome, out)
+    }
+
+    fn usage_of(outcome: &ExecutionOutcome) -> BudgetUsage {
+        match outcome {
+            ExecutionOutcome::Completed { usage }
+            | ExecutionOutcome::BudgetExceeded { usage, .. }
+            | ExecutionOutcome::RuntimeError { usage, .. } => *usage,
+            other => panic!("usage を持つ outcome を期待: {other:?}"),
+        }
+    }
+
+    fn completed(o: &ExecutionOutcome) -> BudgetUsage {
+        assert!(matches!(o, ExecutionOutcome::Completed { .. }), "{o:?}");
+        usage_of(o)
+    }
+
+    fn engine() -> Engine {
+        Engine::builder().build().expect("engine")
+    }
+
+    /// `big` を残した context を作る（1 回目）。
+    fn ctx_with(engine: &Engine, first: &str) -> ExecutionContext {
+        let mut ctx = ExecutionContext::new(engine);
+        let (o, _) = go(engine, &mut ctx, first, loose().0, false);
+        completed(&o);
+        ctx
+    }
+
+    /// LCB-AT-01: baseline が上限を超えれば 1 文も実行せず `BudgetExceeded(HeapBytes)`。
+    #[test]
+    fn lcb_at_01_baseline_over_limit_runs_nothing() {
+        let engine = engine();
+        let mut ctx = ctx_with(&engine, BIG);
+        let (loose, _) = loose();
+        let (o, out) = go(
+            &engine,
+            &mut ctx,
+            "print(len(big))\n",
+            with_live(loose, 4096),
+            false,
+        );
+        assert!(
+            matches!(o, ExecutionOutcome::BudgetExceeded { .. }),
+            "{o:?}"
+        );
+        assert_eq!(
+            ctx.evaluator.take_pending_budget_resource(),
+            Some(BudgetResource::HeapBytes)
+        );
+        assert_eq!(out, "", "1 文も実行しない");
+        assert!(!ctx.is_poisoned());
+        let (o, out) = go(&engine, &mut ctx, "print(len(big))\n", loose, false);
+        completed(&o);
+        assert_eq!(out, "20000\n");
+    }
+
+    /// LCB-AT-01（`run_audited`）: 同じ terminal になり、Terminal event の `context_committed` は false。
+    #[test]
+    fn lcb_at_01_audited_baseline_over_limit() {
+        let sink = Arc::new(crate::audit::InMemoryAuditSink::new());
+        let engine = Engine::builder()
+            .audit_sink(sink.clone() as Arc<dyn crate::audit::AuditSink>)
+            .build()
+            .expect("engine");
+        let mut ctx = ExecutionContext::new(&engine);
+        let (loose, _) = loose();
+        let (o, _) = go(&engine, &mut ctx, BIG, loose, true);
+        completed(&o);
+        let (o, out) = go(
+            &engine,
+            &mut ctx,
+            "print(len(big))\n",
+            with_live(loose, 4096),
+            true,
+        );
+        assert!(
+            matches!(o, ExecutionOutcome::BudgetExceeded { .. }),
+            "{o:?}"
+        );
+        assert_eq!(out, "");
+        let last = sink.snapshot().last().expect("events").event.clone();
+        match last {
+            crate::audit::AuditEvent::Terminal {
+                outcome,
+                context_committed,
+                ..
+            } => {
+                assert_eq!(
+                    outcome,
+                    crate::audit::TerminalOutcome::BudgetExceeded(BudgetResource::HeapBytes)
+                );
+                assert!(!context_committed);
+            }
+            other => panic!("期待 Terminal, 実際 {other:?}"),
+        }
+        let (o, out) = go(&engine, &mut ctx, "print(len(big))\n", loose, true);
+        completed(&o);
+        assert_eq!(out, "20000\n");
+    }
+
+    /// LCB-AT-01（境界、§15.2）: 上限が Link 直後の live（baseline + AST）ちょうどなら実行し、`-1` なら実行しない。
+    #[test]
+    fn lcb_at_01_boundary_is_baseline_plus_link() {
+        let engine = engine();
+        let (loose, _) = loose();
+        // 何も割り当てない 1 文。終了時の live は Link 直後の live（baseline + AST）と同じ。
+        let src = "len(big)\n";
+        let mut probe = ctx_with(&engine, BIG);
+        let (o, _) = go(&engine, &mut probe, src, loose, false);
+        let linked_live = completed(&o).live_heap_bytes;
+        assert!(linked_live > heap_size::list_body(20000));
+
+        let mut at = ctx_with(&engine, BIG);
+        let (o, _) = go(&engine, &mut at, src, with_live(loose, linked_live), false);
+        completed(&o);
+
+        let mut below = ctx_with(&engine, BIG);
+        let (o, _) = go(
+            &engine,
+            &mut below,
+            src,
+            with_live(loose, linked_live - 1),
+            false,
+        );
+        assert!(
+            matches!(o, ExecutionOutcome::BudgetExceeded { .. }),
+            "{o:?}"
+        );
+        assert_eq!(
+            below.evaluator.take_pending_budget_resource(),
+            Some(BudgetResource::HeapBytes)
+        );
+    }
+
+    /// LCB-AT-02: baseline は usage の live に含まれ、peak は前の execution の最大値を含まず、二重に数えない。
+    #[test]
+    fn lcb_at_02_baseline_is_in_usage_without_double_count() {
+        let engine = engine();
+        let (loose, _) = loose();
+        let mut ctx = ctx_with(
+            &engine,
+            "let big = range(0, 20000)\nlet tmp = range(0, 40000)\ntmp = null\n",
+        );
+        // 1 回目の usage（peak）を別 context で取り直す。
+        let mut first_ctx = ExecutionContext::new(&engine);
+        let (o, _) = go(
+            &engine,
+            &mut first_ctx,
+            "let big = range(0, 20000)\nlet tmp = range(0, 40000)\ntmp = null\n",
+            loose,
+            false,
+        );
+        let first = completed(&o);
+
+        let src = "let n = 1\n";
+        let (o, _) = go(&engine, &mut ctx, src, loose, false);
+        let second = completed(&o);
+        let list = heap_size::list_body(20000);
+        assert!(second.live_heap_bytes >= list, "{}", second.live_heap_bytes);
+        assert!(
+            second.live_heap_bytes < 2 * list,
+            "二重に数えない: {}",
+            second.live_heap_bytes
+        );
+        assert!(
+            second.peak_heap_bytes < first.peak_heap_bytes,
+            "peak は前の execution の最大値を含まない: {} vs {}",
+            second.peak_heap_bytes,
+            first.peak_heap_bytes
+        );
+
+        let mut fresh = ExecutionContext::new(&engine);
+        let (o, _) = go(&engine, &mut fresh, src, loose, false);
+        let alone = completed(&o);
+        assert_eq!(second.committed, alone.committed);
+        assert_eq!(second.reserved, alone.reserved);
+    }
+
+    /// LCB-AT-03: 手放した値は commit の境界で同じ台帳から release され、次の baseline から外れる。
+    #[test]
+    fn lcb_at_03_released_value_leaves_baseline_after_commit() {
+        let engine = engine();
+        let (loose, _) = loose();
+        let list = heap_size::list_body(20000);
+        assert_eq!(list, 640_024);
+
+        let mut dropped = ctx_with(&engine, BIG);
+        let (o, _) = go(&engine, &mut dropped, "big = null\n", loose, false);
+        completed(&o);
+        let mut kept = ctx_with(&engine, BIG);
+        let (o, _) = go(&engine, &mut kept, "big = big\n", loose, false);
+        completed(&o);
+
+        let (o, _) = go(&engine, &mut dropped, "let k = 1\n", loose, false);
+        let live_dropped = completed(&o).live_heap_bytes;
+        let (o, _) = go(&engine, &mut kept, "let k = 1\n", loose, false);
+        let live_kept = completed(&o).live_heap_bytes;
+        assert_eq!(live_kept - live_dropped, list);
+
+        let tight = with_live(loose, list + 4096);
+        let src = "let other = range(0, 20000)\n";
+        let (o, _) = go(&engine, &mut dropped, src, tight, false);
+        completed(&o);
+        let (o, _) = go(&engine, &mut kept, src, tight, false);
+        assert!(
+            matches!(o, ExecutionOutcome::BudgetExceeded { .. }),
+            "{o:?}"
+        );
+        assert_eq!(
+            kept.evaluator.take_pending_budget_resource(),
+            Some(BudgetResource::HeapBytes)
+        );
+    }
+
+    /// LCB-AT-04: 失敗した execution の rollback した値と AST は次の baseline に残らず、closure の retained code は含まれる。
+    #[test]
+    fn lcb_at_04_baseline_after_failed_execution() {
+        let engine = engine();
+        let (loose, _) = loose();
+        let probe = "let k = 1\n";
+
+        let mut direct = ctx_with(&engine, "let keep = 1\n");
+        let (o, _) = go(&engine, &mut direct, probe, loose, false);
+        let live_direct = completed(&o).live_heap_bytes;
+
+        let mut failed = ctx_with(&engine, "let keep = 1\n");
+        let (o, _) = go(
+            &engine,
+            &mut failed,
+            "let tmp = range(0, 20000)\nlet boom = undefined_name\n",
+            loose,
+            false,
+        );
+        assert!(matches!(o, ExecutionOutcome::RuntimeError { .. }), "{o:?}");
+        let (o, _) = go(&engine, &mut failed, probe, loose, false);
+        assert_eq!(completed(&o).live_heap_bytes, live_direct);
+
+        let mut closure = ctx_with(&engine, "fn inc(x)\n  return x + 1\nend\n");
+        let (o, _) = go(&engine, &mut closure, probe, loose, false);
+        let live_closure = completed(&o).live_heap_bytes;
+        assert!(
+            live_closure > live_direct,
+            "closure の分を含む: {live_closure} vs {live_direct}"
+        );
     }
 }

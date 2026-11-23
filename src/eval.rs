@@ -831,7 +831,9 @@ impl Evaluator {
     }
 
     /// この実行に使う有限 `BudgetConfig`・deadline clock・cancellation token を据え直す
-    /// （REV-015 最終形移行、Slice 2）。
+    /// （REV-015 最終形移行、Slice 2）。heap 台帳ごと**作り直す**ので context に残る値の live は
+    /// baseline にならない。facade の `Engine::run` は使わず（fix-link-context-baseline-charge）、
+    /// [`Self::rearm_budget_for_repl`] で台帳を持ち越す。この入口は評価器を単体で使う経路が使う。
     ///
     /// 直前の実行の budget 残量・counters を破棄し、新しい config で [`crate::budget::BudgetLedger`]
     /// の中身を作り直す。cancellation token は **request が必須所有するものを install（継承ではなく
@@ -868,12 +870,13 @@ impl Evaluator {
         self.env.set_heap_ledger(self.budget.heap_handle());
     }
 
-    /// REPL の 2 回目以降の submission の開始で budget を据え直す（embedding `run_for_repl`）。
+    /// execution（facade の `Engine::run`・`run_audited`・REPL の submission）の開始で budget を据え直す。
     ///
     /// [`Self::reset_budget`] と違い budget ledger を**作り直さない**。前の submission の artifact
     /// token（`ast_token`・`body_tokens`）を先に release してから、台帳の
     /// [`crate::budget::BudgetLedger::begin_repl_submission`] で使用量を 0 から数え直す
-    /// （embedding-api §12「REPLのbudget」）。context に残る値の live heap は持ち越して baseline とし、
+    /// （embedding-api §12「REPLのbudget」、execution-control §14 fix-link-context-baseline-charge）。
+    /// context に残る値の live heap は持ち越して baseline とし、
     /// peak は live に戻す。request の config・clock・cancellation を submission 用に差し替える。
     ///
     /// 監査系 buffer（host-call / yield）は submission 境界で戻す（前 submission の
