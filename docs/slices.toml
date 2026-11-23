@@ -558,7 +558,7 @@ impl_pr    = 485
 order      = 28
 
 # fuel-bulk-charge は 1 PR に収まらない（触る仕組み 3・受入基準 10 超・src/ 約 900〜1400 行、loop-runbook §14.1）ため
-# fuel-bulk-charge-a / -b / -c に分割した（spec「fuel-bulk-charge の sub-slice 分割」、設計 PR は docs/fuel-bulk-charge の PR。
+# fuel-bulk-charge-a / -b / -c に分割した（spec「fuel-bulk-charge の sub-slice 分割」、設計 PR #501。
 # 割り方と a の課金の規則は判断の候補 Q1・Q2）。元の id は置き換えて残さない。「fuel-bulk-charge が done」は a・b・c がともに done。
 # 各 sub-slice は同じ PR で fuel_accounting_revision を 1 つ上げ、既定 total_fuel を測り直す（a: 2→3、b: 3→4、c: 4→5）。
 # 空きを作るため、audit-strict-cbor-c2・c3・c4 と audit-sink-required を 43・44・45・46 → 45・46・47・48 に付け直した（相対順は変えていない）。
@@ -572,6 +572,7 @@ spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fuel-bulk-charge-a 実装スライス（`map` / `filter` / `each` と要素を作る・複製する操作の per-element fuel、版 2 → 3）" }
 acceptance = ["FBCa-AT-01..05"]
 depends_on = ["F-2c"]
+design_pr  = 501
 order      = 42
 
 # 見積もり: src/ 約 400〜600 行、触る仕組みは budget の byte の課金 1 つ、受入基準は設計で決める（5 以内）。

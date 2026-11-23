@@ -3109,7 +3109,7 @@ F-2 は既定 `total_fuel` の見直しと、課金表の版である `fuel_acco
 
 #### fuel-bulk-charge の sub-slice 分割（fuel-bulk-charge-a / -b / -c）
 
-> 状態: **未実装**（設計のみ。2026-11-23 の設計 PR（`docs/fuel-bulk-charge`）で割り方を書いた。割り方と
+> 状態: **未実装**（設計のみ。2026-11-23 の設計 PR #501 で割り方を書いた。割り方と
 > fuel-bulk-charge-a の課金の規則は判断の候補 Q1・Q2 にしてあり、判断役の選択を本小節の末尾に記録する）。
 > 各 sub-slice の進捗は [`slices.toml`](slices.toml) の `fuel-bulk-charge-a` / `-b` / `-c` を正とする。
 > `slices.toml` の `fuel-bulk-charge` は sub-slice のエントリに置き換えた（元の id は残さない。「fuel-bulk-charge が
