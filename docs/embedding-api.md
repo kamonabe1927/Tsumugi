@@ -908,7 +908,7 @@ loop:drift #352 の D-67 を直す（親 REV-007）。§12 の「REPLのbudget�
 `ExecutionRequest` が所有する有限 budget で実行すると定める（§6、[実行予算・協調実行仕様](execution-control.md) §3・§13）。tree REPL
 （`run_for_repl`）は 2 回目以降の submission で fuel だけを戻し、ほかの使用量を session の累積のまま持ち越す（本書の逸脱一覧の REPL の budget の行）。
 本スライスは §6・§12 の目標の文を変えず、REPL の budget の扱いを目標に合わせる。累積の扱い（§12 が「fix スライスの設計で決める」とした点）と
-VM REPL を含めるかは、判断の候補 Q1・Q2（設計 PR に記載）で判断役が選ぶ。本小節は推奨案（Q1=A・Q2=A）で書いてあり、選ばれた内容に合わせて直す。
+VM REPL を含めるかは、判断役が選択（PR #496）の Q1=A・Q2=A による（下の「決定記録」）。
 
 - **前提（設計時点の main ba9e88a で確かめたこと）**:
   - `Engine::run_for_repl`（`src/embedding.rs`）は `run_guarded(.., repl = true)` を通り、`install_execution_state` は同じ context の 2 回目以降の
@@ -974,6 +974,25 @@ VM REPL を含めるかは、判断の候補 Q1・Q2（設計 PR に記載）で
   呼ぶだけ）で、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。done にする実装 PR で、本書の逸脱一覧の REPL の budget の行を削除し、
   [実行予算・協調実行仕様](execution-control.md) の逸脱一覧の D-136 の行から VM REPL の文を削る（Q2=A のとき）。
 - **依存**: なし。
+- **決定記録**（判断役が選択（PR #496））:
+  - **Q1=A**（使用量〔committed・reserved の全 counter と peaks〕は submission ごとに 0 から数え、heap 台帳は作り直さず live heap を持ち越して baseline とし、
+    peak だけを live に戻す）。理由: [実行予算・協調実行仕様](execution-control.md) §13「budgetの使用量はexecutionごとに新しい`BudgetUsage`で数え」
+    「REPLの各入力は1 executionとし、execution間ではcontextだけを引き継ぐ」と、本書 §6・§12（各 submission の `ExecutionRequest` が有限 budget を所有する）に合う。
+    同 §2 の heap の定義（execution から到達可能な live byte 数）と §5.2（context に残る値は新 execution の baseline live heap で、超えたら 1 文も実行せず
+    `BudgetExceeded(HeapBytes)`）を、context に残る値を上限で判定し続ける形で満たす（[マニフェスト](manifesto.md) 原則 3、優先順位の表「制御可能な最悪時負荷」）。
+    台帳の操作 1 つで済み、別の走査や新しい設定を足さない（原則 8）。採らなかった案 B（facade の `Engine::run` と同じく submission ごとに台帳を作り直す）は、
+    `reset_config_with_token` が台帳ごと作り直すので context に残る tracked 値が新しい台帳に課金されず、execution-control の逸脱一覧の D-137 の行と同じ穴
+    （残した heap が以後の submission の `max_live_heap_bytes` で判定されない）が REPL にも開き、原則 3 に反しうるため採らない。採らなかった案 C
+    （submission ごとの上限に加えて session 累積の上限も持つ）は、原則には反しないが、目標の章（§6・§12・execution-control §13）に無い session budget の設定と
+    API を足すことになり、host は submission ごとに budget を渡し live heap は A でも持ち越して判定されるので、足す重さが上回らない（原則 8）。
+  - **Q2=A**（VM REPL〔`Vm::run_repl_chunk`〕の同じ差も本スライスで直し、tree・VM が同じ `BudgetLedger` の操作を呼ぶ。fix-execution-budget-usage-fresh の
+    範囲は scheduler の handle 経路だけにする）。理由: 原則 5（意味論・エラー・資源消費が backend ごとに変わることを許容しない）と優先順位の表「一貫した意味論」、
+    execution-control §2 不変条件 5（tree と VM で同じ script・入力・budget なら同じ charge 列）、§13（legacy env の上書きを tree/VM の file・stdin・REPL の
+    全経路へ同じく適用）に照らし、同じ入力・同じ上限で tree と VM の REPL の結果が違う期間を作らない。VM の分は小さく（`src/vm.rs` +5〜15 行、受入基準・仕組みの
+    数は変わらない）、CLI の 3 本の test を `for use_vm` の同じ期待値で確かめられる（原則 9）。採らなかった案 B（tree REPL だけを直し、VM REPL は
+    fix-execution-budget-usage-fresh に残す）は、スライスの境界を変えずに済むが、そのスライスが済むまで CLI の REPL の予算超過の観測が engine ごとに分かれ
+    test の期待値も engine 別になる。差は逸脱一覧で追えるのでマニフェストに反するとまでは見ないが、いま揃っている tree・VM の REPL の観測を新たにずらすことになり、
+    原則 5 に照らして A に劣る。
 
 ## 15. 受入基準
 
