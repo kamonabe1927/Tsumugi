@@ -387,7 +387,7 @@ continuation frameの課金対象は、スコープを作るframe（96 + local s
 
 ### 5.2 `Rc`共有と二重計上回避
 
-すべてのheap-owned objectへ単調増加する`AllocationId(u64)`を付け、executionごとに`AllocationLedger`を持つ。
+すべてのheap-owned objectへ単調増加する`AllocationId(u64)`を付け、executionごとに`AllocationLedger`を持つ。同じ`ExecutionContext`の次のexecutionは、前のexecutionの台帳を据え直して使ってよい（使用量と上限は新しいexecutionのものにし、contextに残る値のlive heapだけを引き継ぐ。下の末尾の段落）。
 
 - 同一execution内で同じ`AllocationId`へ複数の`Rc`参照があっても1回だけ課金する。
 - `Rc::clone`、closure capture、変数代入で既存objectを共有するだけなら追加課金しない。
@@ -397,7 +397,12 @@ continuation frameの課金対象は、スコープを作るframe（96 + local s
 - `AllocationId`の発行overflowは`InternalFailure(AllocationIdExhausted)`であり、0へwrapしない。
 - `for`の反復列もこの規則に従う。Listの反復は開始時のbackingを`Rc`で共有して保持し（[次期意味論・実装決定](semantic-decisions.md) §11.2）、要素を複製せず追加課金しない。Dictのkey・Strの文字から反復列を作る場合は新objectなので、作るList bodyと各要素のString body（§5.1）をallocation前に課金し、各要素を§5.3の`string_allocations`・`string_bytes`にも数える（builtinの結果の`String`と同じ）。反復列はloopの終わり（`break`・`return`・errorによる脱出を含む）で最後の参照が消えてreleaseする。tree-walk版とVM版で課金の有無・量・順序とrelease寿命を揃える（issue #358）。
 
-`ExecutionContext`に以前から残る変数・closure・collectionは、新executionを`Linked`へ進めるときに到達graphを反復worklistで走査し、baseline live heapとして課金する。baselineが上限を超える場合はscriptを1文も実行せず`BudgetExceeded(HeapBytes)`となる。再帰走査は使わず、同じ`AllocationId`をvisited setで除外する。
+`ExecutionContext`に以前から残る変数・closure・collectionは、新executionを`Linked`へ進めるときにbaseline live heapとして課金する。baselineとLinkのheap課金の合計が上限を超える場合はscriptを1文も実行せず`BudgetExceeded(HeapBytes)`となる。同じobjectを二重に数えない。baselineの求め方は次のどちらかとする。
+
+- 台帳をexecution間で持ち越す経路: 台帳を作り直さず、前のexecutionの使用量（committed・reserved・peaks）を0に戻し、live上限を新しいexecutionの`max_live_heap_bytes`に据え直し、peakをその時点のliveに戻す。前のexecutionのartifact（AST・chunk）の分は先にreleaseする。contextに残る値は同じ台帳に1回だけ課金されたまま残り、そのliveがbaselineになる。値を手放せば同じ台帳からreleaseされる。
+- 台帳を作り直す経路: 到達graphを反復worklistで走査し、baseline live heapとして新しい台帳へ課金する。再帰走査は使わず、同じ`AllocationId`をvisited setで除外する。残った値が手放されたときに新しい台帳からreleaseされるよう、値の台帳の参照も新しい台帳へ付け替える。
+
+facadeの`Engine::run`とREPLは持ち越しの経路を使う（判断役が選択（PR #496 の Q1=A・PR #499 の Q1=A・Q2=A）。§14「fix-link-context-baseline-charge 実装スライス」の決定記録）。
 
 ### 5.3 string、source、import
 
@@ -3665,8 +3670,7 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
 loop:drift #429 の D-137 を直す（親 REV-015、`slices.toml` の `fix-link-context-baseline-charge`）。§5.2 末尾は、`ExecutionContext` に以前から残る変数・closure・collection を
 新 execution を `Linked` へ進めるときに baseline live heap として課金し、上限を超えれば 1 文も実行せず `BudgetExceeded(HeapBytes)` とする。§9.2 の `Linked` は
 context baseline を課金済みの状態である。facade の `Engine::run` はこれを満たさない（逸脱一覧の D-137 の行）。挙動の直し方（baseline の課金の置き場所と
-二重計上の回避）は、PR #451 の Q1=A で本スライスの設計に回された。本小節は下の判断の候補の推奨案（Q1=A・Q2=A）で書いてあり、判断役の選択に合わせて
-追加の commit で直す。
+二重計上の回避）は、PR #451 の Q1=A で本スライスの設計に回され、判断役が選択（PR #499）の Q1=A・Q2=A で決めた（下の「決定記録」）。
 
 - **前提（設計時点の main feca544 で確かめたこと）**:
   - facade の `Engine::run`・`run_audited`（`src/embedding.rs`）は `install_execution_state` で、REPL の 2 回目以降の submission を除き
@@ -3702,13 +3706,13 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
   4. `reset_budget`・`reset_config_with_token` の doc comment と、`install_execution_state`・`run_for_repl` のコメントにある「run ごとに台帳を作り直す」
      「REPL だけ台帳を持ち越す」の記述を直す。facade の経路で使わなくなった `reset_budget` を消すか残すかは実装で決めてよい（scheduler の handle 経路は
      使っていない。`src/engine.rs` の経路は D-136 の範囲）。
-  5. done にする実装 PR で逸脱一覧の D-137 の行を削除する。Q2=A なら `charge_context_baseline` を本番で呼ばないことは逸脱ではなくなる（下の決定記録で
-     §5.2 の目標の文を直したあと）。
+  5. done にする実装 PR で逸脱一覧の D-137 の行を削除する。§5.2 は Q2=A の反映で台帳の持ち越しを baseline の求め方の 1 つとしたので、facade で
+     `charge_context_baseline` を本番で呼ばないことは逸脱ではない。
 - **範囲外**:
   - scheduler の handle 経路（`src/engine.rs` の `ExecutionContext`・`create_execution`・`start`・`execute`）。台帳を execution ごとに作り直さない差は
     D-136 の行で fix-execution-budget-usage-fresh（todo）が直す。その設計で台帳を作り直すかどうかを決めるときに、本スライスと同じ baseline の扱いに揃える。
   - VM（facade に VM の context を持ち越す経路が無い。VM REPL は fix-repl-submission-budget で済み）。
-  - `charge_context_baseline` の削除と、§15.2「context baseline」の受入テストの書き直し（Q2 の結果に従い、本スライスでは触らない）。
+  - `charge_context_baseline` の削除（§5.2 の台帳を作り直す経路の部品として残す。Q2=A）。
   - 前の execution が展開した module の record（`graph_record_tokens`）の扱い。loaded module marker と同じ context の状態として live に残り、本スライスでは
     持ち越しの baseline に含まれるだけで、課金・release の規則は変えない。
 - **観測される変化**: 同じ `ExecutionContext` で 2 回目以降の `Engine::run`・`run_audited` の `BudgetUsage.live_heap_bytes` と `peak_heap_bytes` が、context に
@@ -3719,7 +3723,8 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
   - **LCB-AT-01**（baseline が上限を超えると 1 文も実行しない）: 1 回目の `Engine::run` で `let big = range(0, 20000)` を context に残し、2 回目を
     `max_live_heap_bytes = 4096` で `print(len(big))` にすると `BudgetExceeded`（`HeapBytes`）になり、何も出力せず、context は poison されない。3 回目を
     緩い budget にすると `Completed` で `20000` を出力する。`run_audited`（監査 sink あり）でも 2 回目が同じ terminal になり、Terminal event の
-    `context_committed` が `false` になる。確かめ方: `src/embedding.rs` の unit test。
+    `context_committed` が `false` になる。2 回目の上限を、同じ source を同じ context で緩い budget で実行したときの Link 直後の live heap（baseline と
+    AST の分の合計）ちょうどにすると 1 文目を実行し、その値 − 1 にすると 1 文も実行せず `BudgetExceeded`（`HeapBytes`）になる（§15.2 の境界）。確かめ方: `src/embedding.rs` の unit test。
   - **LCB-AT-02**（baseline を usage に含める）: 上の 1 回目のあと緩い budget で `let n = len(big)` を実行すると、`live_heap_bytes` が
     `heap_size::list_body(20000)` 以上で、`peak_heap_bytes` は 1 回目の途中の一時的な最大値（1 回目で作って捨てた大きな List）と 1 回目の AST の分を含まない。
     committed の counter は同じ source を新しい context で実行したときと一致する。確かめ方: unit test。
@@ -3734,6 +3739,28 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
   +120〜220 行（同じ context で usage の live を前提にした既存 test があれば期待値の直しを含む）。受入基準は 4 項目、触る仕組みは「facade の execution の開始での
   budget 台帳の据え直し」1 つで、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
 - **依存**: なし（fix-repl-submission-budget は done で、その台帳の操作を使う）。
+- **決定記録**（判断役が選択（PR #499））:
+  - **Q1=A**（facade の `Engine::run`・`run_audited` でも heap 台帳を作り直さず、REPL の 2 回目以降の submission と同じ据え直し〔artifact token を先に release →
+    使用量と peaks を 0 に → live を持ち越して peak を live に → live 上限を据え直す〕をすべての run で使う）。理由: context に残る値が新 execution の live 上限の
+    判定に入り、D-137 の「20,000 要素を残しても 4096 の上限で `Completed`」が塞がる（[マニフェスト](manifesto.md) 原則 3）。live が §2 の heap の定義（execution から
+    到達可能な論理 allocation の live byte 数）と一致し、手放した値は同じ台帳から release され、closure の retained code・module record・cell も既存の課金のまま
+    含まれる（原則 5）。据え直しの仕組みが REPL と facade で 1 つになり、走査も `Tracked` の構造変更も足さない（原則 8）。§9.2 の `Linked`（context baseline を
+    課金済み）と §5.2 の規範を満たし、§13 の「使用量は execution ごとに新しく数える」は committed・reserved・peaks を 0 から数えることで保つ。
+    fix-repl-submission-budget の Q1=A（PR #496）と同じ扱いである。採らなかった案 B（台帳を作り直し、走査で新しい台帳へ課金して tracked 値の台帳の参照を
+    付け替える）は、`Tracked` の構造変更と cell・retained code・module record まで付け替える走査が要り、据え直しと付け替えの 2 つの仕組みを持つことになる
+    （原則 8 に不利。走査と既存の課金が一致しなければ live がずれる危険も増える、原則 5）。採らなかった案 C（作り直した台帳へ `charge_context_baseline` を
+    呼ぶだけ）は、release が新しい台帳に届かず live が過大に残り、走査が retained code・module record・cell を数えず過小にもなるので、上限の判定が到達可能な量で
+    説明できず、原則 3・5 に反しうる。
+  - **Q2=A**（§5.2 末尾の規範〔baseline live heap として課金し、上限を超えれば 1 文も実行せず `BudgetExceeded(HeapBytes)`、同じ object を二重に数えない〕は変えず、
+    求め方を「台帳の持ち越し」と「台帳を作り直す経路での反復 worklist の走査 + visited set」の両方として書き直す。この PR で直した）。理由: Q1=A の挙動は規範を
+    満たすので、目標の文を判断の反映として直すのが置き場所として正しく（原則 9、documentation-guide の目標と逸脱一覧の区別）、scheduler の経路
+    （fix-execution-budget-usage-fresh、D-136）の設計もどちらの求め方も選べる。採らなかった案 B（目標の文を変えず逸脱一覧に行を足す）は、規範を満たす挙動を
+    解消する予定の無い逸脱として残し、後の設計が同じ問いに戻る（原則 9 に不利）。
+  - 反映で合わせて直したこと（判断コメントの申し送り）: §5.2 冒頭の「execution ごとに `AllocationLedger` を持つ」に、同じ context の次の execution が前の台帳を
+    据え直して使ってよいこと（使用量と上限は新しい execution のもの、引き継ぐのは context に残る値の live だけ）を書き足した。§15.2 の「context baseline が limit
+    ちょうどなら Linked、`+1` なら失敗」は、持ち越しの経路では Link の heap 課金（AST・module record）が baseline に足されてから判定されるので、判定の対象を
+    「context baseline と Link の heap 課金の合計（`Linked` 時点の live heap）」と書き直し、§5.2 末尾の「baseline と Link の heap 課金の合計が上限を超える場合」と
+    揃えた。この境界は LCB-AT-01 で確かめる。
 
 ## 15. 境界受入テスト
 
@@ -3754,7 +3781,7 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
 - 同じ`Rc`を複数変数・List・closureから参照しても1回だけ課金する
 - copy-on-writeで新AllocationId分を課金し、最後の参照dropでlive heapをreleaseする
 - root AST、VM chunk、function、import record、rollback journalが表の論理サイズと一致する
-- context baselineがlimitちょうどならLinkedになり、`+1`ならscriptを実行せず失敗する
+- context baselineとLinkのheap課金の合計（`Linked`時点のlive heap）がlimitちょうどならLinkedになり、`+1`ならscriptを実行せず失敗する
 - 大量のallocate/freeはlive heapを回復してもstring allocation/countの累積上限を迂回できない
 
 ### 15.3 state・race
