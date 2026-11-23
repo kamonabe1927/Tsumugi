@@ -775,6 +775,8 @@ struct CompiledScriptInner {
     /// [`CompiledScript`] を実行するには `retain_source=true` で compile しておく必要がある
     /// （案 A の明示契約。原則2「明示 > 暗黙」に沿う）。
     retained_source: Option<String>,
+    /// root source の生 UTF-8 byte 長（`retain_source` 非依存。link の課金に使う）。
+    source_bytes: u64,
 }
 
 impl CompiledScript {
@@ -806,6 +808,11 @@ impl CompiledScript {
     /// 保持している source 本文（`retain_source=true` のときのみ `Some`）。
     pub fn retained_source(&self) -> Option<&str> {
         self.0.retained_source.as_deref()
+    }
+
+    /// root source の生 UTF-8 byte 長（link の課金用、crate 内部）。
+    pub(crate) fn source_bytes(&self) -> u64 {
+        self.0.source_bytes
     }
 
     /// root source に top-level import 文があるか（link 判定用、crate 内部）。
@@ -1183,6 +1190,7 @@ impl Engine {
             has_imports,
             import_specifiers,
             retained_source: options.retain_source.then(|| source.text.to_string()),
+            source_bytes: source.text.len() as u64,
         })))
     }
 
@@ -1192,6 +1200,12 @@ impl Engine {
     /// import があれば `request.capabilities` の `module_resolver` で解決する（Phase 2、C6/E7）。
     /// resolver 未 grant + import あり は resolver call 0 の terminal [`LinkError::Denied`]。
     /// import 0 件は空 graph の [`LinkedScript`] を返す。
+    ///
+    /// `request.budget` の source/import の count・bytes を link 専用の台帳へ課金し、上限を超えたら
+    /// [`LinkError::BudgetExceeded`]（phase は `Link`）を返す。root source は resolver 未 grant の
+    /// `Denied` の判定後、空 graph を返す前・resolver を呼ぶ前に課金する。import module は
+    /// 初めて解決したものを、読み終えて hash 照合したあと・UTF-8 検証と parse の前に課金する
+    /// （既解決は cache hit で課金しない）。run の `Link` フェーズの課金は別に残る。
     pub fn link(
         &self,
         script: &CompiledScript,
@@ -1242,23 +1256,33 @@ impl Engine {
         // step 1: resolver capability を取得する。import があるのに resolver 未 grant なら
         // resolver を一度も呼ばず terminal Denied（CAP-AT-16、設計 §4.5）。
         let resolver = match request.capabilities.module_resolver() {
-            Some(resolver) => resolver,
+            Some(resolver) => Some(resolver),
             None => {
                 if script.has_imports() {
                     return Err(LinkError::Denied(resolver_absent_denial()));
                 }
-                // import 0 件 + resolver 無しは従来どおり空 graph。
-                return Ok(self.empty_linked_script(script, root_hash));
+                None
             }
         };
 
-        // import 0 件なら resolver があっても空 graph（resolver は呼ばない）。
-        if !script.has_imports() {
-            return Ok(self.empty_linked_script(script, root_hash));
-        }
+        // link 専用の台帳（`LinkRequest` の budget、clock なし）。link の間だけ使い、run には渡さない。
+        // root source を source_count の 1 本目として課金する（execution-control §5.3）。
+        // import 0 件の経路でも課金し、超過なら空 graph を返さず失敗する。resolver call は 0。
+        let mut ledger =
+            crate::budget::BudgetLedger::new(request.budget, request.cancellation.clone());
+        ledger
+            .charge_source(script.source_bytes(), crate::budget::ExecutionPhase::Link)
+            .map_err(control_stop_to_link_error)?;
+
+        // import 0 件（resolver 無し、または resolver があっても import が無い）は空 graph。
+        let resolver = match resolver {
+            Some(resolver) if script.has_imports() => resolver,
+            _ => return Ok(self.empty_linked_script(script, root_hash)),
+        };
 
         // step 2〜8: import を解決して graph を構築する。
-        let resolution = self.resolve_import_graph(script, resolver.as_ref(), &request)?;
+        let resolution =
+            self.resolve_import_graph(script, resolver.as_ref(), &request, &mut ledger)?;
 
         let revision = script.language_revision();
         let root_imports_str: Vec<&str> = resolution
@@ -1334,6 +1358,7 @@ impl Engine {
         script: &CompiledScript,
         resolver: &dyn crate::capability::ModuleResolver,
         request: &LinkRequest,
+        ledger: &mut crate::budget::BudgetLedger,
     ) -> Result<ResolvedGraph, LinkError> {
         use std::collections::HashMap;
 
@@ -1358,6 +1383,7 @@ impl Engine {
             None,
             script.import_specifiers(),
             0,
+            ledger,
             &mut call_id,
             &mut resolved,
             &mut node_map,
@@ -1391,6 +1417,7 @@ impl Engine {
         importer: Option<&ModuleId>,
         specifiers: &[(String, usize)],
         depth: usize,
+        ledger: &mut crate::budget::BudgetLedger,
         call_id: &mut u64,
         resolved: &mut std::collections::HashMap<ModuleId, SourceHash>,
         node_map: &mut std::collections::HashMap<ModuleId, ImportNode>,
@@ -1464,6 +1491,16 @@ impl Engine {
                 continue;
             }
 
+            // 初めて解決した module を、UTF-8 検証・parse より前に課金する（execution-control §5.3）。
+            // 既解決（上の `continue`）は cache hit なので課金しない。
+            let byte_len = bytes.len() as u64;
+            ledger
+                .charge_source(byte_len, crate::budget::ExecutionPhase::Link)
+                .map_err(control_stop_to_link_error)?;
+            ledger
+                .charge_import(byte_len, crate::budget::ExecutionPhase::Link)
+                .map_err(control_stop_to_link_error)?;
+
             // UTF-8 検証（§4.3 step 3）。invalid なら InvalidModule。
             let text = match std::str::from_utf8(&bytes) {
                 Ok(text) => text,
@@ -1517,6 +1554,7 @@ impl Engine {
                 Some(&module_id),
                 &module_specifiers,
                 depth + 1,
+                ledger,
                 call_id,
                 resolved,
                 node_map,
@@ -1602,8 +1640,8 @@ impl Engine {
     /// link 時 resolver / source 呼び出し用の [`CapabilityCallContext`] を組む。
     ///
     /// deadline / cancellation は `request` の budget・token を共有する。remaining-bytes は
-    /// Phase 2 では器のみ（import byte 上限を上限適用せず getter 値として渡す。CAP-AT-17 は
-    /// Phase 3）。`may_yield` は link 層では false（link は top-level driver 文脈でない）。
+    /// `max_import_bytes` を getter 値として渡すだけの器である（link 台帳の残量でも chunk 途中の
+    /// N+1 の停止でもない。後者は CAP-AT-17 / Phase 3）。source/import の課金は link 台帳が行う。`may_yield` は link 層では false（link は top-level driver 文脈でない）。
     fn link_call_context<'a>(
         &self,
         request: &'a LinkRequest,
@@ -1650,6 +1688,11 @@ fn host_error(code: &str) -> HostError {
         safe_message: String::new(),
         retryable: false,
     }
+}
+
+/// link 台帳の課金の停止を [`LinkError`] へ写す（`adapter_error_to_link_error` と同じ写像）。
+fn control_stop_to_link_error(stop: crate::budget::ControlStop) -> LinkError {
+    adapter_error_to_link_error(crate::capability::AdapterError::Control(stop))
 }
 
 /// adapter の失敗を link 層の [`LinkError`] へ写す（設計 §4.3 step 3）。
@@ -6934,5 +6977,191 @@ mod c6c_tests {
             96,
             "record の固定部は 96"
         );
+    }
+
+    // --- fix-link-request-budget-charge（LRB-AT-01..03）: `LinkRequest` の budget の課金 ---
+
+    /// `edit` で budget を書き換えて link する。`(結果, resolver call 数)` を返す。
+    fn lrb_link(
+        root: &str,
+        sources: Vec<(&str, Vec<u8>)>,
+        edit: impl FnOnce(&mut BudgetConfig),
+    ) -> (Result<LinkedScript, LinkError>, usize) {
+        let engine = Engine::builder().build().unwrap();
+        let (resolver, calls) = CountingResolver::with_bytes(sources);
+        let script = compile_root(&engine, root);
+        let mut config = budget();
+        edit(&mut config);
+        let req = LinkRequest::new(op_id(), caps_with(Arc::new(resolver)), config);
+        let result = engine.link(&script, req);
+        (result, calls.load(Ordering::SeqCst))
+    }
+
+    fn lrb_exceeded(result: Result<LinkedScript, LinkError>) -> crate::budget::BudgetExceeded {
+        match result {
+            Err(LinkError::BudgetExceeded(e)) => e,
+            other => panic!("BudgetExceeded を期待したが {other:?}"),
+        }
+    }
+
+    const LRB_ROOT: &str = "import \"a\"\n";
+    const LRB_MODULE: &str = "let a = 12345\n";
+
+    fn lrb_one() -> Vec<(&'static str, Vec<u8>)> {
+        vec![("@default/a", LRB_MODULE.as_bytes().to_vec())]
+    }
+
+    /// LRB-AT-01: 5 つの上限それぞれで、ちょうど N は Ok、N+1 相当は BudgetExceeded（phase は Link）。
+    #[test]
+    fn lrb_at_01_each_limit_boundary() {
+        use crate::budget::{BudgetResource as R, ExecutionPhase};
+        let root_len = LRB_ROOT.len() as u64;
+        let mod_len = LRB_MODULE.len() as u64;
+
+        type Edit = Box<dyn Fn(&mut BudgetConfig, u64)>;
+        // (resource, N, 設定関数)
+        let cases: Vec<(R, u64, Edit)> = vec![
+            (
+                R::ImportCount,
+                1,
+                Box::new(|c, n| c.max_import_count = n as u32),
+            ),
+            (
+                R::ImportBytes,
+                mod_len,
+                Box::new(|c, n| c.max_import_bytes = n),
+            ),
+            (
+                R::SourceCount,
+                2,
+                Box::new(|c, n| c.max_source_count = n as u32),
+            ),
+            (
+                R::SourceBytes,
+                root_len + mod_len,
+                Box::new(|c, n| c.max_source_bytes = n),
+            ),
+            (
+                R::SingleSourceBytes,
+                root_len.max(mod_len),
+                Box::new(|c, n| c.max_single_source_bytes = n),
+            ),
+        ];
+        for (resource, n, set) in &cases {
+            let (ok, _) = lrb_link(LRB_ROOT, lrb_one(), |c| set(c, *n));
+            assert!(
+                ok.is_ok(),
+                "{resource:?}: ちょうど N={n} は Ok のはず: {ok:?}"
+            );
+            let (over, _) = lrb_link(LRB_ROOT, lrb_one(), |c| set(c, *n - 1));
+            let e = lrb_exceeded(over);
+            assert_eq!(e.resource, *resource, "N-1 の primary resource");
+            assert_eq!(e.phase, ExecutionPhase::Link);
+        }
+
+        // D-62 の再現: import_count=0・import_bytes=1 で 1 module を import すると Err。
+        let (d62, _) = lrb_link(LRB_ROOT, lrb_one(), |c| {
+            c.max_import_count = 0;
+            c.max_import_bytes = 1;
+        });
+        let e = lrb_exceeded(d62);
+        assert_eq!(e.resource, R::ImportCount);
+        assert_eq!(e.phase, ExecutionPhase::Link);
+    }
+
+    /// LRB-AT-02: root の課金。import 0 件でも課金し、import ありでは resolver call 0。
+    /// resolver 未 grant では「import 0 件」は BudgetExceeded、「import あり」は Denied（Q5）。
+    #[test]
+    fn lrb_at_02_root_charge_and_denied_order() {
+        use crate::budget::BudgetResource as R;
+        let engine = Engine::builder().build().unwrap();
+        let plain = "let x = 1\n";
+
+        // import 0 件・resolver なし。
+        for (edit, resource) in [
+            (
+                Box::new(|c: &mut BudgetConfig| c.max_single_source_bytes = plain.len() as u64 - 1)
+                    as Box<dyn Fn(&mut BudgetConfig)>,
+                R::SingleSourceBytes,
+            ),
+            (
+                Box::new(|c: &mut BudgetConfig| c.max_source_count = 0),
+                R::SourceCount,
+            ),
+        ] {
+            let script = compile_root(&engine, plain);
+            let mut config = budget();
+            edit(&mut config);
+            let req = LinkRequest::new(op_id(), CapabilitySet::empty(), config);
+            assert_eq!(lrb_exceeded(engine.link(&script, req)).resource, resource);
+
+            // import 0 件・resolver あり（grant しても呼ばない）。
+            let (resolver, calls) = CountingResolver::new(&[]);
+            let mut config = budget();
+            edit(&mut config);
+            let req = LinkRequest::new(op_id(), caps_with(Arc::new(resolver)), config);
+            assert_eq!(lrb_exceeded(engine.link(&script, req)).resource, resource);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+            // import あり・resolver grant: root で超えると resolver call 0。
+            let (result, calls) = lrb_link(LRB_ROOT, lrb_one(), |c| {
+                edit(c);
+                // root（11 byte）が超える上限にそろえる。
+                c.max_single_source_bytes =
+                    c.max_single_source_bytes.min(LRB_ROOT.len() as u64 - 1);
+            });
+            let _ = lrb_exceeded(result);
+            assert_eq!(calls, 0, "root で超えたときの resolver call は 0");
+
+            // import あり・resolver 未 grant: root が超えていても Denied。
+            let script = compile_root(&engine, LRB_ROOT);
+            let mut config = budget();
+            edit(&mut config);
+            config.max_single_source_bytes = LRB_ROOT.len() as u64 - 1;
+            let req = LinkRequest::new(op_id(), CapabilitySet::empty(), config);
+            assert!(matches!(
+                engine.link(&script, req),
+                Err(LinkError::Denied(_))
+            ));
+        }
+    }
+
+    /// LRB-AT-03: cache hit は数えない。UTF-8 でない module・構文の不正な module は parse の前に課金する。
+    #[test]
+    fn lrb_at_03_cache_hit_and_charge_before_parse() {
+        use crate::budget::BudgetResource as R;
+        // 同じ module を 2 回 import: import 1 本ぶんで Ok。
+        let (r, _) = lrb_link("import \"a\"\nimport \"a\"\n", lrb_one(), |c| {
+            c.max_import_count = 1;
+            c.max_source_count = 2;
+        });
+        assert!(r.is_ok(), "{r:?}");
+
+        // diamond: root → b, c → a。異なる module は 3 つ。
+        let diamond = vec![
+            ("@default/a", b"let a = 1\n".to_vec()),
+            ("@default/b", b"import \"a\"\n".to_vec()),
+            ("@default/c", b"import \"a\"\n".to_vec()),
+        ];
+        let (r, _) = lrb_link("import \"b\"\nimport \"c\"\n", diamond.clone(), |c| {
+            c.max_import_count = 3;
+            c.max_source_count = 4;
+        });
+        assert!(r.is_ok(), "{r:?}");
+        let (r, _) = lrb_link("import \"b\"\nimport \"c\"\n", diamond, |c| {
+            c.max_import_count = 2;
+        });
+        assert_eq!(lrb_exceeded(r).resource, R::ImportCount);
+
+        // UTF-8 でない module と構文の不正な module。
+        for bad in [vec![0xff, 0xfe, 0xfd], b"let = = \n".to_vec()] {
+            let src = vec![("@default/a", bad.clone())];
+            let (r, _) = lrb_link(LRB_ROOT, src.clone(), |c| {
+                c.max_import_bytes = bad.len() as u64 - 1;
+            });
+            assert_eq!(lrb_exceeded(r).resource, R::ImportBytes);
+            let (r, _) = lrb_link(LRB_ROOT, src, |_| {});
+            assert!(matches!(r, Err(LinkError::InvalidModule { .. })), "{r:?}");
+        }
     }
 }

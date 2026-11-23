@@ -441,11 +441,26 @@ fn print_link_error(error: &LinkError) {
         LinkError::DeadlineExceeded => {
             eprintln!("link の deadline を超過しました");
         }
+        LinkError::BudgetExceeded(exceeded) => {
+            // run の BudgetExceeded と同じ文言（行番号は持たないので付けない）。
+            eprintln!("{}", link_budget_message(exceeded));
+        }
         other => {
             // engine/revision/backend 不一致・budget・backend・internal は防御的に表示する。
             eprintln!("リンクエラー: {:?}", other);
         }
     }
+}
+
+/// link の `BudgetExceeded` を run の budget 超過と同じ文言にする（`control_stop_to_error` を共有）。
+fn link_budget_message(exceeded: &tsumugi::budget::BudgetExceeded) -> String {
+    tsumugi::budget::control_stop_to_error(
+        tsumugi::budget::ControlStop::BudgetExceeded(*exceeded),
+        0,
+        0,
+    )
+    .message()
+    .to_string()
 }
 
 /// REPL（対話実行モード、tree-walk）。
@@ -617,6 +632,11 @@ fn report_repl_link_error(error: &LinkError) {
     if let LinkError::InternalFailure { safe_message, .. } = error {
         eprintln!("{}", safe_message);
         std::process::exit(70);
+    }
+    // budget 超過は run の REPL error と同じ `  エラー: …` の形で出す（次の入力へ進む）。
+    if let LinkError::BudgetExceeded(exceeded) = error {
+        eprintln!("  エラー: {}", link_budget_message(exceeded));
+        return;
     }
     print_link_error(error);
 }

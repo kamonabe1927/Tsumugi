@@ -2072,3 +2072,55 @@ fn hil_at_03_link_budget_exceeded_maps_to_budget_error() {
         other => panic!("LinkError を期待したが {other:?}"),
     }
 }
+
+/// LRB-AT-05: handle 経路の初回 poll の link が、link 側の課金（resolver の停止ではない）で budget 系の
+/// error（kind `source_limit`）になり、1 文も実行しない。既定の budget の import 本数上限（1_024）を
+/// 超える 1_026 module を import する（root と合わせて source 本数の上限 1_025 を先に超えるので、
+/// 超える resource は `SourceCount`）。link 側の課金は超過した module（root を除く 1_025 本目）を読んだ
+/// 直後に止まるので resolver の呼び出しは LIMIT + 1 回になり、link が課金しなければ全 LIMIT + 2 module を
+/// resolve する。この呼び出し数が link 側の課金の観測になる（error の種類・message・fuel は課金が無くても同じ）。
+#[test]
+fn lrb_at_05_handle_link_charges_request_budget() {
+    const LIMIT: usize = 1_024;
+    let owned: Vec<(String, String)> = (0..=LIMIT + 1)
+        .map(|i| (format!("@default/m{i}.tsg"), "let v = 1\n".to_string()))
+        .collect();
+    let sources: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(id, text)| (id.as_str(), text.as_str()))
+        .collect();
+    let root: String = (0..=LIMIT + 1)
+        .map(|i| format!("import \"m{i}.tsg\"\n"))
+        .collect::<String>()
+        + "print(\"AFTER\")\n";
+
+    let engine = Engine::new();
+    let script = engine.compile(&root).unwrap();
+    let (resolver, calls) = counting_resolver::CountingResolver::new(&sources);
+    let mut context = ExecutionContext::new();
+    context.set_capabilities(resolver.capabilities());
+    let mut handle = engine
+        .create_execution(&script, &mut context, ExecutionRequest::new())
+        .expect("admit");
+    match handle.poll(PollSlice::default()).expect("poll") {
+        PollResult::Terminal {
+            outcome: ExecutionOutcome::LinkError { error },
+            usage,
+        } => {
+            assert_eq!(error.error_type(), "source_limit");
+            assert_eq!(
+                error.message(),
+                format!("ソースの本数が上限を超えました (上限: {})", LIMIT + 1)
+            );
+            assert_eq!(usage.committed.fuel, 0, "1 文も実行しない");
+        }
+        other => panic!("LinkError を期待したが {other:?}"),
+    }
+    // link 側の課金は超過した module（root を除く 1_025 本目）を読んだ直後に止まるので、resolver の
+    // 呼び出しは LIMIT + 1 回。link が課金しなければ全 LIMIT + 2 module を resolve する。
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        LIMIT + 1,
+        "超過した module で link が止まる"
+    );
+}
