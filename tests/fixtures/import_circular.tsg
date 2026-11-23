@@ -1,4 +1,4 @@
-# 循環 import テスト: エラーにならず正常動作する
+# 循環 import テスト: link 時に拒否され（LinkError::Cycle）、1文も実行せずに終了コード 1 で終わる（言語仕様「循環 import」）
 import "import_circular_a.tsg"
 
 print(from_a())

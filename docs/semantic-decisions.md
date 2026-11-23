@@ -1,6 +1,6 @@
 # Tsumugi — 次期意味論・実装決定
 
-最終更新: 2026-11-19
+最終更新: 2026-11-23
 
 設計ステータス: **次期仕様確定（本文）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -143,6 +143,7 @@ message内の型名は `Int`、`Float`、`Str`、`Bool`、`Null`、`List`、`Dic
 | Float→Int不能 | `conversion` | `{builtin} で Int に変換できません: {reason}` |
 | file sizeがi64範囲外 | `int_overflow` | `ファイルサイズを Int で表現できません` |
 | `exit` code範囲外 | `argument` | `exit の終了コードは 0 から 255 の範囲で指定してください: {code}` |
+| `exit` の引数が2個以上 | `argument` | `exit() は引数0〜1個ですが、{actual}個渡されました` |
 | `path_join`非Str | `builtin_type` | `path_join の第 {position} 引数は Str である必要があります: {actual_type}` |
 | property read対象がInstanceでない | `type` | `プロパティアクセスできない型です: {actual_type}` |
 | property write対象がInstanceでない | `type` | `プロパティ代入できない型です: {actual_type}` |
@@ -171,7 +172,7 @@ message内の型名は `Int`、`Float`、`Str`、`Bool`、`Null`、`List`、`Dic
 | host call request の総バイト数の上限 | `io_limit` | `host call request の総バイト数が上限を超えました (上限: {limit} バイト)` |
 | host call response の総バイト数の上限 | `io_limit` | `host call response の総バイト数が上限を超えました (上限: {limit} バイト)` |
 | host call の総バイト数の上限 | `io_limit` | `host call の総バイト数が上限を超えました (上限: {limit} バイト)` |
-| stdout書込失敗 | `io` | `標準出力への書き込みに失敗しました` |
+| stdout書込失敗（`print`。上の「host adapter失敗」の1つ） | `host` | `host function の実行に失敗しました: print (stdout)` |
 | VM/Compiler不変条件違反 | `internal` | `内部エラー: {stable_detail}` |
 
 `{state}`、`{reason}`、`{operation}`、`{category}` は各BuiltinSpecまたはoperation constructorが列挙型から選び、任意のOS文字列を入れない。import先のparse error詳細はcauseとして保持し、CLIはwrapperに続けて同じcanonical parse diagnosticsをsource順に表示する。
@@ -179,6 +180,8 @@ message内の型名は `Int`、`Float`、`Str`、`Bool`、`Null`、`List`、`Dic
 「import chain深度上限」の行は、loop:drift #382 の D-78 を受けて、`import` ランタイムエラーの文言から link 時の拒否に直し、評価器内蔵 `ModuleLoader` の文言は冒頭の逸脱一覧の 1 行に移した（Q1=A、判断役が選択（PR #384））。理由: 目標では深度は link で検証し（[組み込みAPI仕様](embedding-api.md) §5）、REPL の各入力と scheduler の handle 経路も link を通す（[Capability Model仕様](capability-model.md) §10、issue #327 の Q1=A・Q2=A）ので、`ModuleLoader` の文言は目標ではなく現状であり、本文に実装状態を書かない[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」と、逸脱一覧を新設した loop:drift #302 の D-20 Q2=A に合わせる。同じ PR で [言語仕様](language-spec.md) を同じ形に直したのとも揃う（[マニフェスト](manifesto.md) 原則 9）。採らなかった案B（行を残し、REPL・handle 経路だけで出る文言と注記する）は、目標の章に実装状態を書くことになり、関係するスライス（fix-repl-import-gate-tree / -vm は `blocked`、fix-handle-import-from-link は `todo`）が done になるまで注記が本文に残って状態の正本が 2 箇所になるため採らない。案C（`ModuleLoader` 側の文言を link 時の診断にそろえる `fix` スライスを足す）は、その経路が catch 不能の link 時の拒否にならない差は文言以外で残り、目標で使わなくなる経路に実装とテストを足すことになるため採らない（原則 8）。
 
 scheduler の handle 経路（alpha `Engine`）の link 失敗の写像は、PR #480 の Q1=A（判断役が選択（PR #480））で次のとおり決めた。import先のparse失敗（`LinkError::InvalidModule`）は上の「import先のparse失敗」のテンプレート（`{module}` は論理 ID）で、parse error の詳細（先頭の診断の行番号とメッセージ）を cause として message の末尾に保持する（REV-020）。link 時の予算超過（`LinkError::BudgetExceeded`）は import の error にせず、alpha の慣例どおり budget 系の error にして超過した resource を保つ。理由: 同じ import の失敗が入口によって違う診断にならないようにする（[マニフェスト](manifesto.md) 原則 5）、停止理由を観測できるようにする（原則 6・7）、写像を spec とテスト（`tests/scheduler_api.rs`）に固定する（原則 9）。採らなかった案: parse の cause を落としたまま逸脱として載せるだけにする案（原則 5 に反しうる）、alpha の公開 `ExecutionOutcome` に構造化した link 失敗の変種を足す案（[実行予算・協調実行仕様](execution-control.md) §1.1 に反しうる。E10 の仕事）。PR #480 の Q2=A（判断役が選択（PR #480））で、残りも次のとおり決めた。解決の失敗（`LinkError::Resolve`）は `import に失敗しました: モジュールを読み込めません: {code}`（`IMPORT_UNREADABLE`）。`{code}` は host が作る検証済みの `HostErrorCode`（先頭が ASCII 小文字、以降 `[a-z0-9_.-]`、64 byte 以内）で、host path・specifier を運ばない。上の「import先が存在しない・読めない」の行の `{module}` は目標のままで、`LinkError::Resolve` が module の ID を持たないため、この経路だけが `{code}` を入れる（逸脱）。循環（`LinkError::Cycle`）は上の新しい行（message_id `import.cycle`、末尾の番号で追加）。深度（`LinkError::DepthExceeded`）は今の文言 `import に失敗しました: import のネストが深すぎます (上限: {limit})`（`import.depth`）を、この経路の写像として記録する。理由: 既存の文言と ID を使い、新しい tag は循環の 1 つだけにして、tag と文言を 1:1 に保つ（原則 5・9）、循環を解決失敗と別の ID で区別できる（原則 6・7）。採らなかった案: embedding の公開 `LinkError::Resolve` に module の ID を持たせる案（公開型の変更で範囲外。原則 5・8 に反しうる）、今の文言のまま逸脱として載せる案（`IMPORT_UNREADABLE` が 2 つの文言になり 1:1 に反する。原則 5・9）。link の `Cycle` と言語仕様「循環 import」の食い違い（capability-model §18）は、ここでは決めていない。
+
+「stdout書込失敗」の行は、loop:drift #487 の D-145 を受けて、`io`（`標準出力への書き込みに失敗しました`）から実装の `host` に書き直した（Q1=A、判断役が選択（issue #487））。理由: `print` は Stdout adapter を通る adapter-backed builtin で、[Capability Model仕様](capability-model.md) §4 と同じ表の「host adapter失敗」の行が adapter の失敗を `host` とするので、stdout だけ `io` にすると規則が 2 つに割れる（[マニフェスト](manifesto.md) 原則 5）。実装は tree・`--vm` とも `host` で、`tests/integration.rs` が固定している（原則 9）。採らなかった案B（実装を `io` に戻す）は capability-model §4 の規則を割るため採らない（原則 5・8）。「`exit` の引数が2個以上」の行は、同じ issue の D-147 を受けて実装（message_id `argument.exit_arity`）に合わせて足した（機械的なずれ。§10.1 の `exit` の記述も合わせた）。同じ issue の D-144 で、上に挙げた link の `Cycle` と言語仕様「循環 import」の食い違いは、言語仕様を link 時の拒否に合わせる案（Q1=A）で決まった（[言語仕様](language-spec.md)「循環 import」）。
 
 deadline超過とcancellationは canonical error ではなく script から見えない terminal なので（§3.3）、この表に行を持たない。
 
@@ -747,7 +750,7 @@ OSの `u64` sizeを `i64::try_from` 相当で検査し、`i64::MAX` を超えた
 
 #### exit
 
-`exit` は0個または1個の引数を受ける。0引数の `exit()` は終了code 0、1引数ではIntだけを受け、値域は `0..=255`。2個以上はcanonical arity error、1引数が非Intなら `builtin_type`、範囲外Intは `argument` error。coreはprocessを直接終了せず `ExecutionOutcome::Exited { code: u8, usage: BudgetUsage }` を返し、CLIだけが対応するprocess exit codeへ変換する。
+`exit` は0個または1個の引数を受ける。0引数の `exit()` は終了code 0、1引数ではIntだけを受け、値域は `0..=255`。2個以上は `argument` error（§3.4 の「`exit` の引数が2個以上」の行。builtin arity の共通の文言ではない）、1引数が非Intなら `builtin_type`、範囲外Intは `argument` error。coreはprocessを直接終了せず `ExecutionOutcome::Exited { code: u8, usage: BudgetUsage }` を返し、CLIだけが対応するprocess exit codeへ変換する。
 
 ### 10.2 却下案
 
