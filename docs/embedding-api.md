@@ -771,7 +771,7 @@ loop:drift #352 の D-62 を直す（親 REV-015）。§5 は `LinkRequest` が 
 source/module/import の count・bytes を同文書の `BudgetUsage` へ課金すると定めるが、`Engine::link` は課金も上限判定もしない（本書の逸脱一覧の §5 の行）。
 本スライスは §5 の目標の文を変えず、`Engine::link` の側を目標に合わせる。
 
-下の実装範囲は、PR の「判断の候補」Q1〜Q4 の推奨案（各 A）で書いている。判断役が別の案を選んだら、その内容と理由をこの小節に反映する。
+run の課金を残すか・root を課金するか・CLI の表示・import を課金する時点は、判断役が選択（PR #494）の Q1=A・Q2=A・Q3=A・Q4=A による（下の「決定記録」）。
 
 - **前提（設計時点の main 3b1fc4c で確かめたこと）**:
   - `Engine::link`（`src/embedding.rs` の `link_inner`・`resolve_module_imports`・`read_module_source`）は、`request.budget` を
@@ -818,6 +818,14 @@ source/module/import の count・bytes を同文書の `BudgetUsage` へ課金�
   - REPL の session 累積の budget（逸脱一覧の REPL の budget の行。fix-repl-submission-budget）。link の台帳は submission ごとに作るので、
     REPL で前の submission が展開した module を再び import すると、link では課金し run では cache hit として課金しない。
   - `ExecutionOutcome` に `LinkError` を足すこと（逸脱一覧の 1 行目）。
+  - §5 末尾の「`create_execution`からlinkする場合も同じrequest budget/controlを共有し、別の計数系を作らない」。scheduler の handle 経路
+    （`src/engine.rs` の初回 poll）は `evaluator.budget_config()` から `LinkRequest` を作るので、本スライスの後も link の台帳は handle の
+    台帳と別に作られる。同じ `BudgetConfig` で判定するので上限は緩まないが、同じ handle の台帳で link を進める形は、
+    [実行予算・協調実行仕様](execution-control.md) の逸脱一覧の `create_execution` の行（`LinkOptions` が無く、Link を初回 poll で行う）の
+    直し方で扱う。本スライスの done で削除するのは本書の逸脱一覧の §5 の行（`Engine::link` が課金も上限判定もしない）だけである。
+  - 既解決の `ModuleId` を 2 回目に import するとき、resolver を呼んで source を読み終えてから hash 照合で skip する今の読み込み
+    （`resolve_module_imports`）。この読み込みは課金しない（§5.3 の cache hit）。読み込みの量を上限で抑えることは、上の chunk の途中で
+    止める規定（C11）と同じ扱いで範囲外に残す。
 - **観測される変化**:
   - `LinkRequest` の budget の source/import の上限を超える script は、`Engine::link` が `Err(LinkError::BudgetExceeded(_))` を返す
     （D-62 の再現: import_count=0 で 1 module を import すると、今は `Ok`、変更後は `ImportCount` の `BudgetExceeded`）。
@@ -851,6 +859,33 @@ source/module/import の count・bytes を同文書の `BudgetUsage` へ課金�
   [開発ループ手順書](loop-runbook.md) §14.1 に収まる。done にする実装 PR で、本書の逸脱一覧の §5 の `LinkRequest` の budget の行を削除する。
   範囲外に残すもの（link 中の deadline、chunk の途中の N+1）はそれぞれ既存の行・延期先（C11）で追えるので、新しい行は足さない見込み。
 - **依存**: なし。
+- **決定記録**（判断役が選択（PR #494））:
+  - **Q1=A**（run の `Link` フェーズでの `ExecutionRequest` の budget への課金を残し、link は link 専用の台帳で上限を判定する）。
+    理由: `LinkRequest` と `ExecutionRequest` はそれぞれ有限 `BudgetConfig` を所有する別の request である（§5・§6）。link が link の台帳で上限を判定し、
+    run が自分の budget に課金し続ければ、§5 の目標（link での課金と判定）を満たしつつ、[Capability Model仕様](capability-model.md) §10 の目標の文
+    「課金はこれまでどおりrunの`Link`フェーズ」と [実行予算・協調実行仕様](execution-control.md) §5.3 の run の usage、tree・VM の `charge_link_graph` の一致
+    （[マニフェスト](manifesto.md) 原則 5）を変えずに済む。目標の章を動かさない最小の変更でもある（原則 8）。台帳は別々なので、1 つの台帳が同じ source を
+    2 度数えることは無い。採らなかった案 B（run 側の課金をやめ link だけで課金する）は、`LinkedScript` を link とは別の budget を持つ `ExecutionRequest` で
+    何度でも run でき、run は保持した source を毎回再 parse・展開する（capability-model §10）ので、ホストがその execution に付けた source/import の上限が
+    判定されず `BudgetUsage` からもその消費が消えるため、原則 3・7 に反しうるとして採らない（目標の章 2 か所の書き換えも要る）。
+  - **Q2=A**（root を `source_count` の 1 本目として、resolver を呼ぶ前に link で課金する。import 0 件でも課金する）。理由: execution-control §5.3 は
+    「`source_count`はrootを1として」数え、§5 は `LinkRequest` の budget に source の count・bytes を課金するとする。root を 1 本目に数えれば、同じ budget に
+    対する判定が link と run で同じ数え方になる（原則 5）。root の課金は resolver を呼ぶ前なので、超えたら resolver call 0 で止まる（原則 1・3）。
+    採らなかった案 B（import だけ課金する）は、link の `source_count`・`source_bytes`・`max_single_source_bytes` が root を欠いて §5 の逸脱が一部残り、
+    同じ上限でも link と run で判定が 1 本ずれるため採らない。
+  - **Q3=A**（CLI は `LinkError::BudgetExceeded` を run の `BudgetExceeded` と同じ文言で出し、行番号は付けない）。理由: §12 の結果表は `LinkError` も
+    `BudgetExceeded` も file/stdin は 1、REPL は「表示し次入力へ」である。CLI は link と run に同じ budget を渡す（`src/main.rs` の 4 か所）ので、同じ超過が
+    止まる場所だけが run から link へ移る。同じ文言なら利用者に見える失敗の種類が変わらず（原則 5・6）、`import_count_limit_gates_file_execution` の期待値
+    （行番号は見ていない）も変わらない。handle 経路の `link_failure_outcome`（`control_stop_to_error` で budget 系の error、PR #480 の Q1=A）とも揃う。
+    採らなかった案 B（今の `リンクエラー: {:?}` のまま）は、内部の型の Debug 表示が利用者に出て、同じ予算超過が入口（handle 経路と CLI）で違う形になり、
+    既存テストの期待値も変えることになるため採らない。
+  - **Q4=A**（各 import は、読み終えて同じ `ModuleId` の hash 照合を通ったあと、UTF-8 検証と module 単体 parse の前に `charge_source`→`charge_import` で課金する）。
+    理由: 上限を超えた module に UTF-8 検証と parse の仕事をさせない（原則 1・3、優先順位の表「制御可能な最悪時負荷」）。順序は run の `charge_link_graph` と
+    同じ source → import で、同時超過の primary は execution-control §7.2 の順のまま。hash 照合のあとなので、既解決の `ModuleId` は §5.3 の cache hit として
+    数えない。採らなかった案 B（parse が通ったあとに課金する）は、反しはしないが、上限を超えた大きな module でも parse まで進み、予算で止めるべき入力に
+    余分な仕事をする。不正な module を先に `InvalidModule` で返せる利点は、予算内に直せば同じ診断が得られるので小さく、採らない。
+  - 判断の外の気付き（判断役のコメント）を受け、handle 経路の link の台帳と §5 末尾の「別の計数系を作らない」の関係、既解決の `ModuleId` の再読み込みの扱いを
+    範囲外に明記した。
 
 ## 15. 受入基準
 
