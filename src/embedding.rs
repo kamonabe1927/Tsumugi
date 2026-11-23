@@ -7317,7 +7317,11 @@ mod rsb_tests {
             Arc::clone(&clock),
         );
         let second = usage_of(&o);
-        assert!(second.live_heap_bytes > 0);
+        assert!(
+            second.live_heap_bytes >= crate::budget::heap_size::list_body(2000),
+            "live は持ち越した List の分以上: {}",
+            second.live_heap_bytes
+        );
         assert!(
             second.live_heap_bytes < first.peak_heap_bytes,
             "live={} first.peak={}",
@@ -7362,5 +7366,29 @@ mod rsb_tests {
         );
         assert!(matches!(o, ExecutionOutcome::Completed { .. }), "{o:?}");
         assert_eq!(out, "2000\n");
+    }
+
+    /// RSB-AT-03（artifact）: submission 1 の AST が大きいとき、submission 2 の `peak_heap_bytes` は
+    /// その artifact の分を含まない（前の artifact token を据え直しの前に release する）。
+    /// 一時値の無い submission 1 を使い、peak が artifact で決まるようにしている。
+    #[test]
+    fn rsb_at_03_previous_artifact_is_not_in_next_peak() {
+        let engine = Engine::builder().build().unwrap();
+        let mut ctx = ExecutionContext::new(&engine);
+        let (loose, clock) = standard();
+
+        let big: String = (0..300).map(|i| format!("let v{i} = 1\n")).collect();
+        let (o, _) = submit(&engine, &mut ctx, &big, loose, Arc::clone(&clock));
+        let first = usage_of(&o);
+        let (o, _) = submit(&engine, &mut ctx, "let z = 1\n", loose, Arc::clone(&clock));
+        let second = usage_of(&o);
+        assert!(
+            second.peak_heap_bytes <= second.live_heap_bytes + 200
+                && first.peak_heap_bytes > second.live_heap_bytes + 2000,
+            "peak={} live={}（前の artifact が peak に入っている）",
+            second.peak_heap_bytes,
+            second.live_heap_bytes
+        );
+        assert!(second.peak_heap_bytes < first.peak_heap_bytes);
     }
 }

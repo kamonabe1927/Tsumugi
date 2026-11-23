@@ -1655,3 +1655,34 @@ fn rsb_at_03_vm_repl_carries_live_heap_as_baseline() {
 
     submit(&mut vm, &mut compiler, "let m = len(big)\n", loose).expect("緩い budget で読める");
 }
+
+/// RSB-AT-03（VM の chunk）: submission 1 の chunk が大きいとき、submission 2 の `peak_heap_bytes` は
+/// その chunk の分を含まない（前の chunk token を据え直しの前に release する）。
+#[test]
+fn rsb_at_03_vm_repl_previous_chunk_is_not_in_next_peak() {
+    let loose = BudgetConfig::for_legacy(1_000_000, 1_000_000);
+    let mut compiler = Compiler::new();
+    let mut vm = Vm::new_repl();
+    vm.set_capabilities(print_capabilities());
+    let mut run = |src: &str| {
+        let program = Parser::new(Lexer::new(src).tokenize())
+            .parse()
+            .expect("パースに失敗");
+        vm.begin_repl_submission(loose);
+        vm.charge_link_graph(src.len() as u64, &[]).expect("link");
+        let chunk = compiler.compile_repl_line(&program).expect("compile");
+        vm.run_repl_chunk(chunk).expect("run");
+        vm.budget_usage()
+    };
+    let big: String = (0..300).map(|i| format!("let v{i} = 1\n")).collect();
+    let first = run(&big);
+    let second = run("let z = 1\n");
+    assert!(
+        second.peak_heap_bytes <= second.live_heap_bytes + 200
+            && first.peak_heap_bytes > second.live_heap_bytes + 2000,
+        "peak={} live={}（前の chunk が peak に入っている）",
+        second.peak_heap_bytes,
+        second.live_heap_bytes
+    );
+    assert!(second.peak_heap_bytes < first.peak_heap_bytes);
+}
