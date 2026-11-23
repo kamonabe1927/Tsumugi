@@ -902,6 +902,79 @@ run の課金を残すか・root を課金するか・CLI の表示・import を
     残る利点（root の超過が capability によらず同じ結果になる）が、目標の章の上の文に「予算内の script では」という条件を足す重さを上回らないため採らない。
     判断の外の気付き（判断役のコメント）を受け、課金の位置を 1 か所として実装範囲 2 に書き、LRB-AT-02 に resolver 未 grant の 2 つの場合を分けて足した。
 
+### fix-repl-submission-budget 実装スライス（REPL の各 submission を、その submission の budget で数え直して実行する）
+
+loop:drift #352 の D-67 を直す（親 REV-007）。§12 の「REPLのbudget」は、REPL の各 submission を 1 execution とし、その submission の
+`ExecutionRequest` が所有する有限 budget で実行すると定める（§6、[実行予算・協調実行仕様](execution-control.md) §3・§13）。tree REPL
+（`run_for_repl`）は 2 回目以降の submission で fuel だけを戻し、ほかの使用量を session の累積のまま持ち越す（本書の逸脱一覧の REPL の budget の行）。
+本スライスは §6・§12 の目標の文を変えず、REPL の budget の扱いを目標に合わせる。累積の扱い（§12 が「fix スライスの設計で決める」とした点）と
+VM REPL を含めるかは、判断の候補 Q1・Q2（設計 PR に記載）で判断役が選ぶ。本小節は推奨案（Q1=A・Q2=A）で書いてあり、選ばれた内容に合わせて直す。
+
+- **前提（設計時点の main ba9e88a で確かめたこと）**:
+  - `Engine::run_for_repl`（`src/embedding.rs`）は `run_guarded(.., repl = true)` を通り、`install_execution_state` は同じ context の 2 回目以降の
+    submission（`ExecutionContext.repl_budget_installed`）で `Evaluator::rearm_budget_for_repl`（`src/eval.rs`）→ `BudgetLedger::rearm_for_repl_submission`
+    （`src/budget.rs`）を呼ぶ。これは request の `BudgetConfig`・clock・cancellation token を据え直し、`reset_fuel` で fuel の committed・reserved
+    だけを 0 に戻す。committed・reserved のほかの counter（string・source・import・input・output・host）と `peaks`、heap 台帳（live と peak）は持ち越す。
+    1 回目の submission は facade の `Engine::run` と同じ `reset_budget`（台帳を作り直す）を通る。
+  - VM REPL（`src/main.rs` の `run_repl_vm`）は Engine API の run を通らず、session の `Vm`（`Vm::new_repl_with_budget(budget_env.vm_budget())`）が
+    1 本の `BudgetLedger` を持つ。`Vm::run_repl_chunk`（`src/vm.rs`）は submission ごとに `reset_fuel` だけを呼ぶ。この差は
+    [実行予算・協調実行仕様](execution-control.md) の逸脱一覧の D-136 の行（fix-execution-budget-usage-fresh）が持つ。
+  - heap 台帳は tracked な値（collection・cell・token）が `HeapLedgerWeak` で参照し、値の drop で release する。tree・VM とも、前の submission の
+    artifact token（tree は `charge_linked_ast` の `ast_token`・`body_tokens`、VM は `chunk_tokens`）を release してから今回ぶんを Link で課金する。
+    REPL の context に残る変数・closure・collection と、展開済み module の record（`graph_record_tokens`）は live のまま残る。
+  - CLI の 3 本の subprocess test（`tests/integration.rs` の `source_bytes_cumulative_limit_gates_across_inputs_in_both_engines`・
+    `output_calls_limit_gates_print_in_both_engines`・`output_bytes_limit_gates_print_in_both_engines`）は、tree・VM とも 1 行ずつの submission の
+    累積で上限を超えることを期待値として固定している。
+  - [実行予算・協調実行仕様](execution-control.md) §5.2 は、context に以前から残る値を新 execution の baseline live heap とし、上限を超えれば
+    1 文も実行せず `BudgetExceeded(HeapBytes)` とする。
+- **実装範囲**:
+  1. `BudgetLedger` に、REPL の submission の開始で使う操作を 1 つ置く（`rearm_for_repl_submission` を置き換える）。request の `BudgetConfig`・clock・
+     cancellation token を据え、`committed`・`reserved` の全 counter（fuel を含む）と `peaks` を 0 に戻し、heap 台帳は作り直さずに peak だけを
+     その時点の live に戻す（Q1=A）。live heap はその submission から到達できる値の量なので持ち越し、§5.2 の baseline として扱う。
+     監査の集約器（`BudgetChargeAccumulator`）も submission の境界で空にする。
+  2. tree REPL（`install_execution_state` の `repl && repl_budget_installed` の経路と `Evaluator::rearm_budget_for_repl`）は 1 の操作を使う。
+     返す `ExecutionOutcome` の `BudgetUsage` は、その submission だけの使用量と、その時点の live heap になる。
+  3. VM REPL（`Vm::run_repl_chunk`）は `reset_fuel` の代わりに 1 の操作を使う。config は CLI が submission ごとに `budget_env.vm_budget()` から
+     作って渡す（VM REPL は clock を持たないので、clock・deadline の扱いは今と同じ）（Q2=A）。
+  4. context に残る live heap が submission の `max_live_heap_bytes` を超えるときは、Link の最初の heap 課金（artifact token）で
+     `BudgetExceeded(HeapBytes)` になり、1 文も実行しない（§5.2）。前の submission の artifact token は今どおり先に release する。
+     別の走査は足さない（live の持ち越しが baseline を兼ねる）。context は poison せず、REPL は §12 の結果表のとおり表示して次の入力へ進む。
+  5. `run_for_repl`・`rearm_budget_for_repl`・`run_repl_chunk`・CLI の `execute_repl_submission` の doc comment とコメントにある
+     「session 累積」「fuel のみ reset」の記述を、submission ごとの budget の記述に直す。
+  6. CLI の 3 本の subprocess test の期待値を、submission ごとの判定に合わせて書き直す（RSB-AT-04）。
+- **範囲外**:
+  - scheduler の handle 経路と alpha の `Engine::execute`・`execute_repl_submission`（`src/engine.rs`）が execution ごとに使用量を数えない件
+    （execution-control の逸脱一覧の D-136 の行のうち scheduler の部分。fix-execution-budget-usage-fresh）。
+  - facade の `Engine::run` が context に残る値を baseline として課金しない件（D-137。fix-link-context-baseline-charge）。facade は run ごとに台帳を
+    作り直すので、本スライスの live の持ち越しとは仕組みが違う。
+  - REPL で前の submission が展開した module を再び import したとき、link では課金し run では cache hit として課金しない差
+    （fix-link-request-budget-charge 小節の範囲外の項）。
+  - session 全体の使用量の上限（submission をまたぐ合計の上限）。目標の章に無く、本スライスでは足さない（Q1 の案 C）。
+  - VM REPL の Engine API への統合（E9 の残り）と、scheduler 側の `ExecutionContext::reset_step_budget` の削除（fix-scheduler-context-reset-step-budget）。
+- **受入基準（fix-repl-submission-budget）**:
+  - **RSB-AT-01**（使用量を submission ごとに数える、tree）: 同じ `ExecutionContext` で `run_for_repl` を 2 回呼ぶと、2 回目の outcome の
+    `BudgetUsage` の `committed`・`reserved`・`peaks` が、同じ source を新しい context で 1 回目として実行したときと一致する（live heap と
+    peak heap は除く）。確かめ方: `src/embedding.rs` の unit test（print・文字列の連結・source を含む submission）。
+  - **RSB-AT-02**（その submission の上限で判定する、tree）: submission 1 を緩い budget で `print` 3 回、submission 2 を `max_output_calls = 2` で
+    `print` 2 回にすると submission 2 は `Completed` になる。submission 3 を `max_output_calls = 1` で `print` 2 回にすると
+    `BudgetExceeded`（`OutputCalls`）になり、submission 4 を緩い budget にすると `Completed` に戻る。確かめ方: unit test。
+  - **RSB-AT-03**（live heap の持ち越しと baseline）: submission 1 で大きな List を変数に残すと、submission 2 の `BudgetUsage.live_heap_bytes` は
+    その List の分を含み、`peak_heap_bytes` は submission 1 の途中の一時的な最大値を含まない。submission 2 の `max_live_heap_bytes` を残した live より
+    小さくすると、1 文も実行せず（`print` が出ない）`BudgetExceeded`（`HeapBytes`）になり、context は poison されず、submission 3（緩い budget）で
+    その変数を読める。確かめ方: tree は unit test、VM は `src/vm.rs` の unit test（`run_repl_chunk`）。
+  - **RSB-AT-04**（CLI、tree・VM の両方）: 上の 3 本の subprocess test を、1 行ずつの submission がそれぞれ上限内なら累積で上限を超えてもエラーに
+    ならず、1 つの submission（ブロックで複数行をまとめた入力）が上限を超えると今と同じ文言のエラーを出して次の入力へ進む、という期待値に書き直す
+    （`TSUMUGI_MAX_SOURCE_BYTES`・`TSUMUGI_MAX_OUTPUT_CALLS`・`TSUMUGI_MAX_OUTPUT_BYTES`）。`for use_vm in [false, true]` で両方とも同じ期待値で通る。
+  - **RSB-AT-05**（VM REPL の使用量、Q2=A）: `Vm::run_repl_chunk` を 2 回呼んだあとの台帳の `committed`・`peaks` が 2 回目の chunk の分だけになり、
+    tree の RSB-AT-01 と同じ source で fuel 以外の counter が一致する。確かめ方: `src/vm.rs` の unit test か `tests/differential.rs`。
+- **想定の変更規模**: 本体（`#[cfg(test)]` を除く `src/`）は `src/budget.rs` が +20〜40 行（submission の開始の操作、heap 台帳の peak を live に戻す操作、
+  `rearm_for_repl_submission` の置き換え）、`src/eval.rs` が ±10〜20 行、`src/embedding.rs` が ±20〜40 行（主に doc comment）、`src/vm.rs` が +5〜15 行、
+  `src/main.rs` が ±10〜20 行（VM REPL の submission ごとの config とコメント）で、合計 60〜140 行。テストは unit test と subprocess test で +150〜250 行
+  （既存 3 本の書き直しを含む）。受入基準は 5 項目、触る仕組みは「REPL の submission の開始での budget 台帳の据え直し」1 つ（tree・VM は同じ台帳の操作を
+  呼ぶだけ）で、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。done にする実装 PR で、本書の逸脱一覧の REPL の budget の行を削除し、
+  [実行予算・協調実行仕様](execution-control.md) の逸脱一覧の D-136 の行から VM REPL の文を削る（Q2=A のとき）。
+- **依存**: なし。
+
 ## 15. 受入基準
 
 | ID | Phase | 基準 |

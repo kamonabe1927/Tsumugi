@@ -782,8 +782,10 @@ order      = 32
 [[slice]]
 id         = "fix-repl-submission-budget"
 title      = "REPL の各 submission を、その ExecutionRequest が所有する有限 budget で実行する（embedding-api §6・§12、execution-control §3・§13、loop:drift #352 D-67）"
-status     = "todo"
+status     = "ready"
 parent     = "REV-007"
+spec       = { doc = "docs/embedding-api.md", section = "fix-repl-submission-budget 実装スライス（REPL の各 submission を、その submission の budget で数え直して実行する）" }
+acceptance = ["RSB-AT-01..05"]
 order      = 33
 
 [[slice]]
