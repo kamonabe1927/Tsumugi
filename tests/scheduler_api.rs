@@ -2075,9 +2075,10 @@ fn hil_at_03_link_budget_exceeded_maps_to_budget_error() {
 
 /// LRB-AT-05: handle 経路の初回 poll の link が、link 側の課金（resolver の停止ではない）で budget 系の
 /// error（kind `source_limit`）になり、1 文も実行しない。既定の budget の import 本数上限（1_024）を
-/// 超える 1_025 module を import する（root と合わせて source 本数の上限 1_025 を先に超えるので、
-/// 超える resource は `SourceCount`）。run の `Link` フェーズの課金なら `LinkError` でなく
-/// 実行の budget 超過になるので、`LinkError` で止まることが link 側の課金の観測になる。
+/// 超える 1_026 module を import する（root と合わせて source 本数の上限 1_025 を先に超えるので、
+/// 超える resource は `SourceCount`）。link 側の課金は超過した module（root を除く 1_025 本目）を読んだ
+/// 直後に止まるので resolver の呼び出しは LIMIT + 1 回になり、link が課金しなければ全 LIMIT + 2 module を
+/// resolve する。この呼び出し数が link 側の課金の観測になる（error の種類・message・fuel は課金が無くても同じ）。
 #[test]
 fn lrb_at_05_handle_link_charges_request_budget() {
     const LIMIT: usize = 1_024;
