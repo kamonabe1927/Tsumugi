@@ -39,7 +39,7 @@ handle 経路を §3 の `ExecutionRequest` と組み込みAPI仕様 §8 の `Ex
 | scheduler の handle 経路の link 失敗は、alpha の `ExecutionOutcome` に `Denied`・`HostError` などの変種が無いため、cancel は `Cancelled`、deadline は `DeadlineExceeded`、それ以外は `LinkError { error }`（REPL の入力は `RuntimeError`）の `TsumugiError` に写る。resolver 未 grant の import は error_type `capability`、import 先のparse失敗は §3.4 のテンプレートに parse の cause を保持した `import`、link 時の予算超過は budget 系の error（判断役が選択（PR #480、Q1=A）。semantic-decisions §3.4）。解決の失敗は `モジュールを読み込めません: {code}`、循環は `import.cycle`（`{chain}`）、深度は `import のネストが深すぎます (上限: {limit})`（判断役が選択（PR #480、Q2=A））。構造化した `LinkError` を返す形は E10 で解消する | §1.1・§9.1 | fix-handle-import-from-link |
 | admission queue から active へ昇格した handle の waker を鳴らさない。§9.1 は admission 取得で状態を ready にした後で waker を呼ぶとするが、active slot を解放する `release_active`（`src/scheduler.rs`）は queue 先頭の entry を active へ付け替えたあと、その entry の waker を placeholder（`QueuedEntry::waker: Option<()>`。登録する経路が無く常に `None`）として退避するだけで鳴らさない（コメント「placeholder: FEAT-002 が waker.wake() を行う」）。昇格は host が次に poll したとき（`poll` の step 3）に観測する。loop:drift #429 D-115。fix スライスは無い（未設計） | §9.1 | — |
 | `CancellationToken::register_waker`（`src/budget.rs`）は waker を保存するだけで、保存の後に `is_cancelled()` を確かめ直さない。`ExecutionHandle::set_waker`（`src/engine.rs`）はこれを呼ぶだけなので、`set_waker` より先に cancel された handle には wake が来ない。§9.1 は登録を「waker保存→ready flag再確認→readyなら即wake」の順とする（ticket 側の `HostCallTicket::register_waker`、`src/host_pending.rs` は確かめ直している）。コードを読んで確かめた（実行での再現はしていない。再現の確認は fix の設計で行う）。fix スライス fix-cancel-token-waker-recheck（todo、未設計）で直す（判断役が選択、PR #451 の Q1=A）。loop:drift #429 D-139 | §8/§9.1 | Slice 5 |
-| facade の `Engine::run` は run ごとに台帳を作り直す（`src/budget.rs` の `reset_config_with_token`）が、context に残る変数・closure・collection を新 execution の Link で baseline として課金しない。`Evaluator::charge_link`（`src/eval.rs`）と VM の `Vm::charge_link`（`src/vm.rs`）は baseline を課金せず（コメントは同じ台帳を跨ぐ前提で再走査を省くとする）、`charge_context_baseline`（`src/budget.rs`）を本番の経路で呼ぶ箇所が無い。例: 1 回目の run で 20,000 要素の List を context に残し、2 回目を `max_live_heap_bytes = 4096` で走らせると `BudgetExceeded(HeapBytes)` でなく `Completed`（live_heap_bytes は 358）。fix スライス fix-link-context-baseline-charge（todo、未設計）で直す。挙動の直し方（baseline の課金の置き場所と二重計上の回避）はその設計で決める（判断役が選択、PR #451 の Q1=A）。loop:drift #429 D-137 | §5.2/§9.2 | REV-015 最終形移行 Slice 2 |
+| facade の `Engine::run` は run ごとに台帳を作り直す（`src/budget.rs` の `reset_config_with_token`）が、context に残る変数・closure・collection を新 execution の Link で baseline として課金しない。`Evaluator::charge_link_graph`（`src/eval.rs`）と VM の `Vm::charge_link_graph`（`src/vm.rs`）は baseline を課金せず、`charge_context_baseline`（`src/budget.rs`）を本番の経路で呼ぶ箇所が無い。例: 1 回目の run で 20,000 要素の List を context に残し、2 回目を `max_live_heap_bytes = 4096` で走らせると `BudgetExceeded(HeapBytes)` でなく `Completed`（live_heap_bytes は 358）。fix スライス fix-link-context-baseline-charge（§14 の同名の小節）で直す。挙動の直し方（baseline の課金の置き場所と二重計上の回避）はその小節で決める（判断役が選択、PR #451 の Q1=A）。loop:drift #429 D-137 | §5.2/§9.2 | REV-015 最終形移行 Slice 2 |
 | 同期の `Engine::execute`・`execute_repl_submission`（`src/engine.rs`、crate root の `Engine`）は、同じ `Engine` に他の nonterminal な handle があっても `StartError::ConcurrentRunRequiresPolling` を返さずに開始する。terminal まで poll する `drive_to_outcome` は `Yielded` で `continue` するだけなので、run-turn queue の先頭でない handle は `SchedulerPreempted` の `Yielded` を受け続け、呼び出しが戻らない（例: 同じ `Engine` で handle h1 を `max_fuel: 100` で 1 回 poll して `Yielded` にしたあと、別の context で `execute` を呼ぶ）。variant は `src/scheduler.rs` に定義済みだが検出は配線しておらず、その doc の「同期入口は構造的にこの状況を起こさない」は事実と異なる。fix スライス fix-sync-run-concurrent-handle で直す（`src/scheduler.rs` の variant の doc の誤りも同じスライスで直す。loop:drift #373 D-69） | §9.2 | Slice 3 PR-a（Slice 5 の run-turn FIFO で顕在化） |
 | scheduler（`src/engine.rs`、crate root の `Engine`）の handle 経路の cancellation token は execution ごとに作られず、`ExecutionContext` の評価器が持つ 1 つの token（`BudgetLedger` の `cancellation`。`ExecutionContext::new` で作り、`create_execution`・`start`・`execute`・`execute_repl_submission` は据え直さない）を context の寿命の間使い回す。`ExecutionHandle::cancellation_token` はこの token の clone を返し、非 terminal の handle の `Drop` はこれを `cancel()` するので、poll していない `Created` の handle を drop しただけで、その context の以後の execution はすべて最初の checkpoint で `Cancelled` になる（同期の `execute` は `Err(実行がキャンセルされました)`）。前の execution の token の clone を host が保持していて後から `cancel()` した場合も、同じ context の次の execution が止まる。token に登録した waker も次の execution へ持ち越す。fix スライス fix-handle-execution-cancel-token で直す（issue #363） | §8/§9.1/§9.2/§10 | Slice 4 |
 | scheduler（`src/engine.rs`、crate root の `ExecutionContext`）の `ExecutionContext` は、§13 の目標に無い公開メソッド `reset_step_budget()` を持つ。中身は `Evaluator::reset_step_budget` → `budget.reset_fuel()` で、同じ ledger の fuel だけを戻す（heap・I/O などの使用量は戻さない）。src・tests に呼び出し元は無い。facade の `embedding::ExecutionContext` には無い。fix スライス fix-scheduler-context-reset-step-budget で直す（loop:drift #373 D-71） | §13 | Slice 1（legacy adapter） |
@@ -387,7 +387,7 @@ continuation frameの課金対象は、スコープを作るframe（96 + local s
 
 ### 5.2 `Rc`共有と二重計上回避
 
-すべてのheap-owned objectへ単調増加する`AllocationId(u64)`を付け、executionごとに`AllocationLedger`を持つ。
+すべてのheap-owned objectへ単調増加する`AllocationId(u64)`を付け、executionごとに`AllocationLedger`を持つ。同じ`ExecutionContext`の次のexecutionは、前のexecutionの台帳を据え直して使ってよい（使用量と上限は新しいexecutionのものにし、contextに残る値のlive heapだけを引き継ぐ。下の末尾の段落）。
 
 - 同一execution内で同じ`AllocationId`へ複数の`Rc`参照があっても1回だけ課金する。
 - `Rc::clone`、closure capture、変数代入で既存objectを共有するだけなら追加課金しない。
@@ -397,7 +397,12 @@ continuation frameの課金対象は、スコープを作るframe（96 + local s
 - `AllocationId`の発行overflowは`InternalFailure(AllocationIdExhausted)`であり、0へwrapしない。
 - `for`の反復列もこの規則に従う。Listの反復は開始時のbackingを`Rc`で共有して保持し（[次期意味論・実装決定](semantic-decisions.md) §11.2）、要素を複製せず追加課金しない。Dictのkey・Strの文字から反復列を作る場合は新objectなので、作るList bodyと各要素のString body（§5.1）をallocation前に課金し、各要素を§5.3の`string_allocations`・`string_bytes`にも数える（builtinの結果の`String`と同じ）。反復列はloopの終わり（`break`・`return`・errorによる脱出を含む）で最後の参照が消えてreleaseする。tree-walk版とVM版で課金の有無・量・順序とrelease寿命を揃える（issue #358）。
 
-`ExecutionContext`に以前から残る変数・closure・collectionは、新executionを`Linked`へ進めるときに到達graphを反復worklistで走査し、baseline live heapとして課金する。baselineが上限を超える場合はscriptを1文も実行せず`BudgetExceeded(HeapBytes)`となる。再帰走査は使わず、同じ`AllocationId`をvisited setで除外する。
+`ExecutionContext`に以前から残る変数・closure・collectionは、新executionを`Linked`へ進めるときにbaseline live heapとして課金する。baselineとLinkのheap課金の合計が上限を超える場合はscriptを1文も実行せず`BudgetExceeded(HeapBytes)`となる。同じobjectを二重に数えない。baselineの求め方は次のどちらかとする。
+
+- 台帳をexecution間で持ち越す経路: 台帳を作り直さず、前のexecutionの使用量（committed・reserved・peaks）を0に戻し、live上限を新しいexecutionの`max_live_heap_bytes`に据え直し、peakをその時点のliveに戻す。前のexecutionのartifact（AST・chunk）の分は先にreleaseする。contextに残る値は同じ台帳に1回だけ課金されたまま残り、そのliveがbaselineになる。値を手放せば、最後の参照が消えた時点で同じ台帳からreleaseされる（§10のjournalが旧valueを保持する間はcommit / rollbackまでliveに残る）。
+- 台帳を作り直す経路: 到達graphを反復worklistで走査し、baseline live heapとして新しい台帳へ課金する。再帰走査は使わず、同じ`AllocationId`をvisited setで除外する。残った値が手放されたときに新しい台帳からreleaseされるよう、値の台帳の参照も新しい台帳へ付け替える。
+
+facadeの`Engine::run`とREPLは持ち越しの経路を使う（判断役が選択（PR #496 の Q1=A・PR #499 の Q1=A・Q2=A）。§14「fix-link-context-baseline-charge 実装スライス」の決定記録）。
 
 ### 5.3 string、source、import
 
@@ -3660,6 +3665,123 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
   - **TWC-AT-03（issue #393 の再現）:** issue #393 のプログラムを fuel 1〜30 と 20,000 で実行したとき、終了理由の kind・message・行が tree と VM で完全に一致する。`known_divergence_step_limit_line_after_caught_error` が `#[ignore]` なしで通り、`KNOWN_STEP_LIMIT_LINE_DIVERGENCES` に `program#143` が無い状態で `random_valid_programs_never_panic_and_engines_agree` が通る。確かめ方: `tests/random_input_robustness.rs` と、fuel を振る paired test。
   - **TWC-AT-04（yield をまたいでも同じ）:** 条件の呼び出しの途中・本体の途中で slice yield する実行（scheduler の handle 経路で小さい `max_fuel` の slice に分ける）で、条件の副作用の回数・stdout・`committed.fuel` が同期の実行と同じになる。確かめ方: 既存の tree-expr-continuation-e2b のテストと同じ形の test。
 
+### fix-link-context-baseline-charge 実装スライス（facade の `Engine::run` で context に残る値を新 execution の baseline として課金する）
+
+loop:drift #429 の D-137 を直す（親 REV-015、`slices.toml` の `fix-link-context-baseline-charge`）。§5.2 末尾は、`ExecutionContext` に以前から残る変数・closure・collection を
+新 execution を `Linked` へ進めるときに baseline live heap として課金し、上限を超えれば 1 文も実行せず `BudgetExceeded(HeapBytes)` とする。§9.2 の `Linked` は
+context baseline を課金済みの状態である。facade の `Engine::run` はこれを満たさない（逸脱一覧の D-137 の行）。挙動の直し方（baseline の課金の置き場所と
+二重計上の回避）は、PR #451 の Q1=A で本スライスの設計に回され、判断役が選択（PR #499）の Q1=A・Q2=A で決めた（下の「決定記録」）。
+
+- **前提（設計時点の main feca544 で確かめたこと）**:
+  - facade の `Engine::run`・`run_audited`（`src/embedding.rs`）は `install_execution_state` で、REPL の 2 回目以降の submission を除き
+    `Evaluator::reset_budget`（`src/eval.rs`）→ `BudgetLedger::reset_config_with_token`（`src/budget.rs`、`*self = Self::new(..)`）を呼び、heap 台帳
+    （`Rc<RefCell<AllocationLedger>>`）ごと作り直す。そのあと `Env::set_heap_ledger` で新しい台帳の handle を配り直す。
+  - tracked な値（`Tracked<T>` の List・Dict・String・cell、artifact の `HeapToken`）は台帳を `HeapLedgerWeak` で参照し、`Drop` でその台帳へ release する。
+    台帳を作り直すと、context に残る値の `Weak` は古い台帳（drop 済み）を指し、新しい台帳には課金されず、drop しても新しい台帳から release されない。
+  - `BudgetLedger::charge_context_baseline`（`src/budget.rs`）は root の `Value` から反復 worklist で走査して新しい台帳へ課金する部品だが、本番の経路から
+    呼ぶ箇所は無い（unit test だけ）。これで新しい台帳へ課金しても、残った値の `Tracked` は古い台帳の `Weak` を持つので、execution の途中でその値を手放しても
+    新しい台帳から release されず、live が過大のまま残る。走査は Value slot・body・function instance だけを数え、closure が retain する code の token（§5.3 A-1）・
+    展開済み module の record（`graph_record_tokens`）・captured cell の課金とは一致しない。
+  - 逸脱一覧の D-137 の行が挙げる `Evaluator::charge_link`・`Vm::charge_link` は、いまは `charge_link_graph`（`src/eval.rs`・`src/vm.rs`）で、どちらも
+    source・import・module record（tree は続けて AST）を課金するだけで baseline は課金しない。facade の run は tree だけを使い（`Backend::VmExperimental` でも
+    facade の run は tree の評価器を通る）、VM には facade の context を持ち越す経路が無い。VM REPL の持ち越しは fix-repl-submission-budget で済んでいる。
+  - REPL の 2 回目以降の submission（`Evaluator::rearm_budget_for_repl` → `BudgetLedger::begin_repl_submission`）は、前の submission の artifact token
+    （`ast_token`・`body_tokens`）を先に release し、heap 台帳を作り直さずに使用量（committed・reserved の全 counter と peaks）を 0 から数え直し、
+    live を持ち越して peak を live に戻し、live 上限を据え直す（fix-repl-submission-budget、判断役が選択（PR #496）の Q1=A）。context に残る live が上限を
+    超えていれば、Link の最初の heap 課金で `BudgetExceeded(HeapBytes)` になり 1 文も実行しない（RSB-AT-03）。
+  - 再現: 1 回目の `Engine::run` で `let big = range(0, 20000)` を context に残し（live 640,448）、2 回目を `max_live_heap_bytes = 4096` で `print(len(big))` に
+    すると `Completed`（`20000` を出力、live_heap_bytes 459）になる（`src/embedding.rs` の test module に一時的に置いた test で確かめた）。
+- **実装範囲**（Q1=A）:
+  1. facade の `Engine::run`・`run_audited` の `install_execution_state` は、REPL かどうか・初回かどうかに依らず、heap 台帳を作り直さない据え直しを使う。
+     中身は REPL の 2 回目以降の submission と同じで、前の execution の artifact token（`ast_token`・`body_tokens`）を先に release してから、
+     `BudgetLedger::begin_repl_submission` と同じ台帳の操作（request の `BudgetConfig`・clock・cancellation token を据え、使用量と peaks を 0 に戻し、
+     live を持ち越して peak を live に戻し、live 上限を据え直し、監査の集約器を空にする）を呼ぶ。監査・host-call・yield の buffer の据え直しは
+     `reset_budget` と同じに保つ。REPL と共通の操作にするため、操作と `Evaluator` 側の入口の名前（`begin_repl_submission`・`rearm_budget_for_repl`）を
+     execution 一般の名前へ変えてよい。`ExecutionContext.repl_budget_installed` の分岐を残すか消すかは実装で決めてよい（観測できる挙動は同じ）。
+  2. context に残る live heap は持ち越しによってそのまま新 execution の baseline になる（tracked 値は同じ台帳に 1 回だけ課金されたままで、§5.2 の visited の
+     dedup と同じく二重に数えない）。baseline が新しい request の `max_live_heap_bytes` を超えるときは、Link の最初の heap 課金（import があれば module record、
+     無ければ AST の token）で `BudgetExceeded(HeapBytes)` になり、1 文も実行しない。context は変更せず poison しない（§10 の root link 失敗と同じく
+     script を実行していない）。別の走査は足さない。
+  3. context に残っていた値を execution の途中で手放したとき（再代入・`pop` など）は、§10 の journal が元の値を保持するので、その execution の間は live に
+     残る。commit で journal が破棄されたときに同じ台帳から release され、次の execution の baseline から外れる（rollback なら元の値が context に戻り、
+     baseline に残る）（判断役が選択（PR #499 のレビュー指摘、Q1=A））。
+  4. `reset_budget`・`reset_config_with_token` の doc comment と、`install_execution_state`・`run_for_repl` のコメントにある「run ごとに台帳を作り直す」
+     「REPL だけ台帳を持ち越す」の記述を直す。facade の経路で使わなくなった `reset_budget` を消すか残すかは実装で決めてよい（scheduler の handle 経路は
+     使っていない。`src/engine.rs` の経路は D-136 の範囲）。
+  5. done にする実装 PR で逸脱一覧の D-137 の行を削除する。§5.2 は Q2=A の反映で台帳の持ち越しを baseline の求め方の 1 つとしたので、facade で
+     `charge_context_baseline` を本番で呼ばないことは逸脱ではない。
+- **範囲外**:
+  - scheduler の handle 経路（`src/engine.rs` の `ExecutionContext`・`create_execution`・`start`・`execute`）。台帳を execution ごとに作り直さない差は
+    D-136 の行で fix-execution-budget-usage-fresh（todo）が直す。その設計で台帳を作り直すかどうかを決めるときに、本スライスと同じ baseline の扱いに揃える。
+  - VM（facade に VM の context を持ち越す経路が無い。VM REPL は fix-repl-submission-budget で済み）。
+  - `charge_context_baseline` の削除（§5.2 の台帳を作り直す経路の部品として残す。Q2=A）。
+  - 前の execution が展開した module の record（`graph_record_tokens`）の扱い。loaded module marker と同じ context の状態として live に残り、本スライスでは
+    持ち越しの baseline に含まれるだけで、課金・release の規則は変えない。
+- **観測される変化**: 同じ `ExecutionContext` で 2 回目以降の `Engine::run`・`run_audited` の `BudgetUsage.live_heap_bytes` と `peak_heap_bytes` が、context に
+  残る値の分を含む（今は含まない）。pre-cancel（命令 0 の `Cancelled`）の usage の live も、context に値が残っていればその分を含む（新しい context なら 0 のまま）。
+  committed・reserved の counter と peaks は今と同じく execution ごとに 0 から数える。fuel と `fuel_accounting_revision`・`HEAP_ACCOUNTING_REVISION` は変えない
+  （§5.1 の論理サイズも課金点も変えず、context に残る値を判定に含めるだけ）。
+- **受入基準（fix-link-context-baseline-charge）**:
+  - **LCB-AT-01**（baseline が上限を超えると 1 文も実行しない）: 1 回目の `Engine::run` で `let big = range(0, 20000)` を context に残し、2 回目を
+    `max_live_heap_bytes = 4096` で `print(len(big))` にすると `BudgetExceeded`（`HeapBytes`）になり、何も出力せず、context は poison されない。3 回目を
+    緩い budget にすると `Completed` で `20000` を出力する。`run_audited`（監査 sink あり）でも 2 回目が同じ terminal になり、Terminal event の
+    `context_committed` が `false` になる。2 回目の上限を、同じ source を同じ context で緩い budget で実行したときの Link 直後の live heap（baseline と
+    AST の分の合計）ちょうどにすると 1 文目を実行し、その値 − 1 にすると 1 文も実行せず `BudgetExceeded`（`HeapBytes`）になる（§15.2 の境界）。確かめ方: `src/embedding.rs` の unit test。
+  - **LCB-AT-02**（baseline を usage に含める）: 上の 1 回目のあと緩い budget で `let n = len(big)` を実行すると、`live_heap_bytes` が
+    `heap_size::list_body(20000)` 以上で、`peak_heap_bytes` は 1 回目の途中の一時的な最大値（1 回目で作って捨てた大きな List）と 1 回目の AST の分を含まない。
+    committed の counter は同じ source を新しい context で実行したときと一致する。`live_heap_bytes` は `2 × heap_size::list_body(20000)`（1,280,048）未満で、
+    持ち越した `big` を二重に数えない。確かめ方: unit test。
+  - **LCB-AT-03**（commit の境界で同じ台帳から release する）: 1 回目で `let big = range(0, 20000)` を残し、2 回目を緩い budget で `big = null` にすると
+    `Completed` になる。3 回目を緩い budget で `let k = 1` にすると、その `live_heap_bytes` は、`big = null` の代わりに `big = big`（binding を足さず、`big` を残す）を
+    2 回目で実行した対照の context の 3 回目より `heap_size::list_body(20000)`（24 + 32 × 20,000 = 640,024）ちょうど小さい（2 回目の AST は 3 回目の開始で
+    release されるので差に入らず、3 回目は同じ source にそろえる）。続けて
+    4 回目を `max_live_heap_bytes = list_body(20000) + 4096`（644,120）で `let other = range(0, 20000)` にすると `Completed` になり、対照の context で
+    同じ 4 回目を実行すると `BudgetExceeded`（`HeapBytes`）になる。上限の根拠: `big` が release されていれば必要な live は新しい List の 640,024 と、
+    小さな script の AST・cell などの数百 byte（PR #499 のレビューの計測で、`big` を残した context の `let k = 1` の live が list_body(20000) より 257 大きく、`big = null` と新しい List を同じ execution で作ったときの peak が 2 × list_body(20000) より 717 大きい）で、
+    4096 に収まる。`big` が残っていれば baseline の 640,024 以上に新しい List の 640,024 が加わって 1,280,048 以上になり、上限を超える。
+    execution の途中で手放した値は §10 の journal が保持するので、2 回目と 4 回目を 1 つの execution にまとめた形では確かめない（実装範囲 3）。確かめ方: unit test。
+  - **LCB-AT-04**（失敗した execution のあとの baseline）: 2 回目を未捕捉の runtime error で終わらせ（途中で大きな List を作る）、3 回目の開始時の live が
+    2 回目の開始時の live と同じになる（rollback した値と 2 回目の AST が残らない）。context に closure を残した場合、3 回目の live がその closure の
+    retained code（§5.3 A-1）の分を含む。確かめ方: unit test。
+- **想定の変更規模**: 本体（`#[cfg(test)]` を除く `src/`）は `src/embedding.rs` が ±15〜40 行（`install_execution_state` の分岐とコメント）、`src/eval.rs` が
+  ±10〜30 行（据え直しの入口の共通化と doc comment）、`src/budget.rs` が ±5〜20 行（操作の名前と doc comment）で、合計 30〜90 行。テストは unit test で
+  +120〜220 行（同じ context で usage の live を前提にした既存 test があれば期待値の直しを含む）。受入基準は 4 項目、触る仕組みは「facade の execution の開始での
+  budget 台帳の据え直し」1 つで、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。
+- **依存**: なし（fix-repl-submission-budget は done で、その台帳の操作を使う）。
+- **決定記録**（判断役が選択（PR #499））:
+  - **Q1=A**（facade の `Engine::run`・`run_audited` でも heap 台帳を作り直さず、REPL の 2 回目以降の submission と同じ据え直し〔artifact token を先に release →
+    使用量と peaks を 0 に → live を持ち越して peak を live に → live 上限を据え直す〕をすべての run で使う）。理由: context に残る値が新 execution の live 上限の
+    判定に入り、D-137 の「20,000 要素を残しても 4096 の上限で `Completed`」が塞がる（[マニフェスト](manifesto.md) 原則 3）。live が §2 の heap の定義（execution から
+    到達可能な論理 allocation の live byte 数）と一致し、手放した値は同じ台帳から release され、closure の retained code・module record・cell も既存の課金のまま
+    含まれる（原則 5）。据え直しの仕組みが REPL と facade で 1 つになり、走査も `Tracked` の構造変更も足さない（原則 8）。§9.2 の `Linked`（context baseline を
+    課金済み）と §5.2 の規範を満たし、§13 の「使用量は execution ごとに新しく数える」は committed・reserved・peaks を 0 から数えることで保つ。
+    fix-repl-submission-budget の Q1=A（PR #496）と同じ扱いである。採らなかった案 B（台帳を作り直し、走査で新しい台帳へ課金して tracked 値の台帳の参照を
+    付け替える）は、`Tracked` の構造変更と cell・retained code・module record まで付け替える走査が要り、据え直しと付け替えの 2 つの仕組みを持つことになる
+    （原則 8 に不利。走査と既存の課金が一致しなければ live がずれる危険も増える、原則 5）。採らなかった案 C（作り直した台帳へ `charge_context_baseline` を
+    呼ぶだけ）は、release が新しい台帳に届かず live が過大に残り、走査が retained code・module record・cell を数えず過小にもなるので、上限の判定が到達可能な量で
+    説明できず、原則 3・5 に反しうる。
+  - **Q2=A**（§5.2 末尾の規範〔baseline live heap として課金し、上限を超えれば 1 文も実行せず `BudgetExceeded(HeapBytes)`、同じ object を二重に数えない〕は変えず、
+    求め方を「台帳の持ち越し」と「台帳を作り直す経路での反復 worklist の走査 + visited set」の両方として書き直す。この PR で直した）。理由: Q1=A の挙動は規範を
+    満たすので、目標の文を判断の反映として直すのが置き場所として正しく（原則 9、documentation-guide の目標と逸脱一覧の区別）、scheduler の経路
+    （fix-execution-budget-usage-fresh、D-136）の設計もどちらの求め方も選べる。採らなかった案 B（目標の文を変えず逸脱一覧に行を足す）は、規範を満たす挙動を
+    解消する予定の無い逸脱として残し、後の設計が同じ問いに戻る（原則 9 に不利）。
+  - 反映で合わせて直したこと（判断コメントの申し送り）: §5.2 冒頭の「execution ごとに `AllocationLedger` を持つ」に、同じ context の次の execution が前の台帳を
+    据え直して使ってよいこと（使用量と上限は新しい execution のもの、引き継ぐのは context に残る値の live だけ）を書き足した。§15.2 の「context baseline が limit
+    ちょうどなら Linked、`+1` なら失敗」は、持ち越しの経路では Link の heap 課金（AST・module record）が baseline に足されてから判定されるので、判定の対象を
+    「context baseline と Link の heap 課金の合計（`Linked` 時点の live heap）」と書き直し、§5.2 末尾の「baseline と Link の heap 課金の合計が上限を超える場合」と
+    揃えた。この境界は LCB-AT-01 で確かめる。
+  - **レビュー指摘への判断 Q1=A**（判断役が選択（PR #499 のレビュー指摘への判断））: 実装範囲 3 と LCB-AT-03 は、execution の途中で手放した値がその execution の
+    live から外れる前提で書いていたが、facade の run は transactional で、§10 の journal（`Env::journal_cell` の `UndoEntry::CellValue`）が元の値を commit /
+    rollback まで保持するので、そのままでは満たせなかった。release を確かめる時点を commit の境界に移し、実装範囲 3 を「commit で journal が破棄されたときに
+    同じ台帳から release され、次の execution の baseline から外れる」に直し、LCB-AT-03 を書き直して上限の数値の根拠を書き、二重に数えないことは LCB-AT-02 の
+    「live が list_body(20000) の 2 倍未満」で確かめる。§5.2 末尾の持ち越しの項の release の時点（最後の参照が消えた時点。journal が保持する間は commit /
+    rollback まで残る）も揃えた。理由: §10 は「journal自身と旧valueの保持はheap budgetへ課金する」と定めており、途中で手放した値が live に残るのは規範どおりで、
+    直すのは小節と受入基準の側である。journal が実際に保持している量を live に数え続けるので上限の判定が保持量と一致し（原則 1・3）、rollback の仕組みに
+    触れない（原則 6）。触る仕組みと見積もりは変わらない（原則 8）。採らなかった案 B（execution の途中での release を目標にして journal の持ち方を変える）は、
+    保持したまま live から外す（原則 1・3）か保持をやめる（全 language-state の rollback が成り立たない、原則 6）かのどちらかになり、§10 とも食い違い、
+    本スライスの範囲を超えるため採らない。同じ execution の中で大きな値を手放して作り直すと journal のために peak が 2 倍になる点は §10 の規範どおりで、
+    本スライスでは扱わない。
+
 ## 15. 境界受入テスト
 
 実装完了には、通常unit testに加えて次をすべて自動化する。
@@ -3679,7 +3801,7 @@ issue #293 から作ったスライス（不具合の修正、`slices.toml` の 
 - 同じ`Rc`を複数変数・List・closureから参照しても1回だけ課金する
 - copy-on-writeで新AllocationId分を課金し、最後の参照dropでlive heapをreleaseする
 - root AST、VM chunk、function、import record、rollback journalが表の論理サイズと一致する
-- context baselineがlimitちょうどならLinkedになり、`+1`ならscriptを実行せず失敗する
+- context baselineとLinkのheap課金の合計（`Linked`時点のlive heap）がlimitちょうどならLinkedになり、`+1`ならscriptを実行せず失敗する
 - 大量のallocate/freeはlive heapを回復してもstring allocation/countの累積上限を迂回できない
 
 ### 15.3 state・race
