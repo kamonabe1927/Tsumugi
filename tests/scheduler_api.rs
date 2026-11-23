@@ -2072,3 +2072,47 @@ fn hil_at_03_link_budget_exceeded_maps_to_budget_error() {
         other => panic!("LinkError を期待したが {other:?}"),
     }
 }
+
+/// LRB-AT-05: handle 経路の初回 poll の link が、link 側の課金（resolver の停止ではない）で budget 系の
+/// error（kind `source_limit`）になり、1 文も実行しない。既定の budget の import 本数上限（1_024）を
+/// 超える 1_025 module を import する（root と合わせて source 本数の上限 1_025 を先に超えるので、
+/// 超える resource は `SourceCount`）。run の `Link` フェーズの課金なら `LinkError` でなく
+/// 実行の budget 超過になるので、`LinkError` で止まることが link 側の課金の観測になる。
+#[test]
+fn lrb_at_05_handle_link_charges_request_budget() {
+    const LIMIT: usize = 1_024;
+    let owned: Vec<(String, String)> = (0..=LIMIT)
+        .map(|i| (format!("@default/m{i}.tsg"), "let v = 1\n".to_string()))
+        .collect();
+    let sources: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(id, text)| (id.as_str(), text.as_str()))
+        .collect();
+    let root: String = (0..=LIMIT)
+        .map(|i| format!("import \"m{i}.tsg\"\n"))
+        .collect::<String>()
+        + "print(\"AFTER\")\n";
+
+    let engine = Engine::new();
+    let script = engine.compile(&root).unwrap();
+    let (resolver, _calls) = counting_resolver::CountingResolver::new(&sources);
+    let mut context = ExecutionContext::new();
+    context.set_capabilities(resolver.capabilities());
+    let mut handle = engine
+        .create_execution(&script, &mut context, ExecutionRequest::new())
+        .expect("admit");
+    match handle.poll(PollSlice::default()).expect("poll") {
+        PollResult::Terminal {
+            outcome: ExecutionOutcome::LinkError { error },
+            usage,
+        } => {
+            assert_eq!(error.error_type(), "source_limit");
+            assert_eq!(
+                error.message(),
+                format!("ソースの本数が上限を超えました (上限: {})", LIMIT + 1)
+            );
+            assert_eq!(usage.committed.fuel, 0, "1 文も実行しない");
+        }
+        other => panic!("LinkError を期待したが {other:?}"),
+    }
+}

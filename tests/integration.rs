@@ -4196,3 +4196,66 @@ fn f2c_at_04_representative_scripts_succeed_with_default_fuel() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// fix-link-request-budget-charge（LRB-AT-04）: `LinkRequest` の budget の超過は link で止まり、
+// run の budget 超過と同じ文言で出る（`リンクエラー:` の Debug 表示にならない）。
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lrb_at_04_link_budget_exceeded_uses_run_wording_in_both_engines() {
+    for use_vm in [false, true] {
+        let mode = if use_vm { "VM" } else { "tree" };
+        let dir = TestDir::new(if use_vm {
+            "lrb-at-04-vm"
+        } else {
+            "lrb-at-04-tree"
+        });
+        std::fs::write(dir.path.join("lib.tsg"), "let helper = 42\n").expect("lib の作成に失敗");
+        let script = dir.path.join("main.tsg");
+        std::fs::write(&script, "import \"lib.tsg\"\nprint(\"AFTER\")\n")
+            .expect("main の作成に失敗");
+        let import_root = format!("default={}", dir.as_str());
+        let envs = [
+            ("TSUMUGI_SANDBOX", dir.as_str()),
+            ("TSUMUGI_MAX_IMPORT_BYTES", "1"),
+        ];
+
+        // file: exit 1、budget の文言、行番号の接頭辞なし。
+        let output = run_script_process_with_args(
+            &script,
+            use_vm,
+            &["--allow-import-root", &import_root],
+            &envs,
+            &format!("lrb-at-04 file [{mode}]"),
+        );
+        let (stdout, stderr) = output_text(&output);
+        assert_eq!(output.status.code(), Some(1), "{mode} file: {stderr}");
+        assert!(
+            stderr.contains("import の総バイト数が上限を超えました"),
+            "{mode} file: budget の文言が出ていません: {stderr}"
+        );
+        assert!(!stderr.contains("リンクエラー:"), "{mode} file: {stderr}");
+        assert!(!stderr.contains("行目:"), "{mode} file: {stderr}");
+        assert_eq!(stdout, "", "{mode} file: 1 文も実行しません");
+
+        // REPL: `  エラー: …` で出て、次の入力へ進む。
+        let output = run_repl_process_with_args(
+            "import \"lib.tsg\"\nprint(\"NEXT\")\n",
+            use_vm,
+            &envs,
+            &["--allow-import-root", &import_root],
+        );
+        let (stdout, stderr) = output_text(&output);
+        assert!(output.status.success(), "{mode} REPL: {stderr}");
+        assert!(
+            stderr.contains("  エラー: import の総バイト数が上限を超えました"),
+            "{mode} REPL: {stderr}"
+        );
+        assert!(!stderr.contains("リンクエラー:"), "{mode} REPL: {stderr}");
+        assert!(
+            stdout.contains("NEXT"),
+            "{mode} REPL: 次の入力へ進みません: {stdout}"
+        );
+    }
+}
