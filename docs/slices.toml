@@ -786,6 +786,7 @@ status     = "ready"
 parent     = "REV-007"
 spec       = { doc = "docs/embedding-api.md", section = "fix-repl-submission-budget 実装スライス（REPL の各 submission を、その submission の budget で数え直して実行する）" }
 acceptance = ["RSB-AT-01..05"]
+design_pr  = 496
 order      = 33
 
 [[slice]]
