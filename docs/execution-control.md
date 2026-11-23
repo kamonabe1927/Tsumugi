@@ -3732,8 +3732,9 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
     committed の counter は同じ source を新しい context で実行したときと一致する。`live_heap_bytes` は `2 × heap_size::list_body(20000)`（1,280,048）未満で、
     持ち越した `big` を二重に数えない。確かめ方: unit test。
   - **LCB-AT-03**（commit の境界で同じ台帳から release する）: 1 回目で `let big = range(0, 20000)` を残し、2 回目を緩い budget で `big = null` にすると
-    `Completed` になる。3 回目を緩い budget で `let k = 1` にすると、その `live_heap_bytes` は、`big = null` の代わりに `let j = 0` を 2 回目で実行した対照の
-    context の 3 回目より `heap_size::list_body(20000)`（24 + 32 × 20,000 = 640,024）だけ小さい（AST の大きさが同じ source にそろえる）。続けて
+    `Completed` になる。3 回目を緩い budget で `let k = 1` にすると、その `live_heap_bytes` は、`big = null` の代わりに `big = big`（binding を足さず、`big` を残す）を
+    2 回目で実行した対照の context の 3 回目より `heap_size::list_body(20000)`（24 + 32 × 20,000 = 640,024）ちょうど小さい（2 回目の AST は 3 回目の開始で
+    release されるので差に入らず、3 回目は同じ source にそろえる）。続けて
     4 回目を `max_live_heap_bytes = list_body(20000) + 4096`（644,120）で `let other = range(0, 20000)` にすると `Completed` になり、対照の context で
     同じ 4 回目を実行すると `BudgetExceeded`（`HeapBytes`）になる。上限の根拠: `big` が release されていれば必要な live は新しい List の 640,024 と、
     小さな script の AST・cell などの数百 byte（PR #499 のレビューの計測で、`big` を残した context の `let k = 1` の live が list_body(20000) より 257 大きく、`big = null` と新しい List を同じ execution で作ったときの peak が 2 × list_body(20000) より 717 大きい）で、
