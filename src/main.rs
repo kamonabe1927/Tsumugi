@@ -511,9 +511,8 @@ fn run_repl(frozen: CapabilitySet, budget_env: &LegacyBudgetEnv) {
             continue;
         }
 
-        // submission を 1 件実行する。budget は session 全体で 1 本の ledger を共有し、submission
-        // ごとに fuel(step) だけ reset して cumulative counter（source/output/host/string/heap 等）
-        // は累積を温存する（`run_for_repl` が実施、統合前 tree REPL の観測挙動を保全）。未捕捉
+        // submission を 1 件実行する。budget の使用量は submission ごとに 0 から数え（`run_for_repl`
+        // が実施）、context に残る live heap だけを持ち越す。未捕捉
         // エラーは入力が変更した language-state を巻き戻す（AUD-024、embedding の transaction）。
         execute_repl_submission(&engine, &input, &mut context, &frozen, budget_env);
 
@@ -552,9 +551,8 @@ fn execute_repl_submission(
         }
     };
 
-    // clock / cancellation / operation_id は submission ごとに用意する。budget config 自体は
-    // 初回 submission で `run_for_repl` が install し、2 回目以降は fuel だけ reset して cumulative
-    // を温存するため（session 累積）、ここで渡す budget は初回のみ実効となる。
+    // clock / cancellation / operation_id と budget config は submission ごとに用意する。
+    // `run_for_repl` は各 submission で、この budget の使用量を 0 から数えて実行する。
     let clock: Arc<dyn tsumugi::MonotonicClock> = Arc::new(SystemMonotonicClock::new());
     let budget = budget_env.budget(clock.as_ref());
     let cancellation = CancellationToken::new();
@@ -832,6 +830,8 @@ fn execute_repl_submission_vm(
 
     let compiler_checkpoint = compiler.clone();
     let imports_checkpoint = imports.clone();
+    // submission ごとの budget で使用量を 0 から数える（link の課金より前に据え直す）。
+    vm.begin_repl_submission(budget_env.vm_budget());
     // source/import 予算を Link フェーズで課金する。超過なら compile も実行もしない。
     match vm.charge_link_graph(source.len() as u64, &newly) {
         Ok(tokens) => {

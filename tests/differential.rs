@@ -313,15 +313,25 @@ struct ReplFixture {
 
 /// tree engine で REPL 入力列を 1 台帳で回し、各入力完了後の `BudgetUsage` を返す。
 ///
-/// `src/main.rs` の tree REPL ループを模す（`run_repl_submission` が内部で link する）。
+/// `src/main.rs` の tree REPL ループを模す（`run_repl_submission` が内部で link する）。2 回目以降の
+/// submission は開始で台帳を据え直す（使用量は submission ごと、live heap は持ち越し）。
 /// `closure_retain.rs` の `tree_live_heap_per_input` を全 usage snapshot へ一般化したもの。
 fn tree_usage_per_input(inputs: &[&str]) -> Vec<BudgetUsage> {
     let mut evaluator = Evaluator::new();
     evaluator.set_capabilities(print_capabilities());
     let mut snapshots = Vec::with_capacity(inputs.len());
-    for input in inputs {
+    for (index, input) in inputs.iter().enumerate() {
         let tokens = Lexer::new(input).tokenize();
         let program = Parser::new(tokens).parse().expect("パースに失敗");
+        // CLI の流れのとおり、2 回目以降の submission は開始で budget を据え直す
+        // （使用量は submission ごとに 0 から数え、live heap は持ち越す）。
+        if index > 0 {
+            evaluator.rearm_budget_for_repl(
+                BudgetConfig::for_legacy(1_000_000, 1_000_000),
+                Arc::new(tsumugi::SystemMonotonicClock::new()),
+                tsumugi::CancellationToken::new(),
+            );
+        }
         // エラー入力も REPL は継続する（rollback して次入力へ）。結果は捨て、usage を snapshot
         // することで入力間 rollback/release の効果を観測する。
         let _ = evaluator.run_repl_submission(&program, input.len() as u64);
@@ -333,7 +343,7 @@ fn tree_usage_per_input(inputs: &[&str]) -> Vec<BudgetUsage> {
 /// VM engine で REPL 入力列を 1 台帳で回し、各入力完了後の `BudgetUsage` を返す。
 ///
 /// `src/main.rs` の VM REPL ループを模す: 永続 `Compiler` + `Vm::new_repl()` で、入力ごとに
-/// `charge_link`（source 会計）→ `compile_repl_line` → `run_repl_chunk` を回す。
+/// `begin_repl_submission`（据え直し）→ `charge_link`（source 会計）→ `compile_repl_line` → `run_repl_chunk` を回す。
 /// `closure_retain.rs` の `vm_live_heap_per_input` を全 usage snapshot へ一般化したもの。
 fn vm_usage_per_input(inputs: &[&str]) -> Vec<BudgetUsage> {
     let mut compiler = Compiler::new();
@@ -343,6 +353,8 @@ fn vm_usage_per_input(inputs: &[&str]) -> Vec<BudgetUsage> {
     for input in inputs {
         let tokens = Lexer::new(input).tokenize();
         let program = Parser::new(tokens).parse().expect("パースに失敗");
+        // CLI の流れのとおり、submission の開始で budget を据え直してから link を課金する。
+        vm.begin_repl_submission(BudgetConfig::for_legacy(1_000_000, 1_000_000));
         // source 会計は実行可否と独立に行う（charge_link が超過なら以降は skip）。
         if vm.charge_link_graph(input.len() as u64, &[]).is_err() {
             snapshots.push(vm.budget_usage());
@@ -811,8 +823,10 @@ fn budget_boundary_heap_subprocess() {
 #[test]
 fn budget_boundary_output_calls_subprocess() {
     assert_subprocess(&SubprocessFixture {
-        label: "output_calls: 上限超過で両 engine 停止",
-        source: "print(1)\nprint(2)\nprint(3)\n",
+        label: "output_calls: 1 つの submission が上限を超えると両 engine 停止",
+        // REPL は submission ごとに数える（fix-repl-submission-budget）ので、3 回の print を 1 つの
+        // submission（ブロック）にまとめて上限 2 を超えさせる。
+        source: "if true\n    print(1)\n    print(2)\n    print(3)\nend\n",
         limits: EnvLimits {
             envs: vec![("TSUMUGI_MAX_OUTPUT_CALLS", "2")],
         },
@@ -1548,4 +1562,96 @@ fn f2c_at_01_invocation_and_iteration_differences() {
     let f = |n: u32| format!("let s = 0\nfor x in range(0, {n})\n  s = s + x\nend\n");
     let diff = assert_fuel_parity("for 7", &f(7)) - assert_fuel_parity("for 3", &f(3));
     assert_eq!(diff, 4 * (2 + 6), "for の反復");
+}
+
+// =============================================================================
+// fix-repl-submission-budget: REPL の使用量は submission ごとに数える（RSB-AT-03 の VM、RSB-AT-05）
+// =============================================================================
+
+/// RSB-AT-05: VM REPL を（据え直し → `charge_link_graph` → `run_repl_chunk`）で 2 回回したあとの
+/// 台帳の `committed`・`peaks` は 2 回目の submission の分だけになり、tree と fuel 以外が一致する。
+#[test]
+fn rsb_at_05_vm_repl_usage_is_per_submission_and_matches_tree() {
+    let src = "let t = upper(\"abc\") + \"def\"\nprint(t)\n";
+    let (tree, vm) = both_engines_per_input(&[src, src]);
+
+    let mut vm_first = vm[0].committed;
+    let mut vm_second = vm[1].committed;
+    let mut tree_first = tree[0].committed;
+    let mut tree_second = tree[1].committed;
+    for counters in [
+        &mut vm_first,
+        &mut vm_second,
+        &mut tree_first,
+        &mut tree_second,
+    ] {
+        counters.fuel = 0;
+    }
+    assert!(vm_second.source_bytes > 0 && vm_second.output_calls == 1);
+    assert_eq!(vm_second, vm_first, "VM: 2 回目は 1 回目と同じ使用量");
+    assert_eq!(tree_second, tree_first, "tree: 2 回目は 1 回目と同じ使用量");
+    assert_eq!(vm_second, tree_second, "fuel 以外の counter が tree と一致");
+    assert_eq!(vm[1].peaks, vm[0].peaks);
+    assert_eq!(vm[1].peaks, tree[1].peaks);
+}
+
+/// RSB-AT-03（VM）: live heap は持ち越して baseline とし、peak は前の submission の最大値を含まない。
+/// baseline が上限を超えるなら 1 文も実行せず `BudgetExceeded`（heap）、次の submission で変数を読める。
+#[test]
+fn rsb_at_03_vm_repl_carries_live_heap_as_baseline() {
+    fn submit(
+        vm: &mut Vm,
+        compiler: &mut Compiler,
+        src: &str,
+        config: BudgetConfig,
+    ) -> Result<(), TsumugiError> {
+        let tokens = Lexer::new(src).tokenize();
+        let program = Parser::new(tokens).parse().expect("パースに失敗");
+        vm.begin_repl_submission(config);
+        vm.charge_link_graph(src.len() as u64, &[])?;
+        // CLI と同じく、失敗した submission の compiler の状態は巻き戻す。
+        let checkpoint = compiler.clone();
+        let chunk = compiler.compile_repl_line(&program).expect("compile");
+        let result = vm.run_repl_chunk(chunk);
+        if result.is_err() {
+            *compiler = checkpoint;
+        }
+        result
+    }
+
+    let loose = BudgetConfig::for_legacy(1_000_000, 1_000_000);
+    let mut compiler = Compiler::new();
+    let mut vm = Vm::new_repl();
+    vm.set_capabilities(print_capabilities());
+
+    submit(
+        &mut vm,
+        &mut compiler,
+        "let big = range(0, 2000)\nlet tmp = range(0, 4000)\ntmp = null\n",
+        loose,
+    )
+    .expect("submission 1");
+    let first = vm.budget_usage();
+
+    submit(&mut vm, &mut compiler, "let n = len(big)\n", loose).expect("submission 2");
+    let second = vm.budget_usage();
+    assert!(second.live_heap_bytes > 0);
+    assert!(
+        second.peak_heap_bytes < first.peak_heap_bytes,
+        "peak は前の submission の最大値を含まない: {} vs {}",
+        second.peak_heap_bytes,
+        first.peak_heap_bytes
+    );
+
+    let mut tight = loose;
+    tight.max_live_heap_bytes = second.live_heap_bytes / 2;
+    let error = submit(&mut vm, &mut compiler, "let ran = 1\n", tight)
+        .expect_err("baseline が上限を超えるので実行しない");
+    assert!(
+        error.message().contains("ヒープ") || error.message().contains("heap"),
+        "{}",
+        error.message()
+    );
+
+    submit(&mut vm, &mut compiler, "let m = len(big)\n", loose).expect("緩い budget で読める");
 }

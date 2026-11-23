@@ -2489,21 +2489,32 @@ fn single_string_limit_gates_shared_builtin_in_both_engines() {
 
 #[test]
 fn string_bytes_cumulative_limit_gates_shared_builtin_in_both_engines() {
-    // REV-015 Slice 2: 複数の String 生成の累積 byte 数が max_string_bytes を
-    // 超えると、両 engine で string 上限エラーになる。
-    // upper が "AAAAA"(5)+"BBBBB"(5) を生成し、累積 10 > 上限 8 で拒否する。
-    let source = "print(upper(\"aaaaa\"))\nprint(upper(\"bbbbb\"))\n";
+    // REV-015 Slice 2: String 生成の byte 数が max_string_bytes で課金される。
+    // RSB-AT-04: `print(upper("aaaaa"))` の 1 submission は 10 byte で上限 10 に収まり、累積では
+    // 超えてもエラーにならない。2 つを 1 つの submission にまとめると超えてエラーを出し、次の入力へ進む。
+    let source = "print(upper(\"aaaaa\"))\nprint(upper(\"bbbbb\"))\n\
+                  if true\n    print(upper(\"ccccc\"))\n    print(upper(\"ddddd\"))\nend\n\
+                  print(upper(\"eeeee\"))\n";
 
     for use_vm in [false, true] {
-        let output = run_repl_process(source, use_vm, &[("TSUMUGI_MAX_STRING_BYTES", "8")]);
-        let (_stdout, stderr) = output_text(&output);
+        let output = run_repl_process(source, use_vm, &[("TSUMUGI_MAX_STRING_BYTES", "10")]);
+        let (stdout, stderr) = output_text(&output);
         let mode = if use_vm { "VM" } else { "tree" };
 
         assert!(output.status.success(), "{mode} REPLが異常終了: {stderr}");
-        assert!(
-            stderr.contains("文字列の総バイト数が上限を超えました"),
-            "{mode}で cumulative string bytes 上限が適用されていない: {stderr}"
+        assert_eq!(
+            stderr
+                .matches("文字列の総バイト数が上限を超えました")
+                .count(),
+            1,
+            "{mode}で上限超過の submission だけがエラーになるはず: {stderr}"
         );
+        for expected in ["AAAAA\n", "BBBBB\n", "EEEEE\n"] {
+            assert!(
+                stdout.contains(expected),
+                "{mode}で {expected:?} が出ていない: {stdout}"
+            );
+        }
     }
 }
 
@@ -2676,20 +2687,34 @@ fn single_source_limit_gates_root_source_in_both_engines() {
 
 #[test]
 fn source_bytes_cumulative_limit_gates_across_inputs_in_both_engines() {
-    // REV-015 Slice 2: REPL の各入力を 1 本の source として累積課金し、
-    // 生 byte 数の合計が max_source_bytes を超えると source 上限エラーになる。
-    // 各入力が数 byte で、2 本目以降の累積で上限 10 を超える。
-    let source = "print(1)\nprint(2)\nprint(3)\n";
+    // RSB-AT-04（fix-repl-submission-budget）: source の使用量は submission ごとに数える。
+    // 1 行ずつの submission（9 byte）は累積で上限 10 を超えてもエラーにならず、
+    // 1 つの submission（ブロックで複数行をまとめた入力）が上限を超えるとエラーを出して次の入力へ進む。
+    let source = "print(1)\nprint(2)\nprint(3)\n\
+                  if true\n    print(4)\nend\nprint(5)\n";
 
     for use_vm in [false, true] {
         let output = run_repl_process(source, use_vm, &[("TSUMUGI_MAX_SOURCE_BYTES", "10")]);
-        let (_stdout, stderr) = output_text(&output);
+        let (stdout, stderr) = output_text(&output);
         let mode = if use_vm { "VM" } else { "tree" };
 
         assert!(output.status.success(), "{mode} REPLが異常終了: {stderr}");
+        assert_eq!(
+            stderr
+                .matches("ソースの総バイト数が上限を超えました")
+                .count(),
+            1,
+            "{mode}で上限超過の submission だけがエラーになるはず: {stderr}"
+        );
+        for expected in ["1\n", "2\n", "3\n", "5\n"] {
+            assert!(
+                stdout.contains(expected),
+                "{mode}で {expected:?} が出ていない: {stdout}"
+            );
+        }
         assert!(
-            stderr.contains("ソースの総バイト数が上限を超えました"),
-            "{mode}で cumulative source bytes 上限が適用されていない: {stderr}"
+            !stdout.contains("4\n"),
+            "{mode}で超過した submission が実行された: {stdout}"
         );
     }
 }
@@ -2697,38 +2722,60 @@ fn source_bytes_cumulative_limit_gates_across_inputs_in_both_engines() {
 #[test]
 fn output_calls_limit_gates_print_in_both_engines() {
     // REV-015 Slice 2 (I-O accounting): print は output host call として課金される。
-    // 各 print が output_calls を 1 消費し、上限 2 を 3 回目の print で超える。
-    let source = "print(1)\nprint(2)\nprint(3)\n";
+    // RSB-AT-04: 1 行ずつの submission（各 1 回）は累積 3 回でもエラーにならず、
+    // 1 つの submission が上限 2 を 3 回の print で超えるとエラーを出して次の入力へ進む。
+    let source = "print(1)\nprint(2)\nprint(3)\n\
+                  if true\n    print(4)\n    print(5)\n    print(6)\nend\nprint(7)\n";
 
     for use_vm in [false, true] {
         let output = run_repl_process(source, use_vm, &[("TSUMUGI_MAX_OUTPUT_CALLS", "2")]);
-        let (_stdout, stderr) = output_text(&output);
+        let (stdout, stderr) = output_text(&output);
         let mode = if use_vm { "VM" } else { "tree" };
 
         assert!(output.status.success(), "{mode} REPLが異常終了: {stderr}");
-        assert!(
-            stderr.contains("output の呼び出し回数が上限を超えました"),
-            "{mode}で output calls 上限が適用されていない: {stderr}"
+        assert_eq!(
+            stderr
+                .matches("output の呼び出し回数が上限を超えました")
+                .count(),
+            1,
+            "{mode}で上限超過の submission だけがエラーになるはず: {stderr}"
         );
+        for expected in ["1\n", "2\n", "3\n", "7\n"] {
+            assert!(
+                stdout.contains(expected),
+                "{mode}で {expected:?} が出ていない: {stdout}"
+            );
+        }
     }
 }
 
 #[test]
 fn output_bytes_limit_gates_print_in_both_engines() {
-    // REV-015 Slice 2 (I-O accounting): print の payload byte が output_bytes へ累積課金
-    // される。"aaaaa"(5)+"bbbbb"(5) の累積 10 が上限 8 を超える。
-    let source = "print(\"aaaaa\")\nprint(\"bbbbb\")\n";
+    // REV-015 Slice 2 (I-O accounting): print の payload byte が output_bytes へ課金される。
+    // RSB-AT-04: "aaaaa"・"bbbbb" を 1 行ずつ出す submission は累積で上限 8 を超えてもエラーに
+    // ならず、2 つの print を 1 つの submission にまとめると超えてエラーを出し、次の入力へ進む。
+    let source = "print(\"aaaaa\")\nprint(\"bbbbb\")\n\
+                  if true\n    print(\"ccccc\")\n    print(\"ddddd\")\nend\nprint(\"eeeee\")\n";
 
     for use_vm in [false, true] {
         let output = run_repl_process(source, use_vm, &[("TSUMUGI_MAX_OUTPUT_BYTES", "8")]);
-        let (_stdout, stderr) = output_text(&output);
+        let (stdout, stderr) = output_text(&output);
         let mode = if use_vm { "VM" } else { "tree" };
 
         assert!(output.status.success(), "{mode} REPLが異常終了: {stderr}");
-        assert!(
-            stderr.contains("output の総バイト数が上限を超えました"),
-            "{mode}で output bytes 上限が適用されていない: {stderr}"
+        assert_eq!(
+            stderr
+                .matches("output の総バイト数が上限を超えました")
+                .count(),
+            1,
+            "{mode}で上限超過の submission だけがエラーになるはず: {stderr}"
         );
+        for expected in ["aaaaa\n", "bbbbb\n", "eeeee\n"] {
+            assert!(
+                stdout.contains(expected),
+                "{mode}で {expected:?} が出ていない: {stdout}"
+            );
+        }
     }
 }
 
