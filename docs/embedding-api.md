@@ -835,7 +835,7 @@ run の課金を残すか・root を課金するか・CLI の表示・import を
     stderr の文言（`import の本数が上限を超えました` など）と exit code は変わらず、行番号の接頭辞（`N行目: `）が付かなくなる。
     ただし REPL（tree・VM）の session 累積の `TSUMUGI_MAX_SOURCE_BYTES`・`TSUMUGI_MAX_SOURCE_COUNT` の超過（各 submission は上限内で、
     累積で超えるもの）は、link の台帳が submission ごとなので link では止まらず、今どおり run で止まる（範囲外の REPL の項）。
-    VM REPL は link で止まるので、超えた submission で `charge_link_graph` まで進まない。
+    submission 単体で上限を超えるとき、VM REPL は link で止まるので、その submission で `charge_link_graph` まで進まない。
   - scheduler の handle 経路は、初回 poll の link で超えたとき、既存の `link_failure_outcome` の budget 系の error になる（今は run 側の課金で同じ種類の error）。
   - 上記以外の既存テストの期待値は変えない。変える必要が出たら実装を止めて判断待ちにする。
 - **受入基準（fix-link-request-budget-charge）**:
