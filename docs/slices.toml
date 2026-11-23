@@ -782,8 +782,11 @@ order      = 32
 [[slice]]
 id         = "fix-repl-submission-budget"
 title      = "REPL の各 submission を、その ExecutionRequest が所有する有限 budget で実行する（embedding-api §6・§12、execution-control §3・§13、loop:drift #352 D-67）"
-status     = "todo"
+status     = "ready"
 parent     = "REV-007"
+spec       = { doc = "docs/embedding-api.md", section = "fix-repl-submission-budget 実装スライス（REPL の各 submission を、その submission の budget で数え直して実行する）" }
+acceptance = ["RSB-AT-01..05"]
+design_pr  = 496
 order      = 33
 
 [[slice]]
@@ -1203,15 +1206,16 @@ order      = 112
 # 無かったため、§8 末尾のとおりこの PR の中で付け直した（kamonabe の決定、PR #451 のコメント）。既存の 35〜40 の 6 本を相対順を変えずに 38〜43 へ
 # 移し、空いた 35〜37 にこの 3 本を置いた。
 #
-# fix-execution-budget-usage-fresh（D-136）: scheduler の handle 経路と VM REPL が execution ごとに使用量を新しく数えない（同じ context の前の
-#   execution の使用量を含む）件の fix。execution ごとの台帳の作り直しと、tree REPL を含む REPL の累積の扱いは設計で決める。
+# fix-execution-budget-usage-fresh（D-136）: scheduler の handle 経路が execution ごとに使用量を新しく数えない（同じ context の前の
+#   execution の使用量を含む）件の fix。execution ごとの台帳の作り直しは設計で決める。VM REPL の同じ差と、tree・VM の REPL の累積の扱いは
+#   fix-repl-submission-budget へ移した（判断役が選択（PR #496）の Q1=A・Q2=A。REPL は使用量を submission ごとに 0 から数え、live heap を持ち越す）。
 # fix-link-context-baseline-charge（D-137）: facade の Engine::run の Link が context に残る値を baseline として課金しない件の fix。
 #   baseline の課金の置き場所（charge_context_baseline の本番での呼び出し）と二重計上の回避は設計で決める。
 # fix-cancel-token-waker-recheck（D-139）: CancellationToken::register_waker が waker の保存のあと cancel 済みかを確かめ直さない件の fix。
 #   §9.1 の「waker保存→ready flag再確認→readyなら即wake」の順にする。逸脱の行はコードを読んで確かめたもので、実行での再現は設計で確かめる。
 [[slice]]
 id         = "fix-execution-budget-usage-fresh"
-title      = "scheduler の handle 経路と VM REPL で budget の使用量を execution ごとに新しく数え、前の execution の使用量を上限の判定と usage に含めない（execution-control §2・§9.1・§13、loop:drift #429 D-136）"
+title      = "scheduler の handle 経路で budget の使用量を execution ごとに新しく数え、前の execution の使用量を上限の判定と usage に含めない（execution-control §2・§9.1・§13、loop:drift #429 D-136）"
 status     = "todo"
 parent     = "REV-015"
 order      = 38
