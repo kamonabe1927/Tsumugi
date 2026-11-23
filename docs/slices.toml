@@ -1224,8 +1224,10 @@ order      = 38
 [[slice]]
 id         = "fix-link-context-baseline-charge"
 title      = "facade の Engine::run の Link で context に残る変数・closure・collection を新 execution の heap の baseline として課金する（execution-control §5.2・§9.2、loop:drift #429 D-137）"
-status     = "todo"
+status     = "ready"
 parent     = "REV-015"
+spec       = { doc = "docs/execution-control.md", section = "fix-link-context-baseline-charge 実装スライス（facade の `Engine::run` で context に残る値を新 execution の baseline として課金する）" }
+acceptance = ["LCB-AT-01..04"]
 order      = 39
 
 [[slice]]
