@@ -2081,21 +2081,21 @@ fn hil_at_03_link_budget_exceeded_maps_to_budget_error() {
 #[test]
 fn lrb_at_05_handle_link_charges_request_budget() {
     const LIMIT: usize = 1_024;
-    let owned: Vec<(String, String)> = (0..=LIMIT)
+    let owned: Vec<(String, String)> = (0..=LIMIT + 1)
         .map(|i| (format!("@default/m{i}.tsg"), "let v = 1\n".to_string()))
         .collect();
     let sources: Vec<(&str, &str)> = owned
         .iter()
         .map(|(id, text)| (id.as_str(), text.as_str()))
         .collect();
-    let root: String = (0..=LIMIT)
+    let root: String = (0..=LIMIT + 1)
         .map(|i| format!("import \"m{i}.tsg\"\n"))
         .collect::<String>()
         + "print(\"AFTER\")\n";
 
     let engine = Engine::new();
     let script = engine.compile(&root).unwrap();
-    let (resolver, _calls) = counting_resolver::CountingResolver::new(&sources);
+    let (resolver, calls) = counting_resolver::CountingResolver::new(&sources);
     let mut context = ExecutionContext::new();
     context.set_capabilities(resolver.capabilities());
     let mut handle = engine
@@ -2115,4 +2115,11 @@ fn lrb_at_05_handle_link_charges_request_budget() {
         }
         other => panic!("LinkError を期待したが {other:?}"),
     }
+    // link 側の課金は超過した module（root を除く 1_025 本目）を読んだ直後に止まるので、resolver の
+    // 呼び出しは LIMIT + 1 回。link が課金しなければ全 LIMIT + 2 module を resolve する。
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        LIMIT + 1,
+        "超過した module で link が止まる"
+    );
 }
