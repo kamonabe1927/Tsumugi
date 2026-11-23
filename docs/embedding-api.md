@@ -793,7 +793,9 @@ run の課金を残すか・root を課金するか・CLI の表示・import を
      run にも渡さない。
   2. root source を [実行予算・協調実行仕様](execution-control.md) §5.3 のとおり `source_count` の 1 本目として、`CompiledScript` の
      root source の生 UTF-8 byte 長で `charge_source(_, ExecutionPhase::Link)` する。import 0 件の script（resolver の有無を問わず、空 graph を返す経路）でも
-     課金し、超えたら空 graph を返さず失敗する（Q2）。root の課金は resolver を呼ぶ前なので、root で超えたら resolver call は 0 である。
+     課金し、超えたら空 graph を返さず失敗する（Q2）。課金の位置は、step 1 で resolver 未 grant + import の `LinkError::Denied` を返したあと、
+     import 0 件の空 graph を返す前・resolver を呼ぶ前の 1 か所とする（Q5）。したがって import があって resolver が未 grant の script は、
+     root が上限を超えていても今どおり `Denied`（resolver call 0）を返す。root で超えたときも resolver call は 0 である。
   3. 各 import は、`read_module_source` で読み終えて同じ `ModuleId` の hash の照合（既解決なら `continue`）を通ったあと、UTF-8 の検証と
      module 単体の parse より前に、その module の生 byte 長で `charge_source` と `charge_import` をこの順に行う（Q4）。既解決の `ModuleId`
      （同じ module の 2 回目の import、diamond）は §5.3 の cache hit なので課金しない。
@@ -841,9 +843,10 @@ run の課金を残すか・root を課金するか・CLI の表示・import を
     `max_source_bytes`・`max_single_source_bytes` のそれぞれで、N（ちょうど）なら `Engine::link` が `Ok`、N+1 相当なら
     `Err(LinkError::BudgetExceeded(e))` で `e.resource` がその resource、`e.phase` が `Link` になる。D-62 の再現（import_count=0・import_bytes=1 で
     1 module を import）は `Err` になる。確かめ方: `src/embedding.rs` の link の unit test（既存の in-memory resolver の helper を使う）。
-  - **LRB-AT-02**（root の課金）: root source が `max_single_source_bytes` を超える script と `max_source_count = 0` の budget は、import 0 件でも
-    `Engine::link` が `BudgetExceeded`（`SingleSourceBytes`・`SourceCount`）を返し、import を含む script では resolver の呼び出しが 0 回である。
-    確かめ方: 呼び出しを数える resolver を使う unit test。
+  - **LRB-AT-02**（root の課金と `Denied` との順序）: root source が `max_single_source_bytes` を超える script と `max_source_count = 0` の budget は、import 0 件でも
+    `Engine::link` が `BudgetExceeded`（`SingleSourceBytes`・`SourceCount`）を返し、import を含む script（resolver は grant）では resolver の呼び出しが 0 回である。
+    resolver が未 grant のときは、「import 0 件 + root が上限を超える」が `BudgetExceeded`、「import あり + root が上限を超える」が `LinkError::Denied`（resolver call 0）になる（Q5）。
+    確かめ方: 呼び出しを数える resolver を使う unit test と、`CapabilitySet::empty()` で link する unit test。
   - **LRB-AT-03**（数え方と順序）: 同じ module を 2 回 import する script と diamond の graph で、import 1 本ぶんの上限（`max_import_count` = 異なる module の数）なら
     `Ok` になる（cache hit を数えない）。UTF-8 でない module と構文の不正な module は、`max_import_bytes` がその module の byte 長より小さければ
     `InvalidModule` でなく `BudgetExceeded` になる（parse の前に課金する）。上限内で link と run を通した `Engine::run` の `BudgetUsage` の
@@ -888,6 +891,17 @@ run の課金を残すか・root を課金するか・CLI の表示・import を
     余分な仕事をする。不正な module を先に `InvalidModule` で返せる利点は、予算内に直せば同じ診断が得られるので小さく、採らない。
   - 判断の外の気付き（判断役のコメント）を受け、handle 経路の link の台帳と §5 末尾の「別の計数系を作らない」の関係、既解決の `ModuleId` の再読み込みの扱いを
     範囲外に明記した。
+  - **Q5=B**（import があって resolver が未 grant の script は、root の予算超過より先に今どおり `Denied` を返し、root の課金はそのあとの 1 か所で行う。
+    設計 PR のレビュー指摘から出た候補）。理由: A・B ともマニフェストに反しうる点は無い（どちらも resolver call 0 で、`Denied` の経路は何も読まず何も実行しない。原則 2・3）ので、
+    spec の既存の決定との一貫性と変更の小ささで比べた。目標の章は resolver 未 grant + import を条件なしの terminal `Denied` と定めている（§5「resolver capabilityなしでimportがあれば
+    resolver call 0で terminal `Denied`とする」、[Capability Model仕様](capability-model.md) §19 の CAP-AT-16、同 §14 の CLI の文、同 §18 の fix-handle-import-from-link の実装範囲 1 が書く
+    `Engine::link` の規則の順）。B はこれらをそのまま保ち、本小節の「§5 の目標の文を変えず」とも合う。粗い capability の確認を budget の判定より先に置く順は、
+    [次期意味論・実装決定](semantic-decisions.md) §3.7 の host function の行（symbol/arity → capability → host-call 回数 budget）と同じ向きである（原則 5）。今の main ではこの入力は
+    link の `Denied` で止まるので、B は観測される結果を変えない（原則 8）。権限の欠如の診断が上限の設定に左右されない（原則 2・6）。
+    課金の位置は、`Denied` を返したあと・import 0 件の空 graph を返す前の 1 か所に置けるので B でも経路ごとに分かれず、実装範囲 1 の「台帳は resolver の取得より前に作る」と
+    Q2=A の「root の課金は resolver を呼ぶ前」とも両立する。採らなかった案 A（root の課金を step 1 より前に行い、`BudgetExceeded` を `Denied` より先に返す）は、反しはしないが、
+    残る利点（root の超過が capability によらず同じ結果になる）が、目標の章の上の文に「予算内の script では」という条件を足す重さを上回らないため採らない。
+    判断の外の気付き（判断役のコメント）を受け、課金の位置を 1 か所として実装範囲 2 に書き、LRB-AT-02 に resolver 未 grant の 2 つの場合を分けて足した。
 
 ## 15. 受入基準
 
