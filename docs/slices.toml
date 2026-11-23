@@ -1228,6 +1228,7 @@ status     = "ready"
 parent     = "REV-015"
 spec       = { doc = "docs/execution-control.md", section = "fix-link-context-baseline-charge 実装スライス（facade の `Engine::run` で context に残る値を新 execution の baseline として課金する）" }
 acceptance = ["LCB-AT-01..04"]
+design_pr  = 499
 order      = 39
 
 [[slice]]
