@@ -399,7 +399,7 @@ continuation frameの課金対象は、スコープを作るframe（96 + local s
 
 `ExecutionContext`に以前から残る変数・closure・collectionは、新executionを`Linked`へ進めるときにbaseline live heapとして課金する。baselineとLinkのheap課金の合計が上限を超える場合はscriptを1文も実行せず`BudgetExceeded(HeapBytes)`となる。同じobjectを二重に数えない。baselineの求め方は次のどちらかとする。
 
-- 台帳をexecution間で持ち越す経路: 台帳を作り直さず、前のexecutionの使用量（committed・reserved・peaks）を0に戻し、live上限を新しいexecutionの`max_live_heap_bytes`に据え直し、peakをその時点のliveに戻す。前のexecutionのartifact（AST・chunk）の分は先にreleaseする。contextに残る値は同じ台帳に1回だけ課金されたまま残り、そのliveがbaselineになる。値を手放せば同じ台帳からreleaseされる。
+- 台帳をexecution間で持ち越す経路: 台帳を作り直さず、前のexecutionの使用量（committed・reserved・peaks）を0に戻し、live上限を新しいexecutionの`max_live_heap_bytes`に据え直し、peakをその時点のliveに戻す。前のexecutionのartifact（AST・chunk）の分は先にreleaseする。contextに残る値は同じ台帳に1回だけ課金されたまま残り、そのliveがbaselineになる。値を手放せば、最後の参照が消えた時点で同じ台帳からreleaseされる（§10のjournalが旧valueを保持する間はcommit / rollbackまでliveに残る）。
 - 台帳を作り直す経路: 到達graphを反復worklistで走査し、baseline live heapとして新しい台帳へ課金する。再帰走査は使わず、同じ`AllocationId`をvisited setで除外する。残った値が手放されたときに新しい台帳からreleaseされるよう、値の台帳の参照も新しい台帳へ付け替える。
 
 facadeの`Engine::run`とREPLは持ち越しの経路を使う（判断役が選択（PR #496 の Q1=A・PR #499 の Q1=A・Q2=A）。§14「fix-link-context-baseline-charge 実装スライス」の決定記録）。
@@ -3702,7 +3702,9 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
      dedup と同じく二重に数えない）。baseline が新しい request の `max_live_heap_bytes` を超えるときは、Link の最初の heap 課金（import があれば module record、
      無ければ AST の token）で `BudgetExceeded(HeapBytes)` になり、1 文も実行しない。context は変更せず poison しない（§10 の root link 失敗と同じく
      script を実行していない）。別の走査は足さない。
-  3. execution の途中で context に残っていた値を手放したとき（再代入・`pop` など）は、同じ台帳から release され、その execution の live に反映される。
+  3. context に残っていた値を execution の途中で手放したとき（再代入・`pop` など）は、§10 の journal が元の値を保持するので、その execution の間は live に
+     残る。commit で journal が破棄されたときに同じ台帳から release され、次の execution の baseline から外れる（rollback なら元の値が context に戻り、
+     baseline に残る）（判断役が選択（PR #499 のレビュー指摘、Q1=A））。
   4. `reset_budget`・`reset_config_with_token` の doc comment と、`install_execution_state`・`run_for_repl` のコメントにある「run ごとに台帳を作り直す」
      「REPL だけ台帳を持ち越す」の記述を直す。facade の経路で使わなくなった `reset_budget` を消すか残すかは実装で決めてよい（scheduler の handle 経路は
      使っていない。`src/engine.rs` の経路は D-136 の範囲）。
@@ -3727,10 +3729,16 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
     AST の分の合計）ちょうどにすると 1 文目を実行し、その値 − 1 にすると 1 文も実行せず `BudgetExceeded`（`HeapBytes`）になる（§15.2 の境界）。確かめ方: `src/embedding.rs` の unit test。
   - **LCB-AT-02**（baseline を usage に含める）: 上の 1 回目のあと緩い budget で `let n = len(big)` を実行すると、`live_heap_bytes` が
     `heap_size::list_body(20000)` 以上で、`peak_heap_bytes` は 1 回目の途中の一時的な最大値（1 回目で作って捨てた大きな List）と 1 回目の AST の分を含まない。
-    committed の counter は同じ source を新しい context で実行したときと一致する。確かめ方: unit test。
-  - **LCB-AT-03**（二重計上しない・同じ台帳で release する）: 1 回目で `big` を残し、2 回目を「2 回目の開始時の live + `list_body(20000)` より小さく、
-    `list_body(20000)` の 2 つ分には満たない」上限で `big = null` のあと `let other = range(0, 20000)` にすると `Completed` になる（手放した `big` が同じ台帳から
-    release される）。`big = null` を外すと `BudgetExceeded`（`HeapBytes`）になる。確かめ方: unit test。
+    committed の counter は同じ source を新しい context で実行したときと一致する。`live_heap_bytes` は `2 × heap_size::list_body(20000)`（1,280,048）未満で、
+    持ち越した `big` を二重に数えない。確かめ方: unit test。
+  - **LCB-AT-03**（commit の境界で同じ台帳から release する）: 1 回目で `let big = range(0, 20000)` を残し、2 回目を緩い budget で `big = null` にすると
+    `Completed` になる。3 回目を緩い budget で `let k = 1` にすると、その `live_heap_bytes` は、`big = null` の代わりに `let j = 0` を 2 回目で実行した対照の
+    context の 3 回目より `heap_size::list_body(20000)`（24 + 32 × 20,000 = 640,024）だけ小さい（AST の大きさが同じ source にそろえる）。続けて
+    4 回目を `max_live_heap_bytes = list_body(20000) + 4096`（644,120）で `let other = range(0, 20000)` にすると `Completed` になり、対照の context で
+    同じ 4 回目を実行すると `BudgetExceeded`（`HeapBytes`）になる。上限の根拠: `big` が release されていれば必要な live は新しい List の 640,024 と、
+    小さな script の AST・cell などの数百 byte（PR #499 のレビューの計測で、`big` を残した context の `let k = 1` の live が list_body(20000) より 257 大きく、`big = null` と新しい List を同じ execution で作ったときの peak が 2 × list_body(20000) より 717 大きい）で、
+    4096 に収まる。`big` が残っていれば baseline の 640,024 以上に新しい List の 640,024 が加わって 1,280,048 以上になり、上限を超える。
+    execution の途中で手放した値は §10 の journal が保持するので、2 回目と 4 回目を 1 つの execution にまとめた形では確かめない（実装範囲 3）。確かめ方: unit test。
   - **LCB-AT-04**（失敗した execution のあとの baseline）: 2 回目を未捕捉の runtime error で終わらせ（途中で大きな List を作る）、3 回目の開始時の live が
     2 回目の開始時の live と同じになる（rollback した値と 2 回目の AST が残らない）。context に closure を残した場合、3 回目の live がその closure の
     retained code（§5.3 A-1）の分を含む。確かめ方: unit test。
@@ -3761,6 +3769,17 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
     ちょうどなら Linked、`+1` なら失敗」は、持ち越しの経路では Link の heap 課金（AST・module record）が baseline に足されてから判定されるので、判定の対象を
     「context baseline と Link の heap 課金の合計（`Linked` 時点の live heap）」と書き直し、§5.2 末尾の「baseline と Link の heap 課金の合計が上限を超える場合」と
     揃えた。この境界は LCB-AT-01 で確かめる。
+  - **レビュー指摘への判断 Q1=A**（判断役が選択（PR #499 のレビュー指摘への判断））: 実装範囲 3 と LCB-AT-03 は、execution の途中で手放した値がその execution の
+    live から外れる前提で書いていたが、facade の run は transactional で、§10 の journal（`Env::journal_cell` の `UndoEntry::CellValue`）が元の値を commit /
+    rollback まで保持するので、そのままでは満たせなかった。release を確かめる時点を commit の境界に移し、実装範囲 3 を「commit で journal が破棄されたときに
+    同じ台帳から release され、次の execution の baseline から外れる」に直し、LCB-AT-03 を書き直して上限の数値の根拠を書き、二重に数えないことは LCB-AT-02 の
+    「live が list_body(20000) の 2 倍未満」で確かめる。§5.2 末尾の持ち越しの項の release の時点（最後の参照が消えた時点。journal が保持する間は commit /
+    rollback まで残る）も揃えた。理由: §10 は「journal自身と旧valueの保持はheap budgetへ課金する」と定めており、途中で手放した値が live に残るのは規範どおりで、
+    直すのは小節と受入基準の側である。journal が実際に保持している量を live に数え続けるので上限の判定が保持量と一致し（原則 1・3）、rollback の仕組みに
+    触れない（原則 6）。触る仕組みと見積もりは変わらない（原則 8）。採らなかった案 B（execution の途中での release を目標にして journal の持ち方を変える）は、
+    保持したまま live から外す（原則 1・3）か保持をやめる（全 language-state の rollback が成り立たない、原則 6）かのどちらかになり、§10 とも食い違い、
+    本スライスの範囲を超えるため採らない。同じ execution の中で大きな値を手放して作り直すと journal のために peak が 2 倍になる点は §10 の規範どおりで、
+    本スライスでは扱わない。
 
 ## 15. 境界受入テスト
 
