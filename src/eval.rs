@@ -7221,9 +7221,9 @@ mod tests {
         assert_eq!(run("read_file(\"../x\")"), "sandbox");
         assert_eq!(run("read_file(\"a\u{0}b\")"), "argument");
         assert_eq!(run("read_file(\"\")"), "argument");
-        // Windows の drive prefix になるのは `<ASCII 1 文字>:` の component だけなので、`a:b` ではなく
-        // `foo.txt:stream`（ADS、§5.5）で確かめる。`a:b` の穴は別 slice の範囲（小節の決定記録）。
         assert_eq!(run("read_file(\"d/foo.txt:stream\")"), "argument");
+        // WLC-AT-03: 中間の `<ASCII 1 文字>:` の component（Windows では drive prefix と読まれていた）。
+        assert_eq!(run("read_file(\"d/a:b\")"), "argument");
         assert_ne!(run("read_file()"), "sandbox");
         assert_ne!(run("read_file(1)"), "sandbox");
     }

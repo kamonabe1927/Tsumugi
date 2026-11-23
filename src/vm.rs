@@ -3357,6 +3357,8 @@ mod tests {
         assert_eq!(err_type(marked(), "/etc/passwd"), "sandbox");
         assert_eq!(err_type(marked(), "../x"), "sandbox");
         assert_eq!(err_type(marked(), "a\0b"), "argument");
+        // WLC-AT-03: 中間の `<ASCII 1 文字>:` の component は grant の有無に依らず argument。
+        assert_eq!(err_type(marked(), "d/a:b"), "argument");
         // 印なし（safe の構文）では同じパスが形式の誤り。
         assert_eq!(err_type(CapabilitySet::empty(), "/etc/passwd"), "argument");
         assert_eq!(err_type(CapabilitySet::empty(), "x.txt"), "sandbox");
