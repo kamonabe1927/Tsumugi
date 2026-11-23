@@ -926,6 +926,8 @@ VM REPL を含めるかは、判断役が選択（PR #496）の Q1=A・Q2=A に�
     VM の `Vm::new_repl_with_budget` の台帳も同じである。
   - heap 台帳は tracked な値（collection・cell・token）が `HeapLedgerWeak` で参照し、値の drop で release する。tree・VM とも、前の submission の
     artifact token（tree は `charge_linked_ast` の `ast_token`・`body_tokens`、VM は `chunk_tokens`）を release してから今回ぶんを Link で課金する。
+    この release は、tree は `charge_link_graph` の最後の `charge_linked_ast` の中、VM は `run_repl_chunk` の中で行い、どちらも source・import・
+    module record の課金より後である。
     REPL の context に残る変数・closure・collection と、展開済み module の record（`graph_record_tokens`）は live のまま残る。
   - CLI の 4 本の subprocess test（`tests/integration.rs` の `source_bytes_cumulative_limit_gates_across_inputs_in_both_engines`・
     `output_calls_limit_gates_print_in_both_engines`・`output_bytes_limit_gates_print_in_both_engines`・
@@ -940,15 +942,18 @@ VM REPL を含めるかは、判断役が選択（PR #496）の Q1=A・Q2=A に�
      cancellation token を据え、`committed`・`reserved` の全 counter（fuel を含む）と `peaks` を 0 に戻し、heap 台帳は作り直さずに peak だけを
      その時点の live に戻し、heap 台帳の live 上限を据えた `BudgetConfig` の `max_live_heap_bytes` に据え直す（`AllocationLedger::set_limit`）（Q1=A）。
      live heap はその submission から到達できる値の量なので持ち越し、§5.2 の baseline として扱う。
-     監査の集約器（`BudgetChargeAccumulator`）も submission の境界で空にする。
+     監査の集約器（`BudgetChargeAccumulator`）も submission の境界で空にする。台帳の操作は artifact token を持たないので、呼ぶ側（2・3）が
+     前の submission の artifact token を**先に** release してから 1 の操作を呼ぶ（peak を live に戻す時点の live に前の artifact を含めない）。
   2. tree REPL（`install_execution_state` の `repl && repl_budget_installed` の経路と `Evaluator::rearm_budget_for_repl`）は 1 の操作を使う。
+     `Evaluator` 側の rearm で前の submission の `ast_token`・`body_tokens` を先に release してから 1 の操作を呼ぶ。
      返す `ExecutionOutcome` の `BudgetUsage` は、その submission だけの使用量と、その時点の live heap になる。
   3. VM REPL は、submission ごとに 1 の操作を `Vm::charge_link_graph` より**前**に呼ぶ（CLI が submission ごとに呼ぶ `Vm` の入口に置く。
      `run_repl_chunk` の中に置くと、その submission の source/import の使用量が消え、source の上限が前の submission の使用量を残したまま判定される）。
+     この入口で前の submission の `chunk_tokens` を先に release してから 1 の操作を呼ぶ。
      `run_repl_chunk` の `reset_fuel` は 1 の操作に含まれるので外してよい。config は CLI が submission ごとに `budget_env.vm_budget()` から作って渡す
      （VM REPL は clock を持たないので、clock・deadline の扱いは今と同じ）（Q2=A）。受け取る入口の形は実装で決めてよい。
-  4. context に残る live heap が submission の `max_live_heap_bytes` を超えるときは、Link の最初の heap 課金（artifact token）で
-     `BudgetExceeded(HeapBytes)` になり、1 文も実行しない（§5.2）。前の submission の artifact token は今どおり先に release する。
+  4. context に残る live heap が submission の `max_live_heap_bytes` を超えるときは、Link の最初の heap 課金（import があれば module record、無ければ artifact token）で
+     `BudgetExceeded(HeapBytes)` になり、1 文も実行しない（§5.2）。前の submission の artifact token は 2・3 のとおり先に release する。
      別の走査は足さない（live の持ち越しが baseline を兼ねる）。context は poison せず、REPL は §12 の結果表のとおり表示して次の入力へ進む。
   5. `run_for_repl`・`rearm_budget_for_repl`・`run_repl_chunk`・CLI の `execute_repl_submission` の doc comment とコメントにある
      「session 累積」「fuel のみ reset」の記述を、submission ごとの budget の記述に直す。
@@ -974,7 +979,7 @@ VM REPL を含めるかは、判断役が選択（PR #496）の Q1=A・Q2=A に�
   - **RSB-AT-03**（live heap の持ち越しと baseline）: submission 1 で大きな List を変数に残すと、submission 2 の `BudgetUsage.live_heap_bytes` は
     その List の分を含み、`peak_heap_bytes` は submission 1 の途中の一時的な最大値を含まない。submission 2 の `max_live_heap_bytes` を残した live より
     小さくすると、1 文も実行せず（`print` が出ない）`BudgetExceeded`（`HeapBytes`）になり、context は poison されず、submission 3（緩い budget）で
-    その変数を読める。確かめ方: tree は unit test、VM は `src/vm.rs` の unit test（submission ごとに実装範囲 3 の `Vm` の入口 → `charge_link_graph` → `run_repl_chunk` を回す）。
+    その変数を読める。submission 1 の AST（VM は chunk）が大きいとき、submission 2 の `peak_heap_bytes` はその artifact の分を含まない。確かめ方: tree は unit test、VM は `src/vm.rs` の unit test（submission ごとに実装範囲 3 の `Vm` の入口 → `charge_link_graph` → `run_repl_chunk` を回す）。
   - **RSB-AT-04**（CLI、tree・VM の両方）: 上の 4 本の subprocess test を、1 行ずつの submission がそれぞれ上限内なら累積で上限を超えてもエラーに
     ならず、1 つの submission（ブロックで複数行をまとめた入力）が上限を超えると今と同じ文言のエラーを出して次の入力へ進む、という期待値に書き直す
     （`TSUMUGI_MAX_SOURCE_BYTES`・`TSUMUGI_MAX_OUTPUT_CALLS`・`TSUMUGI_MAX_OUTPUT_BYTES`・`TSUMUGI_MAX_STRING_BYTES`）。`for use_vm in [false, true]` で両方とも同じ期待値で通る。
