@@ -1099,6 +1099,9 @@ impl BudgetLedger {
 
     /// 実行単位で budget config と cancellation token を据え直す（REV-015 最終形移行、Slice 2）。
     ///
+    /// heap 台帳も作り直すので、context に残る値の live は持ち越さない（facade の `Engine::run` は
+    /// 台帳を持ち越す [`Self::begin_repl_submission`] を使う）。
+    ///
     /// request が必須所有する [`CancellationToken`] を ledger へ install（継承ではなく置換）し、
     /// config / counters / heap ledger をその token と新しい config で作り直す。source of truth は
     /// request-owned token であり、[`Engine::run`](crate::embedding::Engine::run) が実行直前に
