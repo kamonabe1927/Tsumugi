@@ -974,11 +974,12 @@ VM REPL を含めるかは、判断役が選択（PR #496）の Q1=A・Q2=A に�
   - **RSB-AT-03**（live heap の持ち越しと baseline）: submission 1 で大きな List を変数に残すと、submission 2 の `BudgetUsage.live_heap_bytes` は
     その List の分を含み、`peak_heap_bytes` は submission 1 の途中の一時的な最大値を含まない。submission 2 の `max_live_heap_bytes` を残した live より
     小さくすると、1 文も実行せず（`print` が出ない）`BudgetExceeded`（`HeapBytes`）になり、context は poison されず、submission 3（緩い budget）で
-    その変数を読める。確かめ方: tree は unit test、VM は `src/vm.rs` の unit test（`run_repl_chunk`）。
+    その変数を読める。確かめ方: tree は unit test、VM は `src/vm.rs` の unit test（submission ごとに実装範囲 3 の `Vm` の入口 → `charge_link_graph` → `run_repl_chunk` を回す）。
   - **RSB-AT-04**（CLI、tree・VM の両方）: 上の 4 本の subprocess test を、1 行ずつの submission がそれぞれ上限内なら累積で上限を超えてもエラーに
     ならず、1 つの submission（ブロックで複数行をまとめた入力）が上限を超えると今と同じ文言のエラーを出して次の入力へ進む、という期待値に書き直す
     （`TSUMUGI_MAX_SOURCE_BYTES`・`TSUMUGI_MAX_OUTPUT_CALLS`・`TSUMUGI_MAX_OUTPUT_BYTES`・`TSUMUGI_MAX_STRING_BYTES`）。`for use_vm in [false, true]` で両方とも同じ期待値で通る。
-  - **RSB-AT-05**（VM REPL の使用量、Q2=A）: `Vm::run_repl_chunk` を 2 回呼んだあとの台帳の `committed`・`peaks` が 2 回目の chunk の分だけになり、
+  - **RSB-AT-05**（VM REPL の使用量、Q2=A）: 実装範囲 3 の流れ（submission ごとに、開始の操作〔実装範囲 3 の `Vm` の入口〕→ `charge_link_graph` →
+    `run_repl_chunk`）を 2 回回したあとの台帳の `committed`・`peaks` が 2 回目の submission の分〔source/import を含む〕だけになり、
     tree の RSB-AT-01 と同じ source で fuel 以外の counter が一致する。確かめ方: `src/vm.rs` の unit test か `tests/differential.rs`。
 - **想定の変更規模**: 本体（`#[cfg(test)]` を除く `src/`）は `src/budget.rs` が +20〜40 行（submission の開始の操作、heap 台帳の peak を live に戻す操作、
   `rearm_for_repl_submission` の置き換え）、`src/eval.rs` が ±10〜20 行、`src/embedding.rs` が ±20〜40 行（主に doc comment）、`src/vm.rs` が +5〜15 行、
