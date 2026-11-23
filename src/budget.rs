@@ -952,6 +952,11 @@ impl AllocationLedger {
         self.peak_bytes
     }
 
+    /// peak をその時点の live に戻す（REPL の submission の開始、[`BudgetLedger::begin_repl_submission`]）。
+    pub fn reset_peak_to_live(&mut self) {
+        self.peak_bytes = self.live_bytes;
+    }
+
     /// live 上限を再設定する（`set_max_live_heap_bytes` 互換の内部入口）。
     pub fn set_limit(&mut self, limit: u64) {
         self.limit = limit;
@@ -2238,28 +2243,35 @@ impl BudgetLedger {
         self.reserved.fuel = 0;
     }
 
-    /// REPL の 2 回目以降の submission 向けに、fuel だけ reset しつつ deadline（config）・clock・
-    /// cancellation を張り直す（E7、embedding の REPL run 入口 `run_for_repl` が使う）。
+    /// REPL の submission の開始で budget を据え直す（embedding-api §12「REPLのbudget」、
+    /// execution-control §13。tree の `run_for_repl` と VM REPL が同じ操作を呼ぶ）。
     ///
-    /// cumulative counter（source/output/host/string/heap など committed/reserved/peaks）は
-    /// **温存**する。統合前 tree REPL が session 全体で 1 本の ledger を共有し、`reset_step_budget`
-    /// で fuel だけ戻して cumulative を累積していた observable 挙動を再現するための操作である
-    /// （one-shot run が使う [`Self::reset_config_with_token`] と意図的に別経路）。
+    /// request の `config`・`clock`・`cancellation` を据え、`committed`・`reserved` の全 counter
+    /// （fuel を含む）と `peaks` を 0 に戻し、監査の集約器を空にする。使用量は submission ごとに
+    /// 0 から数える。heap 台帳は作り直さず、live heap は持ち越して baseline（§5.2）とする。
+    /// peak heap だけをその時点の live に戻し、live 上限を `config.max_live_heap_bytes` に据え直す。
     ///
-    /// `config` は submission ごとに新 clock domain の deadline を持つものを渡し、`clock` は
-    /// その deadline と同 domain でなければならない（呼び出し側の embedding facade が
-    /// [`BudgetConfig::validate`] 済みの request から渡す）。limit 群は REPL では毎回同じ
-    /// legacy-env 由来なので、config 差し替えは実質 deadline の張り替えに相当する。
-    pub fn rearm_for_repl_submission(
+    /// 前の submission の artifact token（tree の AST・VM の chunk）は呼び出し側が**先に**release
+    /// する（peak を戻す時点の live に前の artifact を含めないため）。`clock` が `None` なら
+    /// clock を持たない経路（VM REPL）として deadline は効かない。
+    pub fn begin_repl_submission(
         &mut self,
         config: BudgetConfig,
-        clock: Arc<dyn MonotonicClock>,
+        clock: Option<Arc<dyn MonotonicClock>>,
         cancellation: CancellationToken,
     ) {
+        {
+            let mut heap = self.heap.borrow_mut();
+            heap.set_limit(config.max_live_heap_bytes);
+            heap.reset_peak_to_live();
+        }
         self.config = config;
-        self.clock = Some(clock);
+        self.clock = clock;
         self.cancellation = cancellation;
-        self.reset_fuel();
+        self.committed = BudgetCounters::default();
+        self.reserved = BudgetCounters::default();
+        self.peaks = BudgetPeaks::default();
+        self.accumulator = crate::audit::BudgetChargeAccumulator::new();
     }
 
     /// 現在の committed fuel（REPL rollback の snapshot 用）。

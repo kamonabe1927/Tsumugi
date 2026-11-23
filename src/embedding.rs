@@ -1893,7 +1893,7 @@ pub struct ExecutionContext {
     /// REPL run 入口（`run_for_repl`）が、この context で既に budget を install 済みか（E7）。
     ///
     /// `false`（初回 submission）なら通常の `reset_budget`（config 再構築）で install し、`true`
-    /// （2 回目以降）なら `rearm_budget_for_repl`（fuel のみ reset・cumulative 温存）で張り直す。
+    /// （2 回目以降）なら `rearm_budget_for_repl`（使用量を 0 から数え直し・live heap は持ち越し）で張り直す。
     /// 通常の `run`（file/stdin one-shot）はこの field を参照しない。
     repl_budget_installed: bool,
     /// InternalFailure で poison されたか（第10節 規則4）。true の間は実行・状態操作を拒否する。
@@ -2102,15 +2102,17 @@ impl Engine {
     /// 挙動は [`Self::run`] と同じ（transaction・poison・再入検査・import は link が確かめた graph
     /// から展開・capability 注入・`exit` 写像）だが、**budget のライフサイクルだけが異なる**:
     ///
-    /// - REPL は session 全体で 1 本の budget ledger を共有する。同じ [`ExecutionContext`] を
-    ///   submission 間で再利用する前提で、初回 submission は通常どおり budget/clock/cancellation を
-    ///   install し、2 回目以降は config を**作り直さず** fuel(step) だけ reset して cumulative
-    ///   counter（source/output/host/string/heap など）は **session 累積を温存**する。
-    /// - これは統合前 tree REPL の observable 挙動の保全である。既存の REPL 統合テスト
-    ///   （`source_bytes_cumulative_limit_gates_across_inputs_in_both_engines` /
+    /// - REPL の各 submission は 1 execution で、その submission の request が所有する有限 budget で
+    ///   実行する（embedding-api §12「REPLのbudget」）。同じ [`ExecutionContext`] を submission 間で
+    ///   再利用する前提で、初回 submission は通常どおり budget/clock/cancellation を install し、
+    ///   2 回目以降は台帳を作り直さず、使用量（committed・reserved・peaks）を 0 から数え直す。
+    ///   submission をまたいで引き継ぐのは context（live heap を含む）だけで、live heap は
+    ///   baseline として submission の `max_live_heap_bytes` で判定される。
+    /// - 既存の REPL 統合テスト（`source_bytes_cumulative_limit_gates_across_inputs_in_both_engines` /
     ///   `output_calls_limit_gates_print_in_both_engines` /
-    ///   `output_bytes_limit_gates_print_in_both_engines`）が、この「session 累積・fuel のみ reset」
-    ///   を byte 単位で固定している。
+    ///   `output_bytes_limit_gates_print_in_both_engines` /
+    ///   `string_bytes_cumulative_limit_gates_shared_builtin_in_both_engines`）が、1 行ずつの
+    ///   submission ごとの判定を固定している。
     /// - file/stdin の one-shot [`Self::run`]（呼び出しごとに budget config を再構築）とは**意図的に
     ///   別経路**であり、[`Self::run`] の挙動は一切変えない。
     ///
@@ -2816,9 +2818,9 @@ impl Engine {
         // 置くことで、pre-cancel で返す usage も「この request の budget」に対するものになる。
         //
         // REPL 経路（`repl=true`）だけ budget ライフサイクルが異なる: 初回 submission は通常どおり
-        // reset_budget で install し、2 回目以降は cumulative counter を温存したまま fuel だけ
-        // reset する（`rearm_budget_for_repl`）。これは統合前 tree REPL の observable 挙動
-        // （session 累積・fuel のみ reset）の保全で、one-shot run とは別経路（`run_for_repl` の doc）。
+        // reset_budget で install し、2 回目以降は台帳を作り直さず、使用量を 0 から数え直して
+        // live heap だけ持ち越す（`rearm_budget_for_repl`）。各 submission はその request が所有する
+        // budget で実行する（embedding-api §12「REPLのbudget」、`run_for_repl` の doc）。
         if repl && context.repl_budget_installed {
             context.evaluator.rearm_budget_for_repl(
                 request.budget,
@@ -7163,5 +7165,230 @@ mod c6c_tests {
             let (r, _) = lrb_link(LRB_ROOT, src, |_| {});
             assert!(matches!(r, Err(LinkError::InvalidModule { .. })), "{r:?}");
         }
+    }
+}
+
+/// fix-repl-submission-budget（RSB-AT-01〜03、tree REPL）: REPL の各 submission は、その submission の
+/// request が所有する有限 budget で使用量を 0 から数えて実行し、live heap だけを持ち越す。
+#[cfg(test)]
+mod rsb_tests {
+    use super::*;
+    use crate::budget::{BudgetConfig, BudgetResource, FakeClock, MonotonicClock};
+    use crate::capability::CapabilitySet;
+    use std::sync::Arc;
+
+    fn pid(n: u128) -> std::num::NonZeroU128 {
+        std::num::NonZeroU128::new(n).expect("non-zero")
+    }
+
+    fn standard() -> (BudgetConfig, Arc<dyn MonotonicClock>) {
+        let clock: Arc<dyn MonotonicClock> = Arc::new(FakeClock::new());
+        let budget = BudgetConfig::standard(clock.as_ref()).expect("budget");
+        (budget, clock)
+    }
+
+    /// stdout を capture する capability 付きで、1 submission を `run_for_repl` で実行する。
+    fn submit(
+        engine: &Engine,
+        ctx: &mut ExecutionContext,
+        text: &str,
+        budget: BudgetConfig,
+        clock: Arc<dyn MonotonicClock>,
+    ) -> (ExecutionOutcome, String) {
+        let script = engine
+            .compile(
+                Source::new(SourceId::new("repl").expect("id"), text),
+                &CompileOptions {
+                    retain_source: true,
+                },
+            )
+            .expect("compile");
+        let caps = |sink: &Arc<std::sync::Mutex<Vec<u8>>>| {
+            CapabilitySet::builder()
+                .stdout(Arc::new(super::tests::CapturingOutput {
+                    policy_id: pid(11),
+                    sink: Arc::clone(sink),
+                }))
+                .expect("grant stdout")
+                .build()
+        };
+        let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let link_request = LinkRequest::new(
+            ExecutionId::new(std::num::NonZeroU128::new(1).expect("1 は非ゼロ")),
+            caps(&sink),
+            budget,
+        );
+        let linked = engine.link(&script, link_request).expect("link");
+        let request = ExecutionRequest::new(budget, clock)
+            .expect("req")
+            .with_capabilities(caps(&sink));
+        let outcome = engine.run_for_repl(&linked, ctx, request);
+        let out = String::from_utf8(sink.lock().unwrap().clone()).expect("utf8");
+        (outcome, out)
+    }
+
+    fn usage_of(outcome: &ExecutionOutcome) -> BudgetUsage {
+        match outcome {
+            ExecutionOutcome::Completed { usage }
+            | ExecutionOutcome::BudgetExceeded { usage, .. } => *usage,
+            other => panic!("usage を持つ outcome を期待: {other:?}"),
+        }
+    }
+
+    /// RSB-AT-01: 同じ context の 2 回目の submission の usage は、同じ source を新しい context の
+    /// 1 回目として実行したときと一致する（live heap と peak heap は除く）。
+    #[test]
+    fn rsb_at_01_usage_is_counted_per_submission() {
+        let engine = Engine::builder().build().unwrap();
+        let src = "let t = upper(\"abc\") + \"def\"\nprint(t)\nprint(\"x\")\n";
+        let (budget, clock) = standard();
+
+        let mut ctx = ExecutionContext::new(&engine);
+        let (first, _) = submit(&engine, &mut ctx, src, budget, Arc::clone(&clock));
+        let (second, out) = submit(&engine, &mut ctx, src, budget, Arc::clone(&clock));
+        assert_eq!(out, "ABCdef\nx\n");
+
+        let mut fresh = ExecutionContext::new(&engine);
+        let (alone, _) = submit(&engine, &mut fresh, src, budget, Arc::clone(&clock));
+
+        let (first, second, alone) = (usage_of(&first), usage_of(&second), usage_of(&alone));
+        assert_eq!(first.committed, alone.committed);
+        assert_eq!(second.committed, alone.committed);
+        assert_eq!(second.reserved, alone.reserved);
+        assert_eq!(second.peaks, alone.peaks);
+        assert!(alone.committed.source_bytes > 0 && alone.committed.output_calls == 2);
+    }
+
+    /// RSB-AT-02: 上限は、その submission の request の budget に対して判定される。
+    #[test]
+    fn rsb_at_02_limit_is_judged_per_submission() {
+        let engine = Engine::builder().build().unwrap();
+        let mut ctx = ExecutionContext::new(&engine);
+        let three = "if true\n  print(1)\n  print(2)\n  print(3)\nend\n";
+        let two = "if true\n  print(1)\n  print(2)\nend\n";
+        let (loose, clock) = standard();
+        let with_calls = |n: u64| {
+            let mut b = loose;
+            b.max_output_calls = n;
+            b
+        };
+
+        let (o, _) = submit(&engine, &mut ctx, three, loose, Arc::clone(&clock));
+        assert!(matches!(o, ExecutionOutcome::Completed { .. }), "{o:?}");
+        let (o, _) = submit(&engine, &mut ctx, two, with_calls(2), Arc::clone(&clock));
+        assert!(matches!(o, ExecutionOutcome::Completed { .. }), "{o:?}");
+        let (o, _) = submit(&engine, &mut ctx, two, with_calls(1), Arc::clone(&clock));
+        assert!(
+            matches!(o, ExecutionOutcome::BudgetExceeded { .. }),
+            "{o:?}"
+        );
+        assert_eq!(
+            ctx.evaluator.take_pending_budget_resource(),
+            Some(BudgetResource::OutputCalls)
+        );
+        assert!(!ctx.is_poisoned());
+        let (o, _) = submit(&engine, &mut ctx, two, loose, Arc::clone(&clock));
+        assert!(matches!(o, ExecutionOutcome::Completed { .. }), "{o:?}");
+    }
+
+    /// RSB-AT-03（tree）: live heap は持ち越して baseline とし、peak は前の submission の最大値を含まない。
+    /// baseline が上限を超えるなら 1 文も実行せず `BudgetExceeded(HeapBytes)`、context は poison しない。
+    #[test]
+    fn rsb_at_03_live_heap_is_carried_and_judged_as_baseline() {
+        let engine = Engine::builder().build().unwrap();
+        let mut ctx = ExecutionContext::new(&engine);
+        let (loose, clock) = standard();
+
+        // submission 1: 大きな List を変数に残す。途中で一時的に倍の大きさになる。
+        let (o, _) = submit(
+            &engine,
+            &mut ctx,
+            "let big = range(0, 2000)\nlet tmp = range(0, 4000)\ntmp = null\n",
+            loose,
+            Arc::clone(&clock),
+        );
+        let first = usage_of(&o);
+
+        let (o, _) = submit(
+            &engine,
+            &mut ctx,
+            "let n = len(big)\n",
+            loose,
+            Arc::clone(&clock),
+        );
+        let second = usage_of(&o);
+        assert!(
+            second.live_heap_bytes >= crate::budget::heap_size::list_body(2000),
+            "live は持ち越した List の分以上: {}",
+            second.live_heap_bytes
+        );
+        assert!(
+            second.live_heap_bytes < first.peak_heap_bytes,
+            "live={} first.peak={}",
+            second.live_heap_bytes,
+            first.peak_heap_bytes
+        );
+        assert!(
+            second.peak_heap_bytes < first.peak_heap_bytes,
+            "peak は前の submission の最大値を含まない: {} vs {}",
+            second.peak_heap_bytes,
+            first.peak_heap_bytes
+        );
+
+        // submission 3: 残った live より小さい上限 → 1 文も実行しない。
+        let mut tight = loose;
+        tight.max_live_heap_bytes = second.live_heap_bytes / 2;
+        let (o, out) = submit(
+            &engine,
+            &mut ctx,
+            "print(\"ran\")\n",
+            tight,
+            Arc::clone(&clock),
+        );
+        assert!(
+            matches!(o, ExecutionOutcome::BudgetExceeded { .. }),
+            "{o:?}"
+        );
+        assert_eq!(
+            ctx.evaluator.take_pending_budget_resource(),
+            Some(BudgetResource::HeapBytes)
+        );
+        assert_eq!(out, "", "1 文も実行しない");
+        assert!(!ctx.is_poisoned());
+
+        // submission 4: 緩い budget で変数を読める。
+        let (o, out) = submit(
+            &engine,
+            &mut ctx,
+            "print(len(big))\n",
+            loose,
+            Arc::clone(&clock),
+        );
+        assert!(matches!(o, ExecutionOutcome::Completed { .. }), "{o:?}");
+        assert_eq!(out, "2000\n");
+    }
+
+    /// RSB-AT-03（artifact）: submission 1 の AST が大きいとき、submission 2 の `peak_heap_bytes` は
+    /// その artifact の分を含まない（前の artifact token を据え直しの前に release する）。
+    /// 一時値の無い submission 1 を使い、peak が artifact で決まるようにしている。
+    #[test]
+    fn rsb_at_03_previous_artifact_is_not_in_next_peak() {
+        let engine = Engine::builder().build().unwrap();
+        let mut ctx = ExecutionContext::new(&engine);
+        let (loose, clock) = standard();
+
+        let big: String = (0..300).map(|i| format!("let v{i} = 1\n")).collect();
+        let (o, _) = submit(&engine, &mut ctx, &big, loose, Arc::clone(&clock));
+        let first = usage_of(&o);
+        let (o, _) = submit(&engine, &mut ctx, "let z = 1\n", loose, Arc::clone(&clock));
+        let second = usage_of(&o);
+        assert!(
+            second.peak_heap_bytes <= second.live_heap_bytes + 200
+                && first.peak_heap_bytes > second.live_heap_bytes + 2000,
+            "peak={} live={}（前の artifact が peak に入っている）",
+            second.peak_heap_bytes,
+            second.live_heap_bytes
+        );
+        assert!(second.peak_heap_bytes < first.peak_heap_bytes);
     }
 }

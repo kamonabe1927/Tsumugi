@@ -219,8 +219,7 @@ impl Vm {
 
     /// REPL 用: 明示 `BudgetConfig` で空のスタックの VM を生成する。
     ///
-    /// fuel（step）は submission ごとに戻し、他の cumulative counter は session 全体で累積する
-    /// （従来の VM REPL と同じ）。
+    /// 使用量は submission ごとに [`Vm::begin_repl_submission`] で 0 から数え直す。
     pub fn new_repl_with_budget(config: BudgetConfig) -> Self {
         Vm {
             frames: Vec::new(),
@@ -441,6 +440,18 @@ impl Vm {
         Ok(())
     }
 
+    /// REPL の submission の開始で budget を据え直す（embedding-api §12「REPLのbudget」）。
+    ///
+    /// CLI は submission ごとに、[`Self::charge_link_graph`] より**前**にこれを呼ぶ。前の入力の
+    /// chunk token を先に release してから、台帳の使用量を 0 から数え直す（live heap は持ち越す）。
+    /// `config` は submission ごとに作って渡す。VM REPL は clock を持たない。
+    pub fn begin_repl_submission(&mut self, config: BudgetConfig) {
+        self.chunk_tokens.clear();
+        let cancellation = self.budget.cancellation_token();
+        self.budget
+            .begin_repl_submission(config, None, cancellation);
+    }
+
     /// REPL 用: 既存のスタック（ローカル変数）を保持したまま新しいチャンクを実行する。
     /// 前回のフレームを差し替えて実行し、終了後もスタック上の値を保持する。
     pub fn run_repl_chunk(&mut self, chunk: VerifiedChunk) -> Result<(), TsumugiError> {
@@ -484,8 +495,8 @@ impl Vm {
             self.frames.truncate(1);
             self.frames[0] = frame;
         }
-        // fuel 予算と instruction watchdog はリセット（各入力で予算を全額使えるように）
-        self.budget.reset_fuel();
+        // 使用量の据え直しは入力の開始（`begin_repl_submission`）で済んでいる。instruction
+        // watchdog だけここでリセットする。
         self.watchdog_ticks = 0;
 
         // 入力の bytecode chunk 木を live heap へ課金する（REV-015 PR-d）。REPL の
