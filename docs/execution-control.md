@@ -4045,6 +4045,9 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
   3. 課金点・課金値・`fuel_accounting_revision`・`language_revision` は変えない。複製が無くなる経路では、複製に伴っていた heap の課金（`Tracked::new`）と、
      複製した backing の上で起きていた深度の読み直しの fuel が tree と同じになり、古い backing が scope の終わりまで live に残らなくなる。これは
      §2 の不変条件 5 から外れた engine 差を直すもので課金表の変更ではないので、版は上げない（`fix-cow-copy-parity` と同じ扱い）。
+     VM の REPL では、前の入力からある top-level の slot を入力の中で昇格すると、移す前の `checkpoint_stack_slot`（実装範囲 2）で journal entry
+     （`rollback_journal_entry(0)` = 48 byte）の heap がその入力の終わりまで 1 件増える（その入力で同じ slot をまだ記録していないとき）。rollback に要る記録で、
+     tree との byte 単位の一致は §5.3 の A-1 どおり求めない。
   4. 冒頭の逸脱一覧の、captured cell への昇格の行を、done にする実装 PR で削除する。
 - **範囲外:**
   - COW の複製・反復列の fuel の課金（fuel-bulk-charge-a）。本スライスは複製の有無を揃えるだけで、fuel の課金点は足さない。
@@ -4066,7 +4069,7 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
     入力が、昇格前の値と binding へ戻り、次の入力でその binding を読める・書き換えられる（元の値で、複製の有無は両 engine で一致する。REPL の入力の中では journal が元の値の参照を持つので、一意所有でも最初の書き換えは両 engine とも 1 回複製する。範囲外の journal の項と同じ理由で、CCU-AT-01 の「複製しない」は REPL の入力には当てない）。前の入力で昇格済みの
     binding を書き換えて失敗する入力も元の値へ戻る。確かめ方: 既存の REPL の rollback のテストの形（`tests/` の REPL transaction のテスト）。
   - **CCU-AT-04（既存の挙動の維持）:** 既存の golden fixture（`collection_cow_alias`・closure の fixture など）・`tests/differential.rs`・`tests/scaling.rs`・
-    REPL の rollback のテストが、heap の期待値の変化（VM の cell 経由の書き換えで複製が消えたぶんと、昇格した slot に古い値が残らなくなったぶん）を除いて
+    REPL の rollback のテストが、heap の期待値の変化（VM の cell 経由の書き換えで複製が消えたぶんと、昇格した slot に古い値が残らなくなったぶんと、VM の REPL で前の入力からある top-level の slot を昇格した入力の journal entry 1 件ぶんの増加（実装範囲 3））を除いて
     変更なしで通る。期待値を変えたテストは PR 本文に列挙する。
 - **想定の変更規模:** `src/` 約 10〜40 行（`src/vm.rs` の `ensure_local_cell` と doc）。テストは 150〜300 行。触る仕組みは「VM の captured cell への昇格」1 つ。
   受入基準 4。§14.1（[開発ループ手順書](loop-runbook.md)）に収まる。
