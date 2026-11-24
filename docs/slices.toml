@@ -566,13 +566,14 @@ order      = 28
 [[slice]]
 id         = "fix-cow-copy-parity"
 title      = "COW の複製の有無を tree と VM で揃える（VM の pop を binding の上で書き換える・for の Dict・Str の反復元の保持）"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fix-cow-copy-parity 実装スライス（`pop` と `for` の中の Dict 代入で、COW の複製の有無を tree と VM で揃える）" }
 acceptance = ["CCP-AT-01..04"]
 design_pr  = 507
 issues     = [502]
+impl_pr    = 508
 order      = 42
 
 # fuel-bulk-charge は 1 PR に収まらない（触る仕組み 3・受入基準 10 超・src/ 約 900〜1400 行、loop-runbook §14.1）ため

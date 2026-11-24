@@ -1773,17 +1773,8 @@ impl Vm {
                 let result = self.exec_builtin(name, args, line)?;
                 self.stack.push(result);
             }
-            OpCode::PopUpdate => {
-                // pop の書き戻し専用の内部命令。スタックトップの List から末尾を
-                // 取り除く（source から到達不能）。tracked backing 上で delta release
-                // しながら in-place で更新する（REV-015 案A）。
-                self.require_stack_len(1, line)?;
-                let idx = self.stack.len().saturating_sub(1);
-                self.checkpoint_stack_slot(idx);
-                let mut collection = std::mem::replace(&mut self.stack[idx], Value::Null);
-                let result = collection.list_pop_tracked(&mut self.budget, ExecutionPhase::Run);
-                self.stack[idx] = collection;
-                result.map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+            OpCode::PopBinding(target) => {
+                self.pop_binding(&target, line)?;
             }
             OpCode::FStrConcat(count) => {
                 // スタックから count 個の値を取り出して文字列に連結
@@ -2110,6 +2101,30 @@ impl Vm {
                     &mut self.budget,
                     ExecutionPhase::Run,
                 );
+                self.stack[stack_index] = slot;
+                result.map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
+            }
+        }
+    }
+
+    /// `pop(<識別子>)` を対象 binding storage 上で in-place に実行する（fix-cow-copy-parity）。
+    /// tree engine の `budget_list_pop` と同じく binding の値を operand stack へ複製しないので、
+    /// 一意所有の List の backing は COW で複製されない。
+    fn pop_binding(&mut self, target: &MutationTarget, line: usize) -> Result<(), TsumugiError> {
+        match self.resolve_binding_storage(target, line)? {
+            BindingStorage::Cell(cell) => {
+                self.checkpoint_cell(&cell);
+                cell.borrow_mut()
+                    .list_pop_tracked(&mut self.budget, ExecutionPhase::Run)
+                    .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
+            }
+            BindingStorage::Stack(stack_index) => {
+                if stack_index >= self.stack.len() {
+                    return Err(internal_error(line, "pop の対象slotが不正です"));
+                }
+                self.checkpoint_stack_slot(stack_index);
+                let mut slot = std::mem::replace(&mut self.stack[stack_index], Value::Null);
+                let result = slot.list_pop_tracked(&mut self.budget, ExecutionPhase::Run);
                 self.stack[stack_index] = slot;
                 result.map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
             }

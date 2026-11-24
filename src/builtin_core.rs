@@ -2445,7 +2445,7 @@ pub fn builtin_path_join_budgeted(
 /// 該当すれば Ok(Some(value))、該当しなければ Ok(None) を返す。
 /// map/filter/each/print/input/exit/args は実行コンテキスト依存のため含まない。
 /// 内部命令 `__pop_update` は public 名として持たず、[`builtin_pop_update`] を
-/// VM の [`crate::opcode::OpCode::PopUpdate`] と tree の pop 実装が直接呼ぶ（AUD-049）。
+/// VM の [`crate::opcode::OpCode::PopBinding`] と tree の pop 実装が直接呼ぶ（AUD-049）。
 pub fn dispatch(
     name: &str,
     args: &[Value],

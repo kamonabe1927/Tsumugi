@@ -428,4 +428,7 @@ const TREE_EXPECTED: (u64, u64, u64) = (3976, 25204, 25204);
 // F-2c で、fuel は版 2 の課金（§4.1 の statement / expression / operation / invocation / loop iteration）で
 // 242 から 3976 になった（tree と VM で一致）。VM は compiler が出す `Charge` 命令が 90 個増え、
 // bytecode_chunk の課金（16 × 命令数）が 1440 byte 増えた。bytecode 以外の heap は変わらない。
-const VM_EXPECTED: (u64, u64, u64) = (3976, 25124, 25124);
+// fix-cow-copy-parity で、`pop(<識別子>)` の lowering が 4 命令（`GetX`・`PopUpdate`・`SetX`・`Pop`）から
+// `PopBinding` 1 命令になり、この script の `pop` 1 箇所で bytecode_chunk の課金（16 × 命令数）が 48 byte
+// 減った。fuel と tree の値、bytecode 以外の heap は変わらない。
+const VM_EXPECTED: (u64, u64, u64) = (3976, 25076, 25076);

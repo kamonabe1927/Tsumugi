@@ -221,6 +221,9 @@ enum LoopAction {
 }
 
 /// [`Frame`] の種別と反復・handler 状態（REV-015 Slice 3 PR-b / PR-d）。
+// `For` が反復元を持たなくなり（fix-cow-copy-parity）、最大の `Call` との差が閾値を超えた。
+// frame は Vec で持ち、`Call` は再帰の深さぶんしか積まないので、Box 化はせず許容する。
+#[allow(clippy::large_enum_variant)]
 enum FrameKind {
     /// 独立スコープを持たない素のブロック（program 直下・関数本体・ループ本体の 1 反復）。
     /// スコープ管理は生成側（loop frame や call）が行う。
@@ -247,10 +250,9 @@ enum FrameKind {
         /// Dict・Str は課金済みの tracked な List（frame の drop で release される）。
         items: Rc<crate::value::TrackedList>,
         index: usize,
-        /// 反復元コレクション値を保持する。従来の tree 評価器は `for` の対象を局所変数
-        /// `collection` としてループ実行中ずっと生かしていたため、その live heap 課金も
-        /// ループ完了まで維持されていた。frame へ持たせて同じ寿命を保つ（挙動不変）。
-        _collection: Value,
+        // 反復元コレクション値は frame に持たない（fix-cow-copy-parity、判断 Q1 = A）。Dict・Str は
+        // 反復列を作った時点で手放し（VM の `ToIterList` と同じ）、反復中の `d[k] = …` が Dict を
+        // 複製しないようにする。List は反復列が反復元の backing を共有するので変わらない。
     },
     /// `try` 本体を実行中。本体で捕捉エラーが出たら `catch` 本体へ切り替える。
     Try {
@@ -2569,7 +2571,7 @@ impl Evaluator {
             CallDest::ForIter => {
                 let items = self.materialize_for_items(&value, line)?;
                 if !items.is_empty() {
-                    let frame = self.enter_for(owner, stmt_index, items, value, line)?;
+                    let frame = self.enter_for(owner, stmt_index, items, line)?;
                     self.frames.push(frame);
                 }
             }
@@ -3672,10 +3674,11 @@ impl Evaluator {
                     return Ok(StmtStep::Val);
                 }
                 // var / body は controller の LoopSite（owner + stmt_index）越しに読むので、
-                // ここでは owner / index を enter_for へ渡す。materialize 済み items と
-                // 反復元 collection は controller frame が保持する（従来の局所変数と同じ寿命）。
+                // ここでは owner / index を enter_for へ渡す。materialize 済み items だけを
+                // controller frame が保持し、反復元 collection はここで手放す。
+                drop(collection);
                 Ok(StmtStep::Enter(
-                    self.enter_for(owner, stmt_index, items, collection, *line)?,
+                    self.enter_for(owner, stmt_index, items, *line)?,
                 ))
             }
 
@@ -4010,7 +4013,6 @@ impl Evaluator {
         owner: &Block,
         stmt_index: usize,
         items: Rc<crate::value::TrackedList>,
-        collection: Value,
         line: usize,
     ) -> Result<Frame, TsumugiError> {
         // var / body は owner[stmt_index]（Stmt::For）から読み出す。body は controller に
@@ -4031,7 +4033,6 @@ impl Evaluator {
                 line,
                 items,
                 index: 0,
-                _collection: collection,
             },
             scope_base: self.env.scope_depth(),
             heap_charge: 0,

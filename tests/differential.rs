@@ -1686,3 +1686,99 @@ fn rsb_at_03_vm_repl_previous_chunk_is_not_in_next_peak() {
     );
     assert!(second.peak_heap_bytes < first.peak_heap_bytes);
 }
+
+// =============================================================================
+// fix-cow-copy-parity: COW の複製の有無（pop・for の中の Dict 代入）の parity
+// =============================================================================
+
+/// `pop` を `count` 回呼ぶ script（要素数 `n` の List、`place` の binding）を組み立てる。
+fn ccp_pop_source(place: &str, n: usize, count: usize) -> String {
+    let pops = "pop(xs)\n".repeat(count);
+    match place {
+        "global" => format!("let xs = range(0, {n})\n{pops}print(len(xs))\n"),
+        "local" => {
+            format!(
+                "fn f()\n  let xs = range(0, {n})\n  {body}  return len(xs)\nend\nprint(f())\n",
+                body = "pop(xs)\n  ".repeat(count)
+            )
+        }
+        "upvalue" => format!(
+            "let xs = range(0, {n})\nfn f()\n  {body}return len(xs)\nend\nprint(f())\n",
+            body = "pop(xs)\n  ".repeat(count)
+        ),
+        "upvalue_captured_local" => format!(
+            "fn outer()\n  let xs = range(0, {n})\n  fn g()\n    {body}return 0\n  end\n  g()\n  return len(xs)\nend\nprint(outer())\n",
+            body = "pop(xs)\n    ".repeat(count)
+        ),
+        _ => unreachable!(),
+    }
+}
+
+/// CCP-AT-01: `pop(<識別子>)` の消費 fuel と上限 N / N−1 の境界が tree/VM で完全に一致する。
+#[test]
+fn ccp_at_01_pop_fuel_parity() {
+    for place in ["global", "local", "upvalue", "upvalue_captured_local"] {
+        for n in [10usize, 1000] {
+            for count in [1usize, 2, 3] {
+                let source = ccp_pop_source(place, n, count);
+                assert_fuel_parity(&format!("pop {place} n={n} x{count}"), &source);
+            }
+        }
+    }
+    // 深度の読み直しが起きる形（最も深い要素が 1 つだけで、それを取り除く）。複製の有無で
+    // 読み直しの fuel と順序が変わっていた（issue #502）。
+    for n in [10usize, 200] {
+        let flat = (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        for pops in [1usize, 2, 3] {
+            let body = "pop(xs)\n".repeat(pops);
+            assert_fuel_parity(
+                &format!("pop 深度の読み直し global n={n} x{pops}"),
+                &format!("let xs = [{flat}, [[1]]]\n{body}print(len(xs))\n"),
+            );
+            let body = "pop(xs)\n  ".repeat(pops);
+            assert_fuel_parity(
+                &format!("pop 深度の読み直し local n={n} x{pops}"),
+                &format!(
+                    "fn f()\n  let xs = [{flat}, [[1]], [2]]\n  {body}return len(xs)\nend\nprint(f())\n"
+                ),
+            );
+        }
+    }
+    // 取り出した要素を使う式
+    assert_fuel_parity(
+        "pop の戻り値",
+        "let xs = range(0, 10)\nlet a = pop(xs)\nlet b = pop(xs)\nprint(a + b)\n",
+    );
+}
+
+/// CCP-AT-03: `for k in d` の中の `d[k] = …` の消費 fuel と境界が tree/VM で一致する（`break` を含む）。
+#[test]
+fn ccp_at_03_for_dict_assign_fuel_parity() {
+    let entries = |n: usize| {
+        (0..n)
+            .map(|i| format!("\"k{i}\": {i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for n in [1usize, 5, 200] {
+        let dict = entries(n);
+        assert_fuel_parity(
+            &format!("for dict assign n={n}"),
+            &format!("let d = {{{dict}}}\nfor k in d\n  d[k] = 2\nend\nprint(len(d))\n"),
+        );
+        assert_fuel_parity(
+            &format!("for dict assign break n={n}"),
+            &format!("let d = {{{dict}}}\nfor k in d\n  d[k] = 2\n  break\nend\nprint(len(d))\n"),
+        );
+        assert_fuel_parity(
+            &format!("for dict 関数内 n={n}"),
+            &format!(
+                "fn f()\n  let d = {{{dict}}}\n  for k in d\n    d[k] = 2\n  end\n  return len(d)\nend\nprint(f())\n"
+            ),
+        );
+    }
+    assert_fuel_parity(
+        "for str",
+        "let s = \"abc\"\nlet d = {\"a\": 1}\nfor c in s\n  d[c] = 1\nend\nprint(len(d))\n",
+    );
+}

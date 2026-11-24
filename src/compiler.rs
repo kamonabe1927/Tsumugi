@@ -884,12 +884,10 @@ impl Compiler {
             let target = self.resolve_mutation_target(var_name, line);
             self.compile_expr(&args[0], line)?;
             self.chunk.emit(OpCode::CallBuiltin(builtin_id, 1), line);
-            // pop の戻り値（取り出した要素）はスタックに残したまま、変数側の
-            // List を PopUpdate で更新する。内部命令なので source から呼べない。
-            self.emit_get_mutation_target(&target, line);
-            self.chunk.emit(OpCode::PopUpdate, line);
-            self.emit_set_mutation_target(&target, line);
-            self.chunk.emit(OpCode::Pop, line);
+            // pop の戻り値（取り出した要素）はスタックに残したまま、binding の上で List の
+            // 末尾を取り除く。binding の値をスタックへ複製しないので COW で複製しない。
+            // 内部命令なので source から呼べない。
+            self.chunk.emit(OpCode::PopBinding(target), line);
             return Ok(());
         }
 
@@ -1042,26 +1040,6 @@ impl Compiler {
             MutationTarget::Upvalue(index)
         } else {
             MutationTarget::Global(name.to_string())
-        }
-    }
-
-    fn emit_get_mutation_target(&mut self, target: &MutationTarget, line: usize) {
-        match target {
-            MutationTarget::Local(slot) => self.chunk.emit(OpCode::GetLocal(*slot), line),
-            MutationTarget::Upvalue(index) => self.chunk.emit(OpCode::GetUpvalue(*index), line),
-            MutationTarget::Global(name) => {
-                self.chunk.emit(OpCode::GetGlobal(name.clone()), line);
-            }
-        }
-    }
-
-    fn emit_set_mutation_target(&mut self, target: &MutationTarget, line: usize) {
-        match target {
-            MutationTarget::Local(slot) => self.chunk.emit(OpCode::SetLocal(*slot), line),
-            MutationTarget::Upvalue(index) => self.chunk.emit(OpCode::SetUpvalue(*index), line),
-            MutationTarget::Global(name) => {
-                self.chunk.emit(OpCode::SetGlobal(name.clone()), line);
-            }
         }
     }
 

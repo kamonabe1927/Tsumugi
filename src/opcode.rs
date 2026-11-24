@@ -202,13 +202,15 @@ pub enum OpCode {
     /// operand: (呼び出す builtin の [`crate::builtin_registry::BuiltinId`], 引数の数)
     CallBuiltin(crate::builtin_registry::BuiltinId, usize),
 
-    /// `pop` の書き戻し専用の内部命令（source から到達不能）。
+    /// `pop(<識別子>)` の書き戻し専用の内部命令（source から到達不能）。
     ///
-    /// スタックトップの List を、末尾要素を取り除いた List へ置き換える（空 List は
-    /// そのまま）。以前は public builtin 名 `__pop_update` を定数テーブルへ載せて
-    /// `CallBuiltin` で呼んでいたが、AUD-049 で内部命令へ隔離し、public registry から
-    /// 除外した。
-    PopUpdate,
+    /// 対象 binding の storage を直接書き換え、末尾要素を取り除く（空 List はそのまま）。
+    /// binding の値を operand stack へ複製しないので、一意所有の List の backing は COW で
+    /// 複製されない（tree の `budget_list_pop` と同じ。fix-cow-copy-parity）。取り出した要素は
+    /// この命令より前の `CallBuiltin(pop)` がスタックへ積んでいて、この命令はスタックを変えない。
+    /// 以前は binding の値を `GetLocal` などで積んで `PopUpdate` で更新し書き戻していた
+    /// （AUD-049 で内部命令へ隔離した経緯は変わらない）。
+    PopBinding(MutationTarget),
 
     /// `push(var, value)` の書き戻し用の内部命令（source から到達不能）。
     ///

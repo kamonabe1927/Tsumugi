@@ -631,7 +631,7 @@ VmFn {
 builtin_core.rs
 ├── dispatch(name, args, max_collection, line) → Result<Option<Value>>
 │   # 副作用なしの値変換だけを扱う（未知の名前は Ok(None)）。__pop_update は含まず、
-│   # OpCode::PopUpdate / tree の pop が builtin_pop_update を直接呼ぶ
+│   # OpCode::PopBinding / tree の pop が builtin_pop_update を直接呼ぶ
 ├── builtin_len, builtin_push, builtin_range, ...（副作用なしの値変換）
 │   └── builtin_sort_budgeted, builtin_join_budgeted, builtin_to_str_budgeted,
 │       builtin_contains_budgeted（実行予算を受け取る版。dispatch を経ず、
@@ -655,7 +655,7 @@ builtin_core.rs
 - **エンジン固有のビルトインは各モジュールに残す** — `push`/`pop`（binding更新）、`map`/`filter`/`each`（クロージャ呼び出し）、`print`/`input`/`exit`/`args`/`env`/`now`（I/O・プロセス操作・環境変数・時刻）
 - **user bindingをbuiltinより優先する** — `print`以外の識別子calleeはlocal/upvalue/runtime globalを先に探し、bindingがない場合だけbuiltinへfallbackする。VMは`JumpIfGlobalDefined`で実行時のglobal登録状態を分岐し、builtin branchとuser-call branchの評価順を混在させない
 - **破壊的List操作はbindingへ書き戻す** — builtin `push`/`pop`が選ばれた場合、第1引数はlocal/upvalue/runtime globalの識別子bindingに限定する。第1引数の値を先にsnapshotし、更新後のListを同じbindingへ書き戻す。一時Listは永続化先がないため拒否する
-- **builtin名の正本は単一registry** — language-visible builtin名は `builtin_registry.rs` の `PUBLIC_BUILTINS`（`BuiltinSpec` 配列）1か所で定義する（AUD-049）。tree の委譲判定（`is_pure_core_builtin`）、Compiler の builtin 判定（`is_builtin` → `is_public_builtin`）、context 判定（`is_context_builtin`）、VM の dispatch はすべてこの registry から導出し、手書きの名前一覧を持たない。VM の `CallBuiltin` opcode は名前文字列ではなく `BuiltinId` を保持するため、typo は compile 時に検出される。新規ビルトイン追加は「handler 実装（`builtin_core.rs` の `dispatch` アーム、または各engineのcontext実装）+ `BuiltinSpec` 1 entry + tests」に一本化される。内部命令 `__pop_update` は public registry へ置かず、`pop` の書き戻し専用 opcode `OpCode::PopUpdate` として実装するため source から到達できない。`builtin_registry` 内の contract test と `tests/builtin_registry_contract.rs` が、全 entry の一意性・往復・tree/VM の名前解決・`__pop_update` 非到達を自動検査する
+- **builtin名の正本は単一registry** — language-visible builtin名は `builtin_registry.rs` の `PUBLIC_BUILTINS`（`BuiltinSpec` 配列）1か所で定義する（AUD-049）。tree の委譲判定（`is_pure_core_builtin`）、Compiler の builtin 判定（`is_builtin` → `is_public_builtin`）、context 判定（`is_context_builtin`）、VM の dispatch はすべてこの registry から導出し、手書きの名前一覧を持たない。VM の `CallBuiltin` opcode は名前文字列ではなく `BuiltinId` を保持するため、typo は compile 時に検出される。新規ビルトイン追加は「handler 実装（`builtin_core.rs` の `dispatch` アーム、または各engineのcontext実装）+ `BuiltinSpec` 1 entry + tests」に一本化される。内部命令 `__pop_update` は public registry へ置かず、`pop` の書き戻し専用 opcode `OpCode::PopBinding` として実装するため source から到達できない。`builtin_registry` 内の contract test と `tests/builtin_registry_contract.rs` が、全 entry の一意性・往復・tree/VM の名前解決・`__pop_update` 非到達を自動検査する
 
 ### 設計判断
 
