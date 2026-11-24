@@ -4048,7 +4048,7 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
   4. 冒頭の逸脱一覧の、captured cell への昇格の行を、done にする実装 PR で削除する。
 - **範囲外:**
   - COW の複製・反復列の fuel の課金（fuel-bulk-charge-a）。本スライスは複製の有無を揃えるだけで、fuel の課金点は足さない。
-  - 埋め込み API の transaction（submission journal）が元の値の参照を握ることで起きる、最初の書き換えの複製（issue #510 の「別の気づき」）。journal の
+  - 埋め込み API・REPL の transaction（VM の `checkpoint_stack_slot` / `checkpoint_cell`、tree の submission journal）が元の値の参照を握ることで起きる、最初の書き換えの複製（issue #510 の「別の気づき」）。journal の
     有無による差で、本スライスの engine 差とは別である。両 engine で揃っているかは fuel-bulk-charge-a の FBCa-AT-03 の確かめで見る。
   - tree の挙動。本スライスは VM の昇格だけを変える。
   - 共有中の backing（`let ys = xs` の後の書き換えなど）の 1 回の複製。§5.2 どおりで、両 engine で一致している。
@@ -4063,7 +4063,7 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
     tree と VM の `committed.fuel` が完全に一致し、上限 N と N − 1 の成功・失敗の境界と stdout・stderr・exit code が一致する。深度の読み直しが起きる形
     （最も深い要素を `pop` で取り除く）を cell 経由でも含める。確かめ方: `tests/differential.rs` の paired test（`ccp_at_01_pop_fuel_parity` の形）。
   - **CCU-AT-03（REPL の rollback）:** VM の REPL で、top-level の binding（List）を入力の中で closure に捕捉して昇格させ、cell 経由で書き換えた後に失敗する
-    入力が、昇格前の値と binding へ戻り、次の入力でその binding を読める・書き換えられる（元の値で、複製の有無は CCU-AT-01 と同じ）。前の入力で昇格済みの
+    入力が、昇格前の値と binding へ戻り、次の入力でその binding を読める・書き換えられる（元の値で、複製の有無は両 engine で一致する。REPL の入力の中では journal が元の値の参照を持つので、一意所有でも最初の書き換えは両 engine とも 1 回複製する。範囲外の journal の項と同じ理由で、CCU-AT-01 の「複製しない」は REPL の入力には当てない）。前の入力で昇格済みの
     binding を書き換えて失敗する入力も元の値へ戻る。確かめ方: 既存の REPL の rollback のテストの形（`tests/` の REPL transaction のテスト）。
   - **CCU-AT-04（既存の挙動の維持）:** 既存の golden fixture（`collection_cow_alias`・closure の fixture など）・`tests/differential.rs`・`tests/scaling.rs`・
     REPL の rollback のテストが、heap の期待値の変化（VM の cell 経由の書き換えで複製が消えたぶんと、昇格した slot に古い値が残らなくなったぶん）を除いて
