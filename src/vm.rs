@@ -990,7 +990,15 @@ impl Vm {
         }
         // スタックから現在の値を取り出してセルを作成する。§5.1 captured cell（32 byte）を
         // live heap へ課金し、最後の参照 drop で release する（REV-015 PR-c）。
-        let value = self.stack[at].clone();
+        //
+        // 値は複製せず cell へ移し、stack slot には `Value::Null` を置く（fix-cow-copy-parity-upvalue）。
+        // 昇格後の読み書きは `get_local` / `with_local_ref` / `set_local` / `get_global` /
+        // `resolve_binding_storage` がどれも cell を先に見るので、stack slot は読まれない。
+        // slot に同じ List / Dict の backing の `Rc` を残すと strong が 2 になり、cell 経由の
+        // 最初の書き換えが一意所有の backing を複製して tree と COW の複製の有無が食い違う。
+        // REPL の rollback に要る元の値は、移す前に journal へ記録する。
+        self.checkpoint_stack_slot(at);
+        let value = std::mem::replace(&mut self.stack[at], Value::Null);
         let cell =
             crate::value::Value::new_cell(value, &self.budget.heap_handle(), ExecutionPhase::Run)
                 .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;

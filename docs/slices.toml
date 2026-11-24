@@ -586,13 +586,14 @@ order      = 42
 [[slice]]
 id         = "fix-cow-copy-parity-upvalue"
 title      = "VM の captured cell への昇格で stack slot に値を残さず、upvalue・捕捉 local 経由の push・pop・index 代入の COW の複製を tree と揃える"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fix-cow-copy-parity-upvalue 実装スライス（VM の captured cell への昇格で、COW の複製の有無を tree と揃える）" }
 acceptance = ["CCU-AT-01..04"]
 design_pr  = 511
 issues     = [510]
+impl_pr    = 512
 order      = 43
 
 # fuel-bulk-charge は 1 PR に収まらない（触る仕組み 3・受入基準 10 超・src/ 約 900〜1400 行、loop-runbook §14.1）ため
