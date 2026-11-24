@@ -1156,3 +1156,97 @@ fn empty_collection_literal_live_heap_matches_across_engines() {
         );
     }
 }
+
+// =============================================================================
+// fix-cow-copy-parity: COW の複製の有無（CCP-AT-02・CCP-AT-03）
+// =============================================================================
+
+/// 要素数 `n` の List body の論理サイズ（`24 + 32 × 要素数`）。
+fn ccp_list_body(n: u64) -> u64 {
+    24 + 32 * n
+}
+
+/// CCP-AT-02: 一意所有の List への `pop` は backing を複製しない（両 engine）。
+/// `pop` を k 回行っても、`pop` を行わない script の peak を List body ぶん超えない。
+/// 複製していれば 1 回目で peak が body ぶん増える。
+#[test]
+fn ccp_at_02_pop_on_unique_list_does_not_copy() {
+    let n = 1000u64;
+    for use_vm in [false, true] {
+        let mode = if use_vm { "VM" } else { "tree-walk" };
+        for place in ["global", "local"] {
+            let build = |pops: usize| match place {
+                "global" => format!("let xs = range(0, {n})\n{}", "pop(xs)\n".repeat(pops)),
+                _ => format!(
+                    "fn f()\n  let xs = range(0, {n})\n  {}return 0\nend\nf()\n",
+                    "pop(xs)\n  ".repeat(pops)
+                ),
+            };
+            let base = peak_heap_after(&build(0), use_vm);
+            for k in [1usize, 5, 20] {
+                let peak = peak_heap_after(&build(k), use_vm);
+                assert!(
+                    peak < base + ccp_list_body(n),
+                    "{mode}/{place}: pop {k} 回で backing を複製している \
+                     (base peak={base}, peak={peak}, body={})",
+                    ccp_list_body(n)
+                );
+            }
+        }
+    }
+}
+
+/// CCP-AT-02: 共有中の List（`let ys = xs` の後の `pop(xs)`）では両 engine とも 1 回だけ複製し、
+/// 2 回目以降は複製しない。`ys` は変わらない。
+#[test]
+fn ccp_at_02_pop_on_shared_list_copies_once() {
+    let n = 1000u64;
+    for use_vm in [false, true] {
+        let mode = if use_vm { "VM" } else { "tree-walk" };
+        let build = |pops: usize| {
+            format!(
+                "let xs = range(0, {n})\nlet ys = xs\n{}if len(ys) != {n}\n  let z = 1 / 0\nend\n",
+                "pop(xs)\n".repeat(pops)
+            )
+        };
+        let base = peak_heap_after(&build(0), use_vm);
+        let one = peak_heap_after(&build(1), use_vm);
+        let five = peak_heap_after(&build(5), use_vm);
+        // 1 回目の pop で body（要素数 n − 1 ぶん）を複製する。
+        assert!(
+            one >= base + ccp_list_body(n - 1),
+            "{mode}: 共有中の pop が複製していない (base={base}, one={one})"
+        );
+        // 2 回目以降は一意所有になっているので、複製ぶんをさらに積まない（文が増えるぶんの
+        // AST の課金は残るので、body の複製ぶんを超えないことで見る）。
+        assert!(
+            five < one + ccp_list_body(n - 1),
+            "{mode}: 共有中の pop が 2 回目以降も複製している (one={one}, five={five})"
+        );
+    }
+}
+
+/// CCP-AT-03: `for k in d` の中の `d[k] = …` は Dict を複製しない（両 engine。tree の For frame は
+/// Dict の反復元を保持しない）。代入しない script の peak を超えない。
+#[test]
+fn ccp_at_03_for_dict_assign_does_not_copy() {
+    for n in [1usize, 1000] {
+        let dict = (0..n)
+            .map(|i| format!("\"k{i}\": {i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        for use_vm in [false, true] {
+            let mode = if use_vm { "VM" } else { "tree-walk" };
+            let without = format!("let d = {{{dict}}}\nfor k in d\n  let z = d[k]\nend\n");
+            let with = format!("let d = {{{dict}}}\nfor k in d\n  d[k] = 2\nend\n");
+            let base = peak_heap_after(&without, use_vm);
+            let peak = peak_heap_after(&with, use_vm);
+            // Dict の複製があれば、少なくとも key ごとの 1 entry 以上のぶん（n に比例）増える。
+            // 複製が無ければ peak は代入しない場合と同じ（値は同じ大きさの Int のまま置き換わる）。
+            assert!(
+                peak <= base,
+                "{mode}: n={n} の for 内の Dict 代入が複製している (base={base}, peak={peak})"
+            );
+        }
+    }
+}

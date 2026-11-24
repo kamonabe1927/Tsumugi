@@ -186,8 +186,10 @@ fn verify_chunk(chunk: &Chunk, upvalue_count: usize) -> Result<(), ChunkVerifyEr
                 }
             }
 
-            // (V3)/(V4) SetIndex / ListPushBinding は対象 binding 種別で分岐
-            OpCode::SetIndex(target) | OpCode::ListPushBinding(target) => match target {
+            // (V3)/(V4) SetIndex / ListPushBinding / PopBinding は対象 binding 種別で分岐
+            OpCode::SetIndex(target)
+            | OpCode::ListPushBinding(target)
+            | OpCode::PopBinding(target) => match target {
                 MutationTarget::Local(s) => {
                     if *s >= chunk.max_locals {
                         return Err(ChunkVerifyError::BadLocalSlot);

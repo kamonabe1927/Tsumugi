@@ -1686,3 +1686,178 @@ fn rsb_at_03_vm_repl_previous_chunk_is_not_in_next_peak() {
     );
     assert!(second.peak_heap_bytes < first.peak_heap_bytes);
 }
+
+// =============================================================================
+// fix-cow-copy-parity: COW の複製の有無（pop・for の中の Dict 代入）の parity
+// =============================================================================
+
+/// `pop` を `count` 回呼ぶ script（要素数 `n` の List、`place` の binding）を組み立てる。
+fn ccp_pop_source(place: &str, n: usize, count: usize) -> String {
+    let pops = "pop(xs)\n".repeat(count);
+    match place {
+        "global" => format!("let xs = range(0, {n})\n{pops}print(len(xs))\n"),
+        "local" => {
+            format!(
+                "fn f()\n  let xs = range(0, {n})\n  {body}  return len(xs)\nend\nprint(f())\n",
+                body = "pop(xs)\n  ".repeat(count)
+            )
+        }
+        "upvalue" => format!(
+            "let xs = range(0, {n})\nfn f()\n  {body}return len(xs)\nend\nprint(f())\n",
+            body = "pop(xs)\n  ".repeat(count)
+        ),
+        "upvalue_captured_local" => format!(
+            "fn outer()\n  let xs = range(0, {n})\n  fn g()\n    {body}return 0\n  end\n  g()\n  return len(xs)\nend\nprint(outer())\n",
+            body = "pop(xs)\n    ".repeat(count)
+        ),
+        _ => unreachable!(),
+    }
+}
+
+/// CCP-AT-01: `pop(<識別子>)` の消費 fuel と上限 N / N−1 の境界が tree/VM で完全に一致する。
+#[test]
+fn ccp_at_01_pop_fuel_parity() {
+    for place in ["global", "local", "upvalue", "upvalue_captured_local"] {
+        for n in [10usize, 1000] {
+            for count in [1usize, 2, 3] {
+                let source = ccp_pop_source(place, n, count);
+                assert_fuel_parity(&format!("pop {place} n={n} x{count}"), &source);
+            }
+        }
+    }
+    // 深度の読み直しが起きる形（最も深い要素が 1 つだけで、それを取り除く）。複製の有無で
+    // 読み直しの fuel と順序が変わっていた（issue #502）。
+    for n in [10usize, 200] {
+        let flat = (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        for pops in [1usize, 2, 3] {
+            let body = "pop(xs)\n".repeat(pops);
+            assert_fuel_parity(
+                &format!("pop 深度の読み直し global n={n} x{pops}"),
+                &format!("let xs = [{flat}, [[1]]]\n{body}print(len(xs))\n"),
+            );
+            let body = "pop(xs)\n  ".repeat(pops);
+            assert_fuel_parity(
+                &format!("pop 深度の読み直し local n={n} x{pops}"),
+                &format!(
+                    "fn f()\n  let xs = [{flat}, [[1]], [2]]\n  {body}return len(xs)\nend\nprint(f())\n"
+                ),
+            );
+        }
+    }
+    // 取り出した要素を使う式
+    assert_fuel_parity(
+        "pop の戻り値",
+        "let xs = range(0, 10)\nlet a = pop(xs)\nlet b = pop(xs)\nprint(a + b)\n",
+    );
+}
+
+/// CCP-AT-03: `for k in d` の中の `d[k] = …` の消費 fuel と境界が tree/VM で一致する（`break` を含む）。
+#[test]
+fn ccp_at_03_for_dict_assign_fuel_parity() {
+    let entries = |n: usize| {
+        (0..n)
+            .map(|i| format!("\"k{i}\": {i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for n in [1usize, 5, 200, 1000] {
+        let dict = entries(n);
+        assert_fuel_parity(
+            &format!("for dict assign n={n}"),
+            &format!("let d = {{{dict}}}\nfor k in d\n  d[k] = 2\nend\nprint(len(d))\n"),
+        );
+        assert_fuel_parity(
+            &format!("for dict assign break n={n}"),
+            &format!("let d = {{{dict}}}\nfor k in d\n  d[k] = 2\n  break\nend\nprint(len(d))\n"),
+        );
+        assert_fuel_parity(
+            &format!("for dict 関数内 n={n}"),
+            &format!(
+                "fn f()\n  let d = {{{dict}}}\n  for k in d\n    d[k] = 2\n  end\n  return len(d)\nend\nprint(f())\n"
+            ),
+        );
+    }
+    assert_fuel_parity(
+        "for str",
+        "let s = \"abc\"\nlet d = {\"a\": 1}\nfor c in s\n  d[c] = 1\nend\nprint(len(d))\n",
+    );
+}
+
+/// CCP-AT-01・03（CLI）: `pop` と `for` の中の Dict 代入の script で、tree と `--vm` の stdout・stderr
+/// （experimental 警告を除く）・exit code が一致する（失敗する script を含む）。
+#[test]
+fn ccp_at_01_03_cli_stdout_stderr_exit_code_match() {
+    let dict = |n: usize| {
+        (0..n)
+            .map(|i| format!("\"k{i}\": {i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut sources: Vec<(String, String)> = Vec::new();
+    for place in ["global", "local", "upvalue", "upvalue_captured_local"] {
+        for n in [10usize, 1000] {
+            for count in [1usize, 2] {
+                sources.push((
+                    format!("pop {place} n={n} x{count}"),
+                    ccp_pop_source(place, n, count),
+                ));
+            }
+        }
+    }
+    sources.push((
+        "pop の戻り値".into(),
+        "let xs = range(0, 10)\nlet a = pop(xs)\nlet b = pop(xs)\nprint(a + b)\nprint(len(xs))\n"
+            .into(),
+    ));
+    sources.push((
+        "共有中の pop".into(),
+        "let xs = range(0, 10)\nlet ys = xs\npop(xs)\nprint(len(xs))\nprint(len(ys))\n".into(),
+    ));
+    sources.push((
+        "空 List の pop（失敗）".into(),
+        "let xs = [1]\npop(xs)\npop(xs)\nprint(\"unreachable\")\n".into(),
+    ));
+    for n in [1usize, 1000] {
+        let d = dict(n);
+        sources.push((
+            format!("for dict assign n={n}"),
+            format!(
+                "let d = {{{d}}}\nfor k in d\n  d[k] = 2\nend\nprint(len(d))\nprint(d[\"k0\"])\n"
+            ),
+        ));
+        sources.push((
+            format!("for dict assign break n={n}"),
+            format!("let d = {{{d}}}\nfor k in d\n  d[k] = 2\n  break\nend\nprint(d[\"k0\"])\n"),
+        ));
+    }
+    sources.push((
+        "for dict の反復は開始時の key（途中で足した key は回らない）".into(),
+        "let d = {\"a\": 1, \"b\": 2}\nfor k in d\n  d[k + \"x\"] = 0\n  print(k)\nend\nprint(len(d))\n"
+            .into(),
+    ));
+
+    let dir = ImportTestDir::new("CCP CLI parity");
+    for (label, source) in &sources {
+        let script = dir.path.join("ccp.tsg");
+        std::fs::write(&script, source).expect("script の書き込みに失敗");
+        let tree = run_file_subprocess(&script, false, None);
+        let vm = run_file_subprocess(&script, true, None);
+        assert_eq!(
+            tree.status.code(),
+            vm.status.code(),
+            "[{label}] exit code が tree/VM で不一致 (CCP-AT-01/03)"
+        );
+        assert_eq!(
+            output_text(&tree),
+            output_text(&vm),
+            "[{label}] stdout/stderr が tree/VM で不一致 (CCP-AT-01/03)"
+        );
+    }
+    // 失敗する script が本当に失敗として比較されていること（両 engine で非 0）。
+    let script = dir.path.join("ccp.tsg");
+    std::fs::write(&script, "let xs = [1]\npop(xs)\npop(xs)\n").expect("write");
+    assert_ne!(
+        run_file_subprocess(&script, false, None).status.code(),
+        Some(0)
+    );
+}

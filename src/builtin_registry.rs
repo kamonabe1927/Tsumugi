@@ -12,7 +12,7 @@
 //! 一本化される。
 //!
 //! 内部命令 `__pop_update` は public registry へ置かず、Compiler の pop lowering
-//! 専用の [`crate::opcode::OpCode::PopUpdate`] 命令として実装する。そのため
+//! 専用の [`crate::opcode::OpCode::PopBinding`] 命令として実装する。そのため
 //! source からは到達できない。
 
 /// public builtin の安定 ID。
