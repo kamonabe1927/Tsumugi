@@ -2,7 +2,7 @@
 
 バージョン: 0.21
 
-最終更新: 2026-11-23
+最終更新: 2026-11-24
 
 この番号は言語仕様のrevisionであり、Cargo package / REPLの実装バージョン `0.1.0` とは独立して管理する。
 
@@ -831,6 +831,7 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 | user関数arity | `argument` | `{callable} の引数個数が一致しません: 期待 {expected}, 実際 {actual}` |
 | builtin arity | `argument` | `{builtin} の引数個数が一致しません: 期待 {expected}, 実際 {actual}` |
 | `exit` の引数が2個以上 | `argument` | `exit() は引数0〜1個ですが、{actual}個渡されました` |
+| 登録 host function の arity 不一致 | `argument` | `{name} の引数個数が契約と一致しません: 実際 {actual}` |
 | builtin argument型 | `builtin_type` | `{builtin} の第 {position} 引数は {expected} である必要があります: {type}` |
 | callback非callable | `type` | `{builtin} のコールバックは呼び出し可能である必要があります: {type}` |
 | callback arity | `argument` | `{builtin} のコールバック引数個数が一致しません: 期待 1, 実際 {actual}` |
@@ -848,6 +849,8 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 | file sizeがi64範囲外 | `int_overflow` | `ファイルサイズを Int で表現できません` |
 
 `runtime` 種別は現行の言語コアが生成する経路を持たない（互換用に列挙のみ残す）。
+
+「登録 host function の arity 不一致」の行は、埋め込みホストが登録した host function を契約と違う個数の引数で呼んだときの error で、CLI からは起きない。期待個数を出さないのは host の descriptor を公開 message に出さないためである。この行は loop:drift #503 の D-152 で、今の実装を記録する案（Q1=A）を判断役が選択して足した（issue #503。理由と採らなかった案は[次期意味論・実装決定](semantic-decisions.md) §3.4）。既に実装されている挙動の記述の追加で、仕様 revision は 0.21 のまま変えない。
 
 ### キャッチできないエラー
 
