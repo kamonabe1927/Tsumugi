@@ -557,6 +557,24 @@ design_pr  = 483
 impl_pr    = 485
 order      = 28
 
+# issue #502（needs-design、fuel-bulk-charge-a の実装で FBCa-AT-03 の確かめで止まった）の判断 Q1=A で足した修正スライス。
+# COW の複製の有無が tree と VM で食い違う経路（VM の pop(<識別子>)、tree の for の Dict・Str の反復元の保持）を揃えてから
+# fuel-bulk-charge-a の COW の複製の課金を入れる。fuel-bulk-charge-a の depends_on に加え、a は ready から todo に戻した（issues = [502]）。
+# 空きを作るため、fuel-bulk-charge-a・b・c と audit-strict-cbor-c2・c3・c4・audit-sink-required を
+# 42〜48 → 43〜49 に付け直した（相対順は変えていない）。
+# 見積もり: src/ 約 60〜150 行、触る仕組みは COW の書き換え対象の受け渡し 1 つ、受入基準 4。
+[[slice]]
+id         = "fix-cow-copy-parity"
+title      = "COW の複製の有無を tree と VM で揃える（VM の pop を binding の上で書き換える・for の Dict・Str の反復元の保持）"
+status     = "ready"
+parent     = "REV-015"
+spec_slice = "exec-control Slice 6"
+spec       = { doc = "docs/execution-control.md", section = "fix-cow-copy-parity 実装スライス（`pop` と `for` の中の Dict 代入で、COW の複製の有無を tree と VM で揃える）" }
+acceptance = ["CCP-AT-01..04"]
+design_pr  = 507
+issues     = [502]
+order      = 42
+
 # fuel-bulk-charge は 1 PR に収まらない（触る仕組み 3・受入基準 10 超・src/ 約 900〜1400 行、loop-runbook §14.1）ため
 # fuel-bulk-charge-a / -b / -c に分割した（spec「fuel-bulk-charge の sub-slice 分割」、設計 PR #501。
 # 割り方と a の課金の規則は判断役が選択（PR #501、Q1・Q2=A））。元の id は置き換えて残さない。「fuel-bulk-charge が done」は a・b・c がともに done。
@@ -566,14 +584,15 @@ order      = 28
 [[slice]]
 id         = "fuel-bulk-charge-a"
 title      = "map/filter/each と要素を作る・複製する操作（range/keys/values/slice/reverse/split・COW の複製・for の反復列）の per-element fuel（§4.1 1/element）・fuel_accounting_revision 2 → 3・既定 total_fuel 再測定"
-status     = "ready"
+status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fuel-bulk-charge-a 実装スライス（`map` / `filter` / `each` と要素を作る・複製する操作の per-element fuel、版 2 → 3）" }
 acceptance = ["FBCa-AT-01..05"]
-depends_on = ["F-2c"]
+depends_on = ["F-2c", "fix-cow-copy-parity"]
 design_pr  = 501
-order      = 42
+issues     = [502]
+order      = 43
 
 # 見積もり: src/ 約 400〜600 行、触る仕組みは budget の byte の課金 1 つ、受入基準は設計で決める（5 以内）。
 # scan だけの string builtin の扱いと host function の引数・結果の serialize の数え方は、ready にする設計 PR で決める。
@@ -584,7 +603,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["fuel-bulk-charge-a"]
-order      = 43
+order      = 44
 
 # 見積もり: src/ 約 200〜350 行、触る仕組みは compile・link の fuel の課金 1 つ、受入基準は設計で決める（5 以内）。
 # compile・link の fuel の払い手（execution の台帳か LinkRequest の budget か）は、ready にする設計 PR で決める。
@@ -595,7 +614,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["fuel-bulk-charge-b"]
-order      = 44
+order      = 45
 
 # audit-strict-cbor（strict deterministic CBOR、§9.2）は 1 PR の大きさの目安に収まらないため、
 # c1〜c4 の 4 スライスへ分割した（spec「audit-strict-cbor の sub-slice 分割」）。元の id は置き換えて残さない。
@@ -623,7 +642,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-06..10"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 45
+order      = 46
 
 [[slice]]
 id         = "audit-strict-cbor-c3"
@@ -635,7 +654,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-11..15"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 46
+order      = 47
 
 [[slice]]
 id         = "audit-strict-cbor-c4"
@@ -647,7 +666,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-16..20"]
 depends_on = ["audit-strict-cbor-c2", "audit-strict-cbor-c3"]
 design_pr  = 256
-order      = 47
+order      = 48
 
 [[slice]]
 id         = "audit-sink-required"
@@ -656,7 +675,7 @@ status     = "todo"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 depends_on = ["A-1"]
-order      = 48
+order      = 49
 
 [[slice]]
 id         = "audit-fs-builtin-scope"
