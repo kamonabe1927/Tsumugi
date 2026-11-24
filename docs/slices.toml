@@ -604,16 +604,18 @@ order      = 43
 # 見積もり: a は src/ 約 300〜450 行、触る仕組みは fuel の課金点（per-element）1 つ、受入基準 5。
 # a は issue #502 で ready から todo に戻し、fix-cow-copy-parity が done（#508）になった後の設計 PR で ready に戻した
 # （spec 小節の「ready に戻す設計 PR の確かめ」。範囲・受入基準は変えず、design_pr をその PR にした。初版の設計 PR は #501）。
+# issue #510 で再び todo に戻し、fix-cow-copy-parity-upvalue が done（#512）になった後の設計 PR で再び ready に戻した
+# （spec 小節の「2 回目の ready に戻す設計 PR の確かめ」。範囲・受入基準は変えず、design_pr をその PR にした。1 回目に戻した設計 PR は #509）。
 [[slice]]
 id         = "fuel-bulk-charge-a"
 title      = "map/filter/each と要素を作る・複製する操作（range/keys/values/slice/reverse/split・COW の複製・for の反復列）の per-element fuel（§4.1 1/element）・fuel_accounting_revision 2 → 3・既定 total_fuel 再測定"
-status     = "todo"
+status     = "ready"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fuel-bulk-charge-a 実装スライス（`map` / `filter` / `each` と要素を作る・複製する操作の per-element fuel、版 2 → 3）" }
 acceptance = ["FBCa-AT-01..05"]
 depends_on = ["F-2c", "fix-cow-copy-parity", "fix-cow-copy-parity-upvalue"]
-design_pr  = 509
+design_pr  = 513
 issues     = [502, 510]
 order      = 44
 
