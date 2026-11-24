@@ -3277,6 +3277,25 @@ c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR
   変えない。`fix-cow-copy-parity` が done になった後、本スライスを `ready` に戻す設計 PR を出す。実装役のブランチ `feat/fuel-bulk-charge-a` の
   ローカルの作業（push していない）は、再開するときの土台にしてよい。
 
+**`ready` に戻す設計 PR の確かめ**（2026-11-24。`fix-cow-copy-parity` が done（実装 PR #508）になった後の main 6f9e556 で確かめた。範囲・範囲外・受入基準・
+想定の変更規模は変えない。判断の候補は無い）:
+
+- `fix-cow-copy-parity` で、VM の `pop(<識別子>)` は `PopUpdate` の代わりに `OpCode::PopBinding(MutationTarget)`（`src/vm.rs` の `pop_binding`）で
+  binding の格納先の上で `Value::list_pop_tracked` を呼ぶようになり、tree の `budget_list_pop` と同じく一意所有で tracked の backing を複製しない。
+  tree の For frame は Dict・Str の反復元（`_collection`）を持たなくなり、VM の `ToIterList` と同じく反復列を作った時点で反復元を手放す。
+  issue #502 で見つかった 2 つの食い違い（FBCa-AT-03 の「揃わなければ止める」条件に当たったもの）は、`tests/differential.rs` の CCP-AT-01・03 で
+  `committed.fuel` の一致を確かめ済みである。したがって FBCa-AT-03 の条件は、この 2 経路について満たされる前提で実装に入れる。ほかの経路で
+  tree と VM の複製の有無が食い違えば、従来どおり FBCa-AT-03 の条件で止める。
+- 上の「設計時の注記」（main 87166f4）は main 6f9e556 でも成り立つ。`fix-cow-copy-parity` の `src/` の差分は `pop` の lowering・VM の命令・
+  tree の For frame だけで、次は変わっていない: `ChargeKind`（`Statement`〜`HostCallAttempt` の 6 種）と `FuelSchedule`・`FUEL_ACCOUNTING_REVISION`
+  （`2`）（`src/budget.rs`）、`Value::detach_list` / `detach_dict` の in place の条件（`id.0 != 0 && strong == 1 && weak == 0`）と複製の枝
+  （`src/value.rs`）、`Value::new_iter_str_list`（要素数の検査 → 各要素 → backing の確保。tree の `materialize_for_items` と VM の `ToIterList` の
+  両方が呼ぶ）、`dispatch`（budget を受け取らない）と `apply_pure_core_builtin`・`builtin_collection`（`src/builtin.rs`）、VM の `exec_builtin` の
+  `map` / `filter` / `each`、`BudgetLedger::track_result`。
+- COW の複製の課金点は、範囲に書いたとおり `detach_list` / `detach_dict` の複製の枝 1 か所である。`src/builtin_core.rs` の
+  `builtin_pop_update`（backing を複製して末尾を除く）は `fix-cow-copy-parity` 以降どこからも呼ばれていない（`PopUpdate` が無くなったため）ので、
+  そこには課金しない。
+
 ### fix-contains-budgeted-equality 実装スライス（`contains` の等価判定を予算付き比較へ）
 
 issue #290 から作ったスライス（不具合の修正、`slices.toml` の `fix-contains-budgeted-equality`）。issue の仕分けで「受け入れ」とし、判断は要らないとした部分である（[言語仕様](language-spec.md)「等価比較」の「この規則は`contains`のように等価判定を使う組み込み関数でも共有する」で直し方が決まる）。
