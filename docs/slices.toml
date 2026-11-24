@@ -576,6 +576,24 @@ issues     = [502]
 impl_pr    = 508
 order      = 42
 
+# issue #510（needs-design、fuel-bulk-charge-a の実装で FBCa-AT-03 の確かめで再び止まった）の判断 Q1=A で足した修正スライス。
+# VM が closure の capture で local・top-level の slot を cell へ昇格するとき、stack slot にも同じ値を残すので、
+# cell 経由の最初の push・pop・index 代入が一意所有のはずの backing を複製する（tree は複製しない。main 2b8e7fa で確かめた）。
+# これを揃えてから fuel-bulk-charge-a の COW の複製の課金を入れる。fuel-bulk-charge-a の depends_on に加え、a は ready から todo に戻した
+# （issues = [502, 510]）。空きを作るため、fuel-bulk-charge-a・b・c と audit-strict-cbor-c2・c3・c4・audit-sink-required・
+# audit-fs-builtin-scope を 43〜50 → 44〜51 に付け直した（相対順は変えていない）。
+# 見積もり: src/ 約 10〜40 行、触る仕組みは VM の captured cell への昇格 1 つ、受入基準 4。
+[[slice]]
+id         = "fix-cow-copy-parity-upvalue"
+title      = "VM の captured cell への昇格で stack slot に値を残さず、upvalue・捕捉 local 経由の push・pop・index 代入の COW の複製を tree と揃える"
+status     = "ready"
+parent     = "REV-015"
+spec_slice = "exec-control Slice 6"
+spec       = { doc = "docs/execution-control.md", section = "fix-cow-copy-parity-upvalue 実装スライス（VM の captured cell への昇格で、COW の複製の有無を tree と揃える）" }
+acceptance = ["CCU-AT-01..04"]
+issues     = [510]
+order      = 43
+
 # fuel-bulk-charge は 1 PR に収まらない（触る仕組み 3・受入基準 10 超・src/ 約 900〜1400 行、loop-runbook §14.1）ため
 # fuel-bulk-charge-a / -b / -c に分割した（spec「fuel-bulk-charge の sub-slice 分割」、設計 PR #501。
 # 割り方と a の課金の規則は判断役が選択（PR #501、Q1・Q2=A））。元の id は置き換えて残さない。「fuel-bulk-charge が done」は a・b・c がともに done。
@@ -587,15 +605,15 @@ order      = 42
 [[slice]]
 id         = "fuel-bulk-charge-a"
 title      = "map/filter/each と要素を作る・複製する操作（range/keys/values/slice/reverse/split・COW の複製・for の反復列）の per-element fuel（§4.1 1/element）・fuel_accounting_revision 2 → 3・既定 total_fuel 再測定"
-status     = "ready"
+status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fuel-bulk-charge-a 実装スライス（`map` / `filter` / `each` と要素を作る・複製する操作の per-element fuel、版 2 → 3）" }
 acceptance = ["FBCa-AT-01..05"]
-depends_on = ["F-2c", "fix-cow-copy-parity"]
+depends_on = ["F-2c", "fix-cow-copy-parity", "fix-cow-copy-parity-upvalue"]
 design_pr  = 509
-issues     = [502]
-order      = 43
+issues     = [502, 510]
+order      = 44
 
 # 見積もり: src/ 約 400〜600 行、触る仕組みは budget の byte の課金 1 つ、受入基準は設計で決める（5 以内）。
 # scan だけの string builtin の扱いと host function の引数・結果の serialize の数え方は、ready にする設計 PR で決める。
@@ -606,7 +624,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["fuel-bulk-charge-a"]
-order      = 44
+order      = 45
 
 # 見積もり: src/ 約 200〜350 行、触る仕組みは compile・link の fuel の課金 1 つ、受入基準は設計で決める（5 以内）。
 # compile・link の fuel の払い手（execution の台帳か LinkRequest の budget か）は、ready にする設計 PR で決める。
@@ -617,7 +635,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["fuel-bulk-charge-b"]
-order      = 45
+order      = 46
 
 # audit-strict-cbor（strict deterministic CBOR、§9.2）は 1 PR の大きさの目安に収まらないため、
 # c1〜c4 の 4 スライスへ分割した（spec「audit-strict-cbor の sub-slice 分割」）。元の id は置き換えて残さない。
@@ -645,7 +663,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-06..10"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 46
+order      = 47
 
 [[slice]]
 id         = "audit-strict-cbor-c3"
@@ -657,7 +675,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-11..15"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 47
+order      = 48
 
 [[slice]]
 id         = "audit-strict-cbor-c4"
@@ -669,7 +687,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-16..20"]
 depends_on = ["audit-strict-cbor-c2", "audit-strict-cbor-c3"]
 design_pr  = 256
-order      = 48
+order      = 49
 
 [[slice]]
 id         = "audit-sink-required"
@@ -678,7 +696,7 @@ status     = "todo"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 depends_on = ["A-1"]
-order      = 49
+order      = 50
 
 [[slice]]
 id         = "audit-fs-builtin-scope"
@@ -687,7 +705,7 @@ status     = "todo"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 depends_on = ["R-1a"]
-order      = 50
+order      = 51
 
 # loop:drift #342 の D-52（機械的）で逸脱一覧に載せた「fs 以外の host call は triple を出さない」の延期先。未設計。
 # order は fs builtin の監査範囲（50）の次に置いた（同じ監査の host-call 範囲の拡張のため）。
