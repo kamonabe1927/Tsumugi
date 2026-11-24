@@ -571,6 +571,7 @@ parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fix-cow-copy-parity 実装スライス（`pop` と `for` の中の Dict 代入で、COW の複製の有無を tree と VM で揃える）" }
 acceptance = ["CCP-AT-01..04"]
+design_pr  = 507
 issues     = [502]
 order      = 42
 
