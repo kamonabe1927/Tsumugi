@@ -48,6 +48,7 @@ handle 経路を §3 の `ExecutionRequest` と組み込みAPI仕様 §8 の `Ex
 | cooperative host function が返す `HostCallTicket<Value>` は `Send + Sync` でない。`HostCallTicket<T>`（`src/host_pending.rs`）は `Arc<TicketShared<T>>` を持ち `T: Send` のときだけ `Send + Sync` で、`Value`（`src/value.rs`）は `Rc` を含み `!Send` なので、別 thread からの complete はできない。同じ thread（adapter・clock・waker の callback など）か ticket を作った側が complete した結果だけを待てる。loop:drift #420 D-114 | §6.2 | Slice 5 |
 | 登録 host function（同期・cooperative）の呼び出しは host-call 回数と request/response の byte を課金しない。§6.1 は任意の host call で capability 判定の前に `host_calls += 1` とするが、`charge_host_call_request`（`src/budget.rs`）を呼ぶのは filesystem builtin（`src/builtin.rs`・`src/vm.rs`）だけで、同期の `apply_host_call` と cooperative の `start_cooperative_call`（`src/eval.rs`）は呼ばない。`HostCost` の fuel・結果上限が使われない差は [Capability Model仕様](capability-model.md) の逸脱一覧（§11.2）にある。loop:drift #420 D-108。fix スライス fix-host-function-call-charge（todo）で直す（issue #364 の設計で filesystem builtin の fix と分けた） | §6.1 | C8 / Slice 5 |
 | `env`・`now`・`exit` の呼び出しは host call として回数と byte を課金しない。§2 は clock・env・process の呼び出しを host call とし、§6.1 は任意の host call で capability 判定の前に `host_calls += 1` とするが、tree（`src/builtin.rs` の `eval_builtin` の Context の arm）と VM（`src/vm.rs` の `exec_builtin` の `env`・`now` などの arm）は Environment・Clock・ProcessExit の authority を引くだけで `charge_host_call_request` を呼ばない（`host_calls` を数えるのは、filesystem builtin の課金の 2 箇所の `charge_host_call_request` と、host counter を co-charge する stdio の `charge_input`・`charge_output`（`src/budget.rs`）だけ）。issue #364 の設計で事実を確かめた。fix スライスは無い（未設計） | §2/§6.1 | REV-015 Slice 2（I-O accounting）・C3・C7 |
+| COW の複製の有無が tree と VM で食い違う経路が 2 つある。(1) VM の `pop(<識別子>)` は binding の値をスタックへ複製してから `PopUpdate`（`src/vm.rs`）で `list_pop_tracked` を呼ぶので、backing が共有中に見えて pop のたびに全体を複製する（tree の `budget_list_pop`（`src/eval.rs`）は cell の上で書き換え、一意所有なら複製しない）。(2) tree の `for` の Dict・Str は For frame が反復元の値（`_collection`）をループの終わりまで保持するので、反復中の最初の `d[k] = …` で Dict を 1 回複製する（VM の `ToIterList` は反復元を手放すので複製しない）。どちらも複製に伴う heap 課金と、その後の深度の読み直しの fuel が engine で変わり、§2 の不変条件 5（tree と VM で同じ charge 列）から外れる（issue #502 の表で `pop` の committed fuel が tree 28・VM 38）。直すのは `fix-cow-copy-parity`（§14 の小節） | §2・§5.2 | Slice 2（COW の tracked backing。issue #502 で確認） |
 
 ## 未実装範囲（目標仕様 §1〜§13 のうち未着手・延期中）
 
@@ -3260,6 +3261,23 @@ c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR
   するのに fuel は 0 という食い違いが残る（原則 8）。`id == 0` で要素を持つ backing が書き換えに届く経路があれば、要素数に
   比例する複製が fuel に現れない（原則 3 に反しうる）。
 
+**実装で止まった後の判断の記録**（[issue #502](https://github.com/kamonabe1927/Tsumugi/issues/502)、判断役が選択（issue #502、Q1=A）。2026-11-24 の設計 PR で反映）:
+
+- 実装役が FBCa-AT-03 の確かめで、VM の `pop(<識別子>)` が pop のたびに backing を複製すること（tree は複製しない）と、`for` の中の Dict への
+  index 代入で Dict の複製の回数が tree と VM で違うことを見つけ、上の FBCa-AT-03 の条件（判断 Q3 = A）に従って PR を出さずに止めた。
+- **Q1 = A（先に複製の有無を tree と VM で揃える修正スライスを足し、本スライスはその後に実装する）**: 食い違いの元は課金の規則ではなく
+  engine 差そのもので、課金を入れる前の main でも `pop` の fuel が tree 28・VM 38 と食い違っている。直さずに版 `3` を固定すると、資源消費が
+  backend ごとに変わる状態を版に焼き込む（[マニフェスト](manifesto.md) 原則 5、優先順位の表「一貫した意味論 > backend 固有の最適化」）。
+  原因の側を直すので、判断 Q3 = A の規則（複製するときは常に払う）と §4.1 の「copy 1 / element」を変えずに FBCa-AT-03 を満たせる（原則 3）。
+  VM の `pop` の毎回 O(n) の複製は最悪時の負荷の問題でもあり、揃えると同時に直る（原則 1）。上の Q3 = A の「揃わなければ実装を止める」とも
+  一貫する。修正を別スライスにするので、複製の有無の一致だけを先に両 engine で確かめられる（原則 8・9）。採らなかった案: B（COW の複製を
+  本スライスでは課金しない）は、要素数に比例する複製が版 `3` でも fuel に現れず原則 3 に反しうる。PR #501 の Q2・Q3 の決定とも食い違う。
+  C（tree の `pop` も複製する側へ寄せる）は仕事と heap の最悪値を増やす向きに揃えることになり原則 1 に反しうる。tree の挙動を変える範囲も広い（原則 8）。
+- 反映: 修正スライス `fix-cow-copy-parity`（§14 の小節）を足し、本スライスの `depends_on` に加えた。`depends_on` が done でなくなったので、
+  `slices.toml` の本スライスは `ready` から `todo` に戻した（documentation-guide「ready の条件」3）。範囲・範囲外・受入基準・想定の変更規模は
+  変えない。`fix-cow-copy-parity` が done になった後、本スライスを `ready` に戻す設計 PR を出す。実装役のブランチ `feat/fuel-bulk-charge-a` の
+  ローカルの作業（push していない）は、再開するときの土台にしてよい。
+
 ### fix-contains-budgeted-equality 実装スライス（`contains` の等価判定を予算付き比較へ）
 
 issue #290 から作ったスライス（不具合の修正、`slices.toml` の `fix-contains-budgeted-equality`）。issue の仕分けで「受け入れ」とし、判断は要らないとした部分である（[言語仕様](language-spec.md)「等価比較」の「この規則は`contains`のように等価判定を使う組み込み関数でも共有する」で直し方が決まる）。
@@ -3933,6 +3951,35 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
     保持したまま live から外す（原則 1・3）か保持をやめる（全 language-state の rollback が成り立たない、原則 6）かのどちらかになり、§10 とも食い違い、
     本スライスの範囲を超えるため採らない。同じ execution の中で大きな値を手放して作り直すと journal のために peak が 2 倍になる点は §10 の規範どおりで、
     本スライスでは扱わない。
+
+### fix-cow-copy-parity 実装スライス（`pop` と `for` の中の Dict 代入で、COW の複製の有無を tree と VM で揃える）
+
+[issue #502](https://github.com/kamonabe1927/Tsumugi/issues/502)（`needs-design`。fuel-bulk-charge-a の実装役が FBCa-AT-03 の確かめで止めた）から作ったスライス（親 REV-015、`slices.toml` の `fix-cow-copy-parity`）。issue #502 の判断（Q1 = A）は、COW の複製の課金（fuel-bulk-charge-a の判断 Q3 = A）を入れる前に、複製の有無が tree と VM で食い違う経路を直す修正スライスを先に足し、fuel-bulk-charge-a をその後に実装するというもの（判断の記録は fuel-bulk-charge-a 小節の後ろ）。目標の規範は §2 の不変条件 5（tree と VM で同じ charge 列）と §5.2（COW で新 object を作るときの課金）で、現在の差は冒頭の逸脱一覧の行にある。
+
+- **現状の差**（issue #502 の表は main 87166f4 に fuel-bulk-charge-a の課金を入れた状態で測ったもの。原因の読みは main 745baf5 で確かめた）:
+  - `pop`: tree（`src/eval.rs` の `budget_list_pop`）は binding の cell を直接 `borrow_mut` して `Value::list_pop_tracked` を呼ぶので、一意所有で tracked の backing は複製しない。VM は `pop(<識別子>)` を `CallBuiltin(pop)` → `emit_get_mutation_target`（`GetLocal` / `GetUpvalue` / `GetGlobal`）→ `PopUpdate` → `emit_set_mutation_target` に lowering する（`src/compiler.rs`）。`GetLocal` などが binding の値を `Rc` の複製としてスタックへ積むため、`PopUpdate`（`src/vm.rs`）が `list_pop_tracked` を呼ぶ時点で backing は共有中（strong 2）になり、`Value::detach_list` が pop のたびに backing 全体を複製する（要素数 n に比例する仕事と、§5.2 の COW の heap 課金）。issue #502 の表では、課金を入れる前の main でも `let xs = range(0, 10)` → `pop(xs)` の committed fuel が tree 28・VM 38、関数内で 2 回の `pop` が tree 44・VM 63 で食い違っている。
+  - `for` の中の Dict への index 代入（`let d = {"a": 1}` → `for k in d` の中で `d[k] = 2`）: tree の For frame（`src/eval.rs` の `FrameKind::For`）は、Dict・Str の反復列（key・文字の tracked な List）とは別に、反復元の値そのもの（`_collection`）をループの終わりまで保持する。そのため反復中の最初の `d[k] = …` は backing が共有中で、`detach_dict` が Dict を 1 回複製する（以降は一意所有なので in place）。VM の `ToIterList`（`src/vm.rs`）は Dict・Str を反復列に置き換えて反復元の値を手放すので、同じ代入は複製しない。issue #502 の表では課金を入れた状態で tree 15・VM 14。
+  - List の `for`（反復列が反復元の backing を共有する。両 engine とも反復中の書き換えで 1 回複製する）、`push`・List の index 代入・`for` の外の Dict の index 代入・`range` の結果やリテラルへの最初の `push` は、issue #502 で tree と VM が一致することを確かめ済み。
+- **実装範囲:**
+  1. VM の `pop(<識別子>)` を、binding の値をスタックへ複製せずに binding の上で `list_pop_tracked` を呼ぶ形にする。`ListPushBinding` / `SetIndex` と同じく binding の格納先（`resolve_binding_storage` の `Cell` / `Stack`）を直接書き換える命令（例: `PopBinding(MutationTarget)`。`PopUpdate` を置き換えてよい）にし、REPL の journal（`checkpoint_cell` / `checkpoint_stack_slot`）は今と同じ位置で取る。`pop` の戻り値（取り出した要素）・型と空 List の扱い・深度の読み直しの課金（`list_pop_tracked` の中）と順序は変えない。local・upvalue・global の 3 つの binding で同じにする。
+  2. 判断 Q1（下の「判断の候補」）で選ぶ向きに、`for` の Dict・Str の反復元の保持を tree と VM で揃える。推奨案 A は tree の For frame が Dict・Str の反復元の値を保持せず、反復列を作った時点で手放す（VM と同じ）。List の反復は今のまま（反復列が反復元の backing を共有し、[次期意味論・実装決定](semantic-decisions.md) §11.2 の「開始時の Rc snapshot」を保つ）。
+  3. 課金点・課金値・`fuel_accounting_revision`・`language_revision` は変えない。複製が無くなる経路では、複製に伴っていた heap の課金（`Tracked::new`）と、複製した backing の上で起きていた深度の読み直しの fuel が tree と同じになる。これは §2 の不変条件 5 から外れた engine 差を直すもので課金表の変更ではないので、版は上げない（fix-tree-while-condition-once と同じ扱い）。
+  4. 冒頭の逸脱一覧の COW の複製の行を、done にする実装 PR で削除する。
+- **範囲外:**
+  - COW の複製・反復列の fuel の課金（fuel-bulk-charge-a）。本スライスは複製の有無を揃えるだけで、fuel の課金点は足さない。
+  - `pop(<識別子>)` 以外の形の `pop`（引数が式。書き戻さない汎用の builtin 経路）と、`push`・index 代入の lowering（issue #502 で一致を確かめ済み）。
+  - List の `for` の反復中の書き換えで起きる 1 回の複製（§11.2 の snapshot の規範どおりで、両 engine で一致している）。
+- **受入基準:**
+  - **CCP-AT-01（pop の一致）:** `pop(<識別子>)` を local・upvalue・global の List に 1 回と、関数の中で 2 回以上（要素数 10 と 1000）行う script で、tree と VM の `committed.fuel` が完全に一致し（issue #502 の表の 2 本を含む）、上限 N と N − 1 の成功・失敗の境界と stdout・stderr・exit code が一致する。確かめ方: `tests/differential.rs` の paired test。
+  - **CCP-AT-02（pop は一意所有の backing を複製しない）:** 一意所有の List（`range` の結果、要素数 1000）に `pop` を k 回行う script の `peak_heap_bytes` が、各 engine の中で、`pop` の前の時点の peak を List body（`24 + 32 × 要素数`）の複製ぶん超えない（複製していれば k に関係なく 1 回目で超える）。共有中の List（`let ys = xs` の後の `pop(xs)`）では両 engine とも 1 回だけ複製し、`ys` は変わらない。確かめ方: in-process で両 engine の usage を読む統合テスト（`tests/scaling.rs` の `peak_heap_after` の形）。tree と VM の間は §5.3 の A-1 どおり複製の有無の一致にとどめ、byte 単位の一致は求めない。
+  - **CCP-AT-03（`for` の中の Dict 代入の一致）:** `for k in d` の中で `d[k] = …` する script（entry 数 1 と 1000、`break` で抜ける場合を含む）で、tree と VM の `committed.fuel` が完全に一致し、Dict の複製の回数が両 engine で同じになる（判断 Q1 で選んだ向き。推奨案 A では 0 回で、`peak_heap_bytes` が Dict body の複製ぶん増えない）。反復の意味（開始時の key の列で回る、key のコードポイント順）・stdout は変わらない。確かめ方: `tests/differential.rs` の paired test と、`tests/scaling.rs` の形の統合テスト。
+  - **CCP-AT-04（既存の挙動の維持）:** 既存の golden fixture（`for_iteration_snapshot`・`collection_cow_alias` など）・`tests/differential.rs`・`tests/scaling.rs`・REPL の rollback のテストが、heap の期待値の変化（VM の `pop` と tree の Dict・Str の `for` で複製が消えたぶん）を除いて変更なしで通る。期待値を変えたテストは PR 本文に列挙する。`vds_at_01_settle_charges_children_read_again` は変えずに通る。
+- **想定の変更規模:** `src/` 約 60〜150 行（`src/compiler.rs` の `pop` の lowering 約 15、`src/opcode.rs` と VM の命令 約 40〜70、tree の For frame の反復元の保持 約 10〜30、doc 約 10）。テストは 150〜300 行。触る仕組みは「COW の書き換え対象の受け渡し（binding の上で書き換える経路）」1 つ。受入基準 4。§14.1（[開発ループ手順書](loop-runbook.md)）に収まる。
+- **判断の候補**（設計 PR で判断役にかける。issue #502 の判断は「`for` 内の Dict 代入はどちらの複製の回数を正とするかを修正スライスの設計で決める」とした）:
+  - Q1. `for` の Dict・Str の反復中の書き換えで、反復元の値を保持するか（複製の有無をどちらへ揃えるか）。
+    - A（推奨）: tree の For frame は Dict・Str の反復元の値を保持せず、反復列を作った時点で手放す（VM に揃える。List は今のまま反復元の backing を共有する）— 反復の意味は反復列（key・文字の tracked な List）だけで決まり（§11.2、§5.2 の反復列の項）、反復元を保持しても観測できる違いは複製の O(n) の仕事と heap の peak だけである。複製しない向きに揃えるので最悪時の仕事と heap が減る。根拠: [マニフェスト](manifesto.md) 原則 1・5、§2 の不変条件 5、§5.2。
+    - B: VM も Dict・Str の反復元の値をループの終わりまで保持する（tree に揃える）— tree の live heap の寿命（fix-for-iter-snapshot-charge 小節の「`_collection` を保持し続けるかは今のままでよい」）を変えないが、VM の反復中の最初の書き換えに O(n) の複製を足す。根拠: 原則 5。原則 1 に反しうる（要らない複製で最悪時の仕事と heap を増やす向きに揃える）。
+    - マニフェストに反しうる選択肢: B（原則 1）。
 
 ## 15. 境界受入テスト
 
