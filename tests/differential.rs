@@ -1751,6 +1751,227 @@ fn ccp_at_01_pop_fuel_parity() {
     );
 }
 
+/// CCU-AT-02 の script（`tests/scaling.rs` の `ccu_source` と同じ形）。
+fn ccu_source(place: &str, op: &str, k: usize, n: usize) -> String {
+    let init = if op == "dict_set" {
+        let entries = (0..n)
+            .map(|i| format!("\"k{i}\": {i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{{{entries}}}")
+    } else {
+        format!("range(0, {n})")
+    };
+    let stmt = match op {
+        "push" => "push(xs, 1)",
+        "pop" => "pop(xs)",
+        "list_set" => "xs[0] = 7",
+        "dict_set" => "xs[\"k0\"] = 7",
+        _ => unreachable!(),
+    };
+    let body = |indent: &str| {
+        (0..k)
+            .map(|_| format!("{indent}{stmt}\n"))
+            .collect::<String>()
+    };
+    match place {
+        "global" => format!(
+            "let xs = {init}\nfn f()\n{}  return len(xs)\nend\nprint(f())\nprint(f())\n",
+            body("  ")
+        ),
+        "inner" => format!(
+            "fn outer()\n  let xs = {init}\n  fn g()\n{}    return len(xs)\n  end\n  return g()\nend\nprint(outer())\n",
+            body("    ")
+        ),
+        "outer" => format!(
+            "fn outer()\n  let xs = {init}\n  fn g()\n    return len(xs)\n  end\n{}  return g()\nend\nprint(outer())\n",
+            body("  ")
+        ),
+        _ => unreachable!(),
+    }
+}
+
+/// CCU-AT-02: cell 経由の書き換えの消費 fuel と上限 N / N−1 の境界が tree/VM で一致する
+/// （関数を複数回呼ぶ形、深度の読み直しが起きる `pop` を含む）。
+#[test]
+fn ccu_at_02_cell_write_fuel_parity() {
+    for place in ["global", "inner", "outer"] {
+        for op in ["push", "pop", "list_set", "dict_set"] {
+            for n in [10usize, 1000] {
+                for k in [1usize, 2, 3] {
+                    assert_fuel_parity(
+                        &format!("cell {place} {op} n={n} x{k}"),
+                        &ccu_source(place, op, k, n),
+                    );
+                }
+            }
+        }
+    }
+    // 深度の読み直しが起きる形（最も深い要素を cell 経由で `pop` で取り除く）。
+    for n in [10usize, 200] {
+        let flat = (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        for pops in [1usize, 2, 3] {
+            assert_fuel_parity(
+                &format!("cell pop 深度の読み直し global n={n} x{pops}"),
+                &format!(
+                    "let xs = [{flat}, [[1]]]\nfn f()\n  {}return len(xs)\nend\nprint(f())\n",
+                    "pop(xs)\n  ".repeat(pops)
+                ),
+            );
+            assert_fuel_parity(
+                &format!("cell pop 深度の読み直し captured local n={n} x{pops}"),
+                &format!(
+                    "fn outer()\n  let xs = [{flat}, [[1]], [2]]\n  fn g()\n    return len(xs)\n  end\n  {}return g()\nend\nprint(outer())\n",
+                    "pop(xs)\n  ".repeat(pops)
+                ),
+            );
+        }
+    }
+}
+
+/// CCU-AT-02（CLI）: cell 経由の書き換えの stdout・stderr・exit code が tree と `--vm` で一致する。
+#[test]
+fn ccu_at_02_cli_stdout_stderr_exit_code_match() {
+    let dir = std::env::temp_dir().join(format!("tsumugi_ccu_at_02_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let mut cases = Vec::new();
+    for place in ["global", "inner", "outer"] {
+        for op in ["push", "pop", "list_set", "dict_set"] {
+            cases.push((format!("{place}_{op}"), ccu_source(place, op, 2, 50)));
+        }
+    }
+    for (label, source) in &cases {
+        let path = dir.join(format!("{label}.tsu"));
+        std::fs::write(&path, source).expect("write script");
+        let run = |vm: bool| {
+            let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_tsumugi"));
+            if vm {
+                cmd.arg("--vm");
+            }
+            cmd.arg(&path).output().expect("run")
+        };
+        let (tree, vm) = (run(false), run(true));
+        assert_eq!(
+            tree.status.code(),
+            vm.status.code(),
+            "[{label}] exit code (CCU-AT-02)"
+        );
+        assert_eq!(tree.stdout, vm.stdout, "[{label}] stdout (CCU-AT-02)");
+        let strip = |b: &[u8]| {
+            String::from_utf8_lossy(b)
+                .lines()
+                .filter(|l| !l.contains("VM"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(
+            strip(&tree.stderr),
+            strip(&vm.stderr),
+            "[{label}] stderr (CCU-AT-02)"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// CCU-AT-03: VM の REPL で、top-level の List を入力の中で closure に捕捉して昇格し、cell 経由で
+/// 書き換えた後に失敗する入力は、昇格前の値と binding へ戻る。前の入力で昇格済みの binding を
+/// 書き換えて失敗する入力も元の値へ戻る。
+#[test]
+fn ccu_at_03_vm_repl_rollback_after_promotion() {
+    fn submit(vm: &mut Vm, compiler: &mut Compiler, src: &str) -> Result<(), TsumugiError> {
+        let program = Parser::new(Lexer::new(src).tokenize())
+            .parse()
+            .expect("パースに失敗");
+        vm.begin_repl_submission(BudgetConfig::for_legacy(1_000_000, 1_000_000));
+        vm.charge_link_graph(src.len() as u64, &[])?;
+        let checkpoint = compiler.clone();
+        let chunk = compiler.compile_repl_line(&program).expect("compile");
+        let result = vm.run_repl_chunk(chunk);
+        if result.is_err() {
+            *compiler = checkpoint;
+        }
+        result
+    }
+
+    let mut compiler = Compiler::new();
+    let mut vm = Vm::new_repl();
+    vm.set_capabilities(print_capabilities());
+    submit(
+        &mut vm,
+        &mut compiler,
+        "let xs = range(0, 100)
+",
+    )
+    .expect("入力 1");
+
+    // 入力の中で昇格し、cell 経由で書き換えてから失敗する。
+    submit(
+        &mut vm,
+        &mut compiler,
+        "fn f()
+  push(xs, 1)
+  pop(xs)
+  pop(xs)
+  return len(xs)
+end
+f()
+let z = 1 / 0
+",
+    )
+    .expect_err("入力 2 は失敗する");
+    // 昇格前の値（要素数 100）へ戻り、binding を読める・書き換えられる。
+    submit(
+        &mut vm,
+        &mut compiler,
+        "if len(xs) != 100
+  let z = 1 / 0
+end
+if xs[99] != 99
+  let z = 1 / 0
+end
+xs[0] = 5
+",
+    )
+    .expect("入力 3: 元の値を読めて書き換えられる");
+
+    // 前の入力で昇格済みの binding（closure が捕捉）。
+    submit(
+        &mut vm,
+        &mut compiler,
+        "fn g()
+  return len(xs)
+end
+",
+    )
+    .expect("入力 4");
+    submit(
+        &mut vm,
+        &mut compiler,
+        "push(xs, 1)
+pop(xs)
+pop(xs)
+let z = 1 / 0
+",
+    )
+    .expect_err("入力 5 は失敗する");
+    submit(
+        &mut vm,
+        &mut compiler,
+        "if g() != 100
+  let z = 1 / 0
+end
+if xs[0] != 5
+  let z = 1 / 0
+end
+push(xs, 1)
+if g() != 101
+  let z = 1 / 0
+end
+",
+    )
+    .expect("入力 6: 昇格済みの binding も元の値へ戻っている");
+}
+
 /// CCP-AT-03: `for k in d` の中の `d[k] = …` の消費 fuel と境界が tree/VM で一致する（`break` を含む）。
 #[test]
 fn ccp_at_03_for_dict_assign_fuel_parity() {

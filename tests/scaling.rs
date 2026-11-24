@@ -1250,3 +1250,107 @@ fn ccp_at_03_for_dict_assign_does_not_copy() {
         }
     }
 }
+
+// =============================================================================
+// fix-cow-copy-parity-upvalue: cell 経由の書き換えの複製の有無（CCU-AT-01）
+// =============================================================================
+
+/// CCU-AT-01 の script を組み立てる。`place` は書き換える形、`op` は操作、`k` は回数。
+/// k = 0 は書き換えない script（比較の基準）。
+fn ccu_source(place: &str, op: &str, k: usize, n: u64) -> String {
+    let init = match op {
+        "dict_set" => {
+            let entries = (0..n)
+                .map(|i| format!("\"k{i}\": {i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{entries}}}")
+        }
+        _ => format!("range(0, {n})"),
+    };
+    let stmt = match op {
+        "push" => "push(xs, 1)",
+        "pop" => "pop(xs)",
+        "list_set" => "xs[0] = 7",
+        "dict_set" => "xs[\"k0\"] = 7",
+        _ => unreachable!(),
+    };
+    let body = |indent: &str| {
+        (0..k)
+            .map(|_| format!("{indent}{stmt}\n"))
+            .collect::<String>()
+    };
+    match place {
+        // top-level の xs を関数の中で書き換える。
+        "global" => format!(
+            "let xs = {init}\nfn f()\n{}  return 0\nend\nf()\n",
+            body("  ")
+        ),
+        // 外側の関数の local を内側の関数で書き換える。
+        "inner" => format!(
+            "fn outer()\n  let xs = {init}\n  fn g()\n{}    return 0\n  end\n  g()\n  return 0\nend\nouter()\n",
+            body("    ")
+        ),
+        // 内側の関数に捕捉された local を外側の関数で書き換える。
+        "outer" => format!(
+            "fn outer()\n  let xs = {init}\n  fn g()\n    return len(xs)\n  end\n{}  g()\n  return 0\nend\nouter()\n",
+            body("  ")
+        ),
+        _ => unreachable!(),
+    }
+}
+
+// CCU-AT-04（既存の挙動の維持）: 既存の golden fixture・`tests/differential.rs`・`tests/scaling.rs`・REPL の
+// rollback のテストの期待値は 1 件も変えていない（変更なしで通る）。確かめ方は `cargo test` 全体。
+
+/// CCU-AT-01: cell 経由（upvalue・捕捉 local・top-level）の書き換えは、一意所有の backing を
+/// 複製しない（両 engine）。k 回書き換えても、書き換えない script の peak を body ぶん超えない。
+#[test]
+fn ccu_at_01_cell_write_on_unique_backing_does_not_copy() {
+    let n = 1000u64;
+    for use_vm in [false, true] {
+        let mode = if use_vm { "VM" } else { "tree-walk" };
+        for place in ["global", "inner", "outer"] {
+            for op in ["push", "pop", "list_set", "dict_set"] {
+                // dict の body は List body と別の式なので、複製の下限は List body の
+                // 大きさ（24 + 32 × n）以上を見る。Dict body はそれより大きい。
+                let body = ccp_list_body(n - 1);
+                let base = peak_heap_after(&ccu_source(place, op, 0, n), use_vm);
+                for k in [1usize, 5] {
+                    let peak = peak_heap_after(&ccu_source(place, op, k, n), use_vm);
+                    assert!(
+                        peak < base + body,
+                        "{mode}/{place}/{op}: {k} 回の書き換えで backing を複製している \
+                         (base={base}, peak={peak}, body={body})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// CCU-AT-01: 捕捉の前に `let ys = xs` で共有した場合は両 engine とも 1 回だけ複製し、`ys` は変わらない。
+#[test]
+fn ccu_at_01_shared_backing_copies_once_and_alias_unchanged() {
+    let n = 1000u64;
+    for use_vm in [false, true] {
+        let mode = if use_vm { "VM" } else { "tree-walk" };
+        let build = |k: usize| {
+            format!(
+                "let xs = range(0, {n})\nlet ys = xs\nfn f()\n{}  return 0\nend\nf()\nif len(ys) != {n}\n  let z = 1 / 0\nend\n",
+                "  push(xs, 1)\n".repeat(k)
+            )
+        };
+        let base = peak_heap_after(&build(0), use_vm);
+        let one = peak_heap_after(&build(1), use_vm);
+        let five = peak_heap_after(&build(5), use_vm);
+        assert!(
+            one >= base + ccp_list_body(n),
+            "{mode}: 共有中の cell 経由の push が複製していない (base={base}, one={one})"
+        );
+        assert!(
+            five < one + ccp_list_body(n),
+            "{mode}: 共有中の cell 経由の push が 2 回目以降も複製している (one={one}, five={five})"
+        );
+    }
+}
