@@ -3316,6 +3316,27 @@ c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR
   「ready の条件」3）。範囲・範囲外・受入基準・想定の変更規模は変えない。`fix-cow-copy-parity-upvalue` が done になった後、本スライスを `ready` に
   戻す設計 PR を出す。実装役のブランチ `feat/fuel-bulk-charge-a`（main 2b8e7fa から 1 commit、WIP）は、再開するときの土台にしてよい。
 
+**2 回目の `ready` に戻す設計 PR の確かめ**（2026-11-24。`fix-cow-copy-parity-upvalue` が done（実装 PR #512）になった後の main 65437cd で確かめた。
+範囲・範囲外・受入基準・想定の変更規模は変えない。判断の候補は無い）:
+
+- `fix-cow-copy-parity-upvalue` で、VM の `ensure_local_cell`（`src/vm.rs`）は stack slot の値を複製せずに cell へ移し（slot には `Value::Null` を置き、
+  移す前に `checkpoint_stack_slot(at)` で REPL の journal に元の値を記録する）、cell 経由の `push`・`pop`・index 代入が一意所有の backing を複製しなくなった。
+  issue #510 で見つかった食い違い（`ccp_at_01_pop_fuel_parity` の `pop upvalue n=10 x1` が tree 60・VM 70）と、upvalue・捕捉 local・top-level の 3 つの形の
+  `push`・`pop`・List / Dict の index 代入は、`tests/scaling.rs` の CCU-AT-01（複製の有無）と `tests/differential.rs` の CCU-AT-02（`committed.fuel` と
+  N / N − 1 の境界・stdout・stderr・exit code の一致）で確かめ済みである。したがって FBCa-AT-03 の条件は、issue #502・#510 で見つかった経路について
+  満たされる前提で実装に入れる。ほかの経路で tree と VM の複製の有無が食い違えば、従来どおり FBCa-AT-03 の条件（判断 Q3 = A）で止める。
+- REPL・埋め込み API の transaction の journal が元の値の参照を握ることで起きる最初の書き換えの複製は、`fix-cow-copy-parity-upvalue` の範囲外で、
+  両 engine で揃っているかを本スライスの FBCa-AT-03 の確かめで見ることになっている（同小節の範囲外）。同小節の CCU-AT-03 は「REPL の入力の中では
+  journal が元の値の参照を持つので、一意所有でも最初の書き換えは両 engine とも 1 回複製する」とするが、テスト（`ccu_at_03_vm_repl_rollback_after_promotion`）は
+  VM の rollback だけを見ており、tree との fuel の一致は確かめていない。実装役は FBCa-AT-03 の確かめに REPL の入力の中の最初の書き換えの形を含め、
+  食い違えば同じ条件で止める（受入基準の文言は変えない。FBCa-AT-03 の「揃っていることを確かめる」の対象の経路の 1 つとして扱う）。
+- 上の「設計時の注記」（main 87166f4）と 1 回目の確かめ（main 6f9e556）は main 65437cd でも成り立つ。6f9e556 からの `src/` の差分は `src/vm.rs` の
+  `ensure_local_cell` の 9 行だけで、次は変わっていない: `ChargeKind` と `FuelSchedule`・`FUEL_ACCOUNTING_REVISION`（`2`）（`src/budget.rs`）、
+  `Value::detach_list` / `detach_dict` の in place の条件と複製の枝（`src/value.rs`）、`Value::new_iter_str_list`、`dispatch` と
+  `apply_pure_core_builtin`・`builtin_collection`（`src/builtin.rs`）、VM の `exec_builtin` の `map` / `filter` / `each`、`BudgetLedger::track_result`。
+  `builtin_pop_update`（`src/builtin_core.rs`）は引き続きどこからも呼ばれていないので課金しない。
+- 実装役のブランチ `feat/fuel-bulk-charge-a`（origin の cf30a53。main 2b8e7fa から 1 commit、WIP）は、main 65437cd へ載せ直して再開の土台にしてよい。
+
 ### fix-contains-budgeted-equality 実装スライス（`contains` の等価判定を予算付き比較へ）
 
 issue #290 から作ったスライス（不具合の修正、`slices.toml` の `fix-contains-budgeted-equality`）。issue の仕分けで「受け入れ」とし、判断は要らないとした部分である（[言語仕様](language-spec.md)「等価比較」の「この規則は`contains`のように等価判定を使う組み込み関数でも共有する」で直し方が決まる）。
