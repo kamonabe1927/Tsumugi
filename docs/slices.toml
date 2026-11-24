@@ -591,6 +591,7 @@ parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fix-cow-copy-parity-upvalue 実装スライス（VM の captured cell への昇格で、COW の複製の有無を tree と揃える）" }
 acceptance = ["CCU-AT-01..04"]
+design_pr  = 511
 issues     = [510]
 order      = 43
 
