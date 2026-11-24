@@ -2222,7 +2222,20 @@ impl Vm {
         } else {
             match fs_capability_result {
                 Some(value) => Some(value),
-                None => crate::builtin_core::dispatch(name, &args, max_collection, line)?,
+                None => {
+                    // 要素を作る・複製する builtin は、結果の要素数 n を確保の前に 1 回で払う
+                    // （fuel-bulk-charge-a。tree の `apply_pure_core_builtin` と同じ位置・同じ共有 helper）。
+                    if let Some(count) =
+                        crate::builtin_core::result_element_count(name, &args, max_collection)
+                    {
+                        self.budget
+                            .charge_elements(count, ExecutionPhase::Run)
+                            .map_err(|stop| {
+                                Self::control_stop_to_error(&self.budget, stop, line)
+                            })?;
+                    }
+                    crate::builtin_core::dispatch(name, &args, max_collection, line)?
+                }
             }
         };
         if let Some(result) = dispatched {
@@ -2399,6 +2412,8 @@ impl Vm {
         args: Vec<Value>,
         line: usize,
     ) -> Result<Value, TsumugiError> {
+        // 要素の走査 1（§4.1、fuel-bulk-charge-a）。tree の `callback_precheck` と同じく invocation の前。
+        self.charge(ChargeKind::Element, line)?;
         // (F3) builtin の callback 呼び出しで fuel を 1 課金する（tree と同じく深度検査の前）。
         self.charge(ChargeKind::Invocation, line)?;
         if self.active_user_frame_count() >= MAX_USER_CALL_DEPTH {

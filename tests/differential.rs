@@ -1548,20 +1548,21 @@ fn f2c_at_01_invocation_and_iteration_differences() {
     let plain = assert_fuel_parity("lambda 参照", "let h = fn() null end\nlet g = h\n");
     let called = assert_fuel_parity("lambda 呼び出し", "let h = fn() null end\nlet g = h()\n");
     assert_eq!(called - plain, 5 + 2, "lambda の invocation");
-    // callback は要素 1 つにつき invocation 5（`range` の引数だけが違い、AST の大きさは同じ）。
+    // callback は要素 1 つにつき invocation 5 と、`map` の走査 1・`range` の生成 1（版 3、fuel-bulk-charge-a。
+    // `range` の引数だけが違い、AST の大きさは同じ）。
     let cb = "fn f(x)\nend\n";
     let two = assert_fuel_parity("callback 2", &format!("{cb}let r = map(range(0, 2), f)\n"));
     let five = assert_fuel_parity("callback 5", &format!("{cb}let r = map(range(0, 5), f)\n"));
-    assert_eq!(five - two, 3 * 5, "callback の invocation");
+    assert_eq!(five - two, 3 * (5 + 1 + 1), "callback の invocation");
 
     // while: 1 反復 = 2 + 条件 4 + 本体の代入文 6。
     let w = |n: u32| format!("let i = 0\nwhile i < {n}\n  i = i + 1\nend\n");
     let diff = assert_fuel_parity("while 5", &w(5)) - assert_fuel_parity("while 3", &w(3));
     assert_eq!(diff, 2 * (2 + 4 + 6), "while の反復");
-    // for: 反復元は 1 回だけ評価するので、1 反復 = 2 + 本体の代入文 6。
+    // for: 反復元は 1 回だけ評価するので、1 反復 = 2 + 本体の代入文 6 + `range` の生成 1（版 3）。
     let f = |n: u32| format!("let s = 0\nfor x in range(0, {n})\n  s = s + x\nend\n");
     let diff = assert_fuel_parity("for 7", &f(7)) - assert_fuel_parity("for 3", &f(3));
-    assert_eq!(diff, 4 * (2 + 6), "for の反復");
+    assert_eq!(diff, 4 * (2 + 6 + 1), "for の反復");
 }
 
 // =============================================================================

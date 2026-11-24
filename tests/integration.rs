@@ -4024,12 +4024,12 @@ fn f1_fuel_limit_is_not_catchable_in_both_engines() {
 // F-2a: fuel_accounting_revision の field（execution-control §14「F-2a 実装スライス」）
 // =============================================================
 
-/// F2a-AT-01（F2c-AT-04 で版 2 へ更新）: `BudgetConfig::standard` の `fuel_accounting_revision` は 2 で、
-/// 2 を明示した config は execution 作成の経路（`EmbeddingRequest::new`）で受理され、既定の実行と同じ
-/// fuel・同じ成否になる。旧版（1）は同じ経路で拒否される（旧課金で動くのではない）。`language_revision`
-/// は変えない。
+/// F2a-AT-01（F2c-AT-04 で版 2、FBCa-AT-05 で版 3 へ更新）: `BudgetConfig::standard` の
+/// `fuel_accounting_revision` は 3 で、3 を明示した config は execution 作成の経路
+/// （`EmbeddingRequest::new`）で受理され、既定の実行と同じ fuel・同じ成否になる。旧版（1・2）は同じ経路で
+/// 拒否される（旧課金で動くのではない）。`language_revision` は変えない。
 #[test]
-fn f2c_at_04_explicit_fuel_revision_2_matches_default() {
+fn f2c_at_04_explicit_fuel_revision_3_matches_default() {
     use tsumugi::eval::Evaluator;
     use tsumugi::lexer::Lexer;
     use tsumugi::parser::Parser;
@@ -4037,19 +4037,21 @@ fn f2c_at_04_explicit_fuel_revision_2_matches_default() {
     let clock: std::sync::Arc<dyn tsumugi::MonotonicClock> =
         std::sync::Arc::new(tsumugi::FakeClock::new());
     let standard = tsumugi::BudgetConfig::standard(clock.as_ref()).expect("standard budget");
-    assert_eq!(standard.fuel_accounting_revision, 2);
+    assert_eq!(standard.fuel_accounting_revision, 3);
     assert_eq!(standard.total_fuel, 20_000_000);
 
     let mut explicit = standard;
-    explicit.fuel_accounting_revision = 2;
+    explicit.fuel_accounting_revision = 3;
     tsumugi::EmbeddingRequest::new(explicit, std::sync::Arc::clone(&clock))
-        .expect("明示した版 2 は execution 作成前の検証を通る");
-    let mut unsupported = standard;
-    unsupported.fuel_accounting_revision = 1;
-    assert_eq!(
-        tsumugi::EmbeddingRequest::new(unsupported, std::sync::Arc::clone(&clock)).unwrap_err(),
-        tsumugi::BudgetConfigError::UnsupportedFuelAccountingRevision(1)
-    );
+        .expect("明示した版 3 は execution 作成前の検証を通る");
+    for old in [1u32, 2] {
+        let mut unsupported = standard;
+        unsupported.fuel_accounting_revision = old;
+        assert_eq!(
+            tsumugi::EmbeddingRequest::new(unsupported, std::sync::Arc::clone(&clock)).unwrap_err(),
+            tsumugi::BudgetConfigError::UnsupportedFuelAccountingRevision(old)
+        );
+    }
 
     let source = "let i = 0\nwhile i < 20\n  i = i + 1\nend\n";
     let program = Parser::new(Lexer::new(source).tokenize())
