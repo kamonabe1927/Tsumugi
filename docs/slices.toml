@@ -612,6 +612,7 @@ parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fix-cow-copy-parity-journal 実装スライス（transaction の journal が作った cell の元の値を握らず、COW の複製の有無を tree と VM で揃える）" }
 acceptance = ["CCJ-AT-01..04"]
+design_pr  = 518
 issues     = [517]
 order      = 44
 
