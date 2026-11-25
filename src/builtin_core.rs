@@ -259,7 +259,8 @@ pub fn builtin_push(
 pub fn builtin_pop(args: &[Value], line: usize) -> Result<Value, TsumugiError> {
     check_arity("pop", args, 1, line)?;
     if let Value::List(v) = &args[0] {
-        // pop は末尾要素（値）を返す。list 本体の書き戻しは __pop_update が行う。
+        // pop は末尾要素（値）を返す。list 本体の書き戻しは呼び出し側の
+        // `Value::list_pop_tracked` が行う（VM の PopBinding・tree の pop）。
         match v.last() {
             Some(last) => Ok(last.clone()),
             None => Err(TsumugiError::pop_empty_list(line)),
@@ -2444,8 +2445,9 @@ pub fn builtin_path_join_budgeted(
 /// PureCore builtin と、両engineが値だけで実行できる `push` / `pop` を名前で呼び出す。
 /// 該当すれば Ok(Some(value))、該当しなければ Ok(None) を返す。
 /// map/filter/each/print/input/exit/args は実行コンテキスト依存のため含まない。
-/// 内部命令 `__pop_update` は public 名として持たず、[`builtin_pop_update`] を
-/// VM の [`crate::opcode::OpCode::PopBinding`] と tree の pop 実装が直接呼ぶ（AUD-049）。
+/// 内部命令 `__pop_update` は public 名として持たない（AUD-049）。list 本体の書き戻しは、
+/// VM の [`crate::opcode::OpCode::PopBinding`] と tree の pop 実装が binding の値を
+/// [`crate::value::Value::list_pop_tracked`] で書き換えて行う（fix-cow-copy-parity）。
 pub fn dispatch(
     name: &str,
     args: &[Value],

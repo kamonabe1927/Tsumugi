@@ -631,7 +631,7 @@ VmFn {
 builtin_core.rs
 ├── dispatch(name, args, max_collection, line) → Result<Option<Value>>
 │   # 副作用なしの値変換だけを扱う（未知の名前は Ok(None)）。__pop_update は含まず、
-│   # OpCode::PopBinding / tree の pop が builtin_pop_update を直接呼ぶ
+│   # OpCode::PopBinding と tree の pop は binding の値を Value::list_pop_tracked で書き換える
 ├── builtin_len, builtin_push, builtin_range, ...（副作用なしの値変換）
 │   └── builtin_sort_budgeted, builtin_join_budgeted, builtin_to_str_budgeted,
 │       builtin_contains_budgeted（実行予算を受け取る版。dispatch を経ず、
