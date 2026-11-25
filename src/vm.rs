@@ -1,6 +1,6 @@
 //! 仮想マシン: バイトコード（Chunk）を実行するスタックマシン
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::budget::{
@@ -80,6 +80,14 @@ struct ReplStackCheckpoint {
     /// `frames` checkpointを戻してもcellの中身は戻らない。破壊的更新の前に
     /// 元値を記録し、未捕捉エラー時に復元する（AUD-024）。
     cell_originals: HashMap<usize, (SharedValue, Value)>,
+    /// この入力の間に `ensure_local_cell` が作った cell（Rcポインタ同一性）。
+    ///
+    /// 開始時点には無い cell なので rollback で中身を戻す必要は無く（開始時点にあった場所への
+    /// 書き込みは別に記録される。§10）、`checkpoint_cell` は元の値を握らない。握ると一意所有の
+    /// backing が共有になり、最初の書き換えで COW の複製が起きる（fix-cow-copy-parity-journal）。
+    /// 番地の使い回しでも誤らない: 作った cell の番地を取れるのは新しく作る cell だけで、
+    /// 開始時点にあった cell（生きている）の番地がこの集合に入ることは無い。
+    created_cells: HashSet<usize>,
     /// 各 journal entry（stack slot / cell の退避）の rollback journal entry（§5.1）を
     /// live heap へ課金するトークン（REV-015 PR-d）。entry と 1:1 で積み、checkpoint が
     /// drop（commit=`take`、rollback=`restore`）されるときにまとめて release される。
@@ -470,6 +478,7 @@ impl Vm {
             stack_len: self.stack.len(),
             originals: HashMap::new(),
             cell_originals: HashMap::new(),
+            created_cells: HashSet::new(),
             entry_tokens: Vec::new(),
         });
 
@@ -1002,6 +1011,9 @@ impl Vm {
         let cell =
             crate::value::Value::new_cell(value, &self.budget.heap_handle(), ExecutionPhase::Run)
                 .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+        if let Some(checkpoint) = self.repl_stack_checkpoint.as_mut() {
+            checkpoint.created_cells.insert(Rc::as_ptr(&cell) as usize);
+        }
         if let Some(entry) = self.frame_mut(line)?.locals_cells.get_mut(slot) {
             *entry = Some(Rc::clone(&cell));
         }
@@ -1921,7 +1933,10 @@ impl Vm {
         let already_recorded = self
             .repl_stack_checkpoint
             .as_ref()
-            .is_some_and(|checkpoint| checkpoint.cell_originals.contains_key(&id));
+            .is_some_and(|checkpoint| {
+                checkpoint.cell_originals.contains_key(&id)
+                    || checkpoint.created_cells.contains(&id)
+            });
         if self.repl_stack_checkpoint.is_none() || already_recorded {
             return;
         }

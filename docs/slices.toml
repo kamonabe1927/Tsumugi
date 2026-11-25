@@ -607,13 +607,14 @@ order      = 43
 [[slice]]
 id         = "fix-cow-copy-parity-journal"
 title      = "REPL・Engine::run の journal がその入力・execution で作った cell の元の値を握らず、最初の push・index 代入の COW の複製を tree と VM で揃える"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fix-cow-copy-parity-journal 実装スライス（transaction の journal が作った cell の元の値を握らず、COW の複製の有無を tree と VM で揃える）" }
 acceptance = ["CCJ-AT-01..04"]
 design_pr  = 518
 issues     = [517]
+impl_pr    = 521
 order      = 44
 
 # fuel-bulk-charge は 1 PR に収まらない（触る仕組み 3・受入基準 10 超・src/ 約 900〜1400 行、loop-runbook §14.1）ため

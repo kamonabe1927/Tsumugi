@@ -40,6 +40,19 @@ struct SubmissionJournal {
     undo_log: Vec<UndoEntry>,
     /// 元値を記録済みのcell（Rcポインタ同一性で判定）。
     seen_cells: HashSet<usize>,
+    /// journal を張っている間に `Env::set` が作った cell（Rcポインタ同一性）。
+    ///
+    /// これらの cell は入力・execution の開始時点には無く、開始時点の言語状態から届くのは
+    /// 開始時点にあった場所への書き込みだけで、それは別に記録される（§10）。rollback で
+    /// 中身を戻す必要が無いので、`journal_cell` は元の値を握らない。元の値の `Rc` を
+    /// 握ると一意所有の backing が共有になり、最初の書き換えで COW の複製が起きる
+    /// （fix-cow-copy-parity-journal）。
+    ///
+    /// 番地の使い回しに対して安全である: 開始時点にあった cell が journal の間に解放され、
+    /// その番地を新しい cell が使うときは、新しい cell は本当に作った cell である。作った cell
+    /// が解放されても、その番地を取れるのは新しく作る cell だけで、開始時点にあった
+    /// cell（生きたまま別の番地にある）がこの集合に入ることは無い。
+    created_cells: HashSet<usize>,
     /// 元エントリを記録済みのscope binding（scope index と名前）。
     seen_scope_entries: HashSet<(usize, String)>,
     /// 各 undo entry の rollback journal entry（§5.1）を live heap へ課金するトークン
@@ -215,7 +228,7 @@ impl Env {
         if self
             .journal
             .as_ref()
-            .is_some_and(|j| j.seen_cells.contains(&id))
+            .is_some_and(|j| j.seen_cells.contains(&id) || j.created_cells.contains(&id))
         {
             return Ok(());
         }
@@ -278,6 +291,9 @@ impl Env {
             let cell = Value::new_cell(value, &self.heap_ledger, ExecutionPhase::Run)?;
             // binding の追加・置換前に元エントリを journal へ記録する（AUD-024）。
             self.journal_scope_entry(scope, name)?;
+            if let Some(journal) = self.journal.as_mut() {
+                journal.created_cells.insert(Rc::as_ptr(&cell) as usize);
+            }
             self.scopes[scope].insert(name.to_string(), cell);
         }
         Ok(())
