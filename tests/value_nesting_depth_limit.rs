@@ -415,7 +415,9 @@ fn vnd_at_05_usage_unchanged_within_limit() {
     );
 }
 
-const TREE_EXPECTED: (u64, u64, u64) = (3976, 25204, 25204);
+// fuel-bulk-charge-a（版 3）: `map(xs, …)` が 20 要素を走査するので fuel が 20（1 / element）増えた。
+// heap・bytecode は変わらない。tree と VM で同じ増分（FBCa-AT-01）。
+const TREE_EXPECTED: (u64, u64, u64) = (3996, 25204, 25204);
 // fix-vm-builtin-call-lowering で、builtin 名の呼び出しの引数の bytecode を 2 経路で共有したため、
 // VM の bytecode_chunk の課金（64 + 16 × 命令数 + 32 × 定数数）が 640 byte 減った。fuel と tree の値、
 // bytecode 以外の heap は変わらない。
@@ -431,4 +433,4 @@ const TREE_EXPECTED: (u64, u64, u64) = (3976, 25204, 25204);
 // CCP-AT-04（fix-cow-copy-parity）: 期待値を変えたのはこの 1 件だけ。`pop(<識別子>)` の lowering が 4 命令（`GetX`・`PopUpdate`・`SetX`・`Pop`）から
 // `PopBinding` 1 命令になり、この script の `pop` 1 箇所で bytecode_chunk の課金（16 × 命令数）が 48 byte
 // 減った。fuel と tree の値、bytecode 以外の heap は変わらない。
-const VM_EXPECTED: (u64, u64, u64) = (3976, 25076, 25076);
+const VM_EXPECTED: (u64, u64, u64) = (3996, 25076, 25076);

@@ -1548,20 +1548,21 @@ fn f2c_at_01_invocation_and_iteration_differences() {
     let plain = assert_fuel_parity("lambda 参照", "let h = fn() null end\nlet g = h\n");
     let called = assert_fuel_parity("lambda 呼び出し", "let h = fn() null end\nlet g = h()\n");
     assert_eq!(called - plain, 5 + 2, "lambda の invocation");
-    // callback は要素 1 つにつき invocation 5（`range` の引数だけが違い、AST の大きさは同じ）。
+    // callback は要素 1 つにつき invocation 5 と、`map` の走査 1・`range` の生成 1（版 3、fuel-bulk-charge-a。
+    // `range` の引数だけが違い、AST の大きさは同じ）。
     let cb = "fn f(x)\nend\n";
     let two = assert_fuel_parity("callback 2", &format!("{cb}let r = map(range(0, 2), f)\n"));
     let five = assert_fuel_parity("callback 5", &format!("{cb}let r = map(range(0, 5), f)\n"));
-    assert_eq!(five - two, 3 * 5, "callback の invocation");
+    assert_eq!(five - two, 3 * (5 + 1 + 1), "callback の invocation");
 
     // while: 1 反復 = 2 + 条件 4 + 本体の代入文 6。
     let w = |n: u32| format!("let i = 0\nwhile i < {n}\n  i = i + 1\nend\n");
     let diff = assert_fuel_parity("while 5", &w(5)) - assert_fuel_parity("while 3", &w(3));
     assert_eq!(diff, 2 * (2 + 4 + 6), "while の反復");
-    // for: 反復元は 1 回だけ評価するので、1 反復 = 2 + 本体の代入文 6。
+    // for: 反復元は 1 回だけ評価するので、1 反復 = 2 + 本体の代入文 6 + `range` の生成 1（版 3）。
     let f = |n: u32| format!("let s = 0\nfor x in range(0, {n})\n  s = s + x\nend\n");
     let diff = assert_fuel_parity("for 7", &f(7)) - assert_fuel_parity("for 3", &f(3));
-    assert_eq!(diff, 4 * (2 + 6), "for の反復");
+    assert_eq!(diff, 4 * (2 + 6 + 1), "for の反復");
 }
 
 // =============================================================================
@@ -2081,4 +2082,478 @@ fn ccp_at_01_03_cli_stdout_stderr_exit_code_match() {
         run_file_subprocess(&script, false, None).status.code(),
         Some(0)
     );
+}
+
+// =============================================================================
+// fuel-bulk-charge-a: map / filter / each と要素を作る・複製する操作の per-element fuel（版 3）
+// =============================================================================
+
+/// `with` と `without`（`with` から対象の 1 文を除いたもの）の「成功する最小の上限 N」の差を返す。
+/// どちらも tree/VM の N が一致し（N−1 の terminal も一致）、差が両 engine で同じであることを確かめる。
+fn fbca_marginal(label: &str, with: &str, without: &str) -> u64 {
+    let a = assert_fuel_parity(&format!("{label} [with]"), with);
+    let b = assert_fuel_parity(&format!("{label} [without]"), without);
+    a - b
+}
+
+/// tree の poll 経路（埋め込みの `Engine::run`。`run_slice` の driver で、callback は式 frame の
+/// `step_callback_call` を通る）で、`total_fuel = fuel` の実行が完了するか。
+fn tree_poll_ok(source: &str, fuel: u64) -> bool {
+    use tsumugi::embedding::CompileOptions;
+    use tsumugi::{
+        EmbeddingContext, EmbeddingEngine, EmbeddingOutcome, EmbeddingRequest, ExecutionId,
+        FakeClock, LinkRequest, MonotonicClock, Source, SourceId,
+    };
+    let clock: Arc<dyn MonotonicClock> = Arc::new(FakeClock::new());
+    let mut budget = BudgetConfig::standard(clock.as_ref()).expect("standard budget");
+    budget.total_fuel = fuel;
+    let execution_id = || ExecutionId::new(7u128.try_into().expect("nonzero"));
+    let engine = EmbeddingEngine::builder().build().expect("build");
+    let script = engine
+        .compile(
+            Source::new(SourceId::new("m").expect("source id"), source),
+            &CompileOptions {
+                retain_source: true,
+            },
+        )
+        .expect("compile");
+    let linked = match engine.link(
+        &script,
+        LinkRequest::new(execution_id(), CapabilitySet::empty(), budget),
+    ) {
+        Ok(linked) => linked,
+        Err(_) => return false,
+    };
+    let mut context = EmbeddingContext::new(&engine);
+    let request = EmbeddingRequest::new(budget, clock)
+        .expect("同じ clock")
+        .with_execution_id(execution_id())
+        .with_capabilities(print_capabilities());
+    matches!(
+        engine.run(&linked, &mut context, request),
+        EmbeddingOutcome::Completed { .. }
+    )
+}
+
+/// FBCa-AT-01: `map` / `filter` / `each` の要素数が 1 増えたときの N の差が 1（走査）+ callback 1 回分で、
+/// 両 engine で一致する。tree は同期経路（`Evaluator::run`。`assert_fuel_parity` で VM と突合）と
+/// poll 経路（`tree_poll_ok`。callback は式 frame を通る）の両方で同じ N になる。
+#[test]
+fn fbca_at_01_map_filter_each_per_element() {
+    // callback 1 回分 = invocation 5 + 本体（1 式の本体 = statement 1 + expression 1）。
+    // 要素の走査 1（版 3 で足した課金）を足した 8 が要素 1 つぶんの増分。
+    let per_element = 1 + 5 + 2;
+    // (builtin, callback) の組。文・let の右辺・式の中に入れ子・関数の中の 4 つの形を作る。
+    let cases: &[(&str, &str)] = &[
+        ("map", "fn(x) x end"),
+        ("filter", "fn(x) true end"),
+        ("each", "fn(x) x end"),
+    ];
+    for (name, cb) in cases {
+        let forms: &[(&str, String, String)] = &[
+            (
+                "let 右辺",
+                format!("let r = {name}(xs, {cb})\n"),
+                String::new(),
+            ),
+            ("文", format!("{name}(xs, {cb})\n"), String::new()),
+            (
+                "式の中",
+                format!("let r = len([{name}(xs, {cb}), 1])\n"),
+                String::new(),
+            ),
+            (
+                "関数の中",
+                format!("fn f(ys)\n  return {name}(ys, {cb})\nend\nlet r = f(xs)\n"),
+                "fn f(ys)\n  return 0\nend\nlet r = 0\n".to_string(),
+            ),
+        ];
+        for (form, stmt, base) in forms {
+            // 同期経路・VM の N（`assert_fuel_parity` で一致済み）と、tree の poll 経路（式 frame）の
+            // N が with・without のそれぞれで等しいことを確かめ、要素数による N の差を返す。
+            let margin = |m: usize| {
+                let pre = format!("let xs = range(0, {m})\n");
+                let mut ns = [0u64; 2];
+                for (i, (kind, src)) in [
+                    ("with", format!("{pre}{stmt}")),
+                    ("without", format!("{pre}{base}")),
+                ]
+                .iter()
+                .enumerate()
+                {
+                    let label = format!("{name} {form} m={m} [{kind}]");
+                    let sync_n = assert_fuel_parity(&label, src);
+                    let poll_n = min_fuel(&format!("{label} [poll]"), |n| tree_poll_ok(src, n));
+                    assert_eq!(
+                        poll_n, sync_n,
+                        "[{label}] tree の poll 経路（式 frame）の N が同期経路・VM と一致しません"
+                    );
+                    ns[i] = sync_n;
+                }
+                ns[0] - ns[1]
+            };
+            let (m3, m4, m10) = (margin(3), margin(4), margin(10));
+            assert_eq!(
+                m4 - m3,
+                per_element,
+                "[{name} {form}] 要素 1 つぶんの N の差が 1 + callback 1 回分ではありません"
+            );
+            assert_eq!(
+                m10 - m3,
+                7 * per_element,
+                "[{name} {form}] 線形ではありません"
+            );
+        }
+    }
+}
+
+/// FBCa-AT-02: `range` / `keys` / `values` / List の `slice` / List の `reverse` / `split` で、結果の
+/// 要素数が k 増えたときの N の差が k で、両 engine で一致する。
+#[test]
+fn fbca_at_02_element_producing_builtins() {
+    // range: 結果の要素数だけが違う。
+    for (n, k) in [(5usize, 1usize), (5, 7), (100, 50)] {
+        let a = fbca_marginal("range", &format!("let r = range(0, {n})\n"), "let r = 0\n");
+        let b = fbca_marginal(
+            "range",
+            &format!("let r = range(0, {})\n", n + k),
+            "let r = 0\n",
+        );
+        assert_eq!(b - a, k as u64, "range n={n} k={k}");
+    }
+    // keys / values / reverse: 入力は同じ大きさで、結果の呼び出しの有無だけを変える。
+    let dict = |n: usize| {
+        let entries = (0..n)
+            .map(|i| format!("\"k{i}\": {i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("let d = {{{entries}}}\n")
+    };
+    for name in ["keys", "values"] {
+        let at = |n: usize| {
+            fbca_marginal(
+                name,
+                &format!("{}let r = {name}(d)\n", dict(n)),
+                &format!("{}let r = 0\n", dict(n)),
+            )
+        };
+        assert_eq!(at(9) - at(2), 7, "{name}");
+    }
+    let at_reverse = |n: usize| {
+        fbca_marginal(
+            "reverse",
+            &format!("let xs = range(0, {n})\nlet r = reverse(xs)\n"),
+            &format!("let xs = range(0, {n})\nlet r = 0\n"),
+        )
+    };
+    assert_eq!(at_reverse(12) - at_reverse(5), 7, "reverse");
+    // slice: 入力は同じ大きさ（20）で、切り出す長さだけを変える。
+    let at_slice = |len: usize| {
+        fbca_marginal(
+            "slice",
+            &format!("let xs = range(0, 20)\nlet r = slice(xs, 2, {})\n", 2 + len),
+            "let xs = range(0, 20)\nlet r = 0\n",
+        )
+    };
+    assert_eq!(at_slice(10) - at_slice(3), 7, "slice");
+    // split: 区切りで分かれる要素数だけが違う。
+    let at_split = |parts: usize| {
+        let s = vec!["a"; parts].join(",");
+        fbca_marginal(
+            "split",
+            &format!("let s = \"{s}\"\nlet r = split(s, \",\")\n"),
+            &format!("let s = \"{s}\"\nlet r = 0\n"),
+        )
+    };
+    assert_eq!(at_split(11) - at_split(4), 7, "split");
+}
+
+/// FBCa-AT-03: 共有中の List / Dict への `push`・`pop`・index 代入と、Dict・Str の `for` で、複製・生成する
+/// 要素数が k 増えたときの N の差が k。一意所有（tracked）では 0。tree と VM で複製の有無が揃っている。
+#[test]
+fn fbca_at_03_cow_copy_and_for_iteration() {
+    let dict = |n: usize| {
+        let entries = (0..n)
+            .map(|i| format!("\"k{i}\": {i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{{{entries}}}")
+    };
+    // 共有中の List: 書き換えるたびではなく最初の 1 回で複製する。複製する要素数ぶんだけ増える。
+    for (op, stmt) in [
+        ("push", "push(xs, 1)"),
+        ("pop", "pop(xs)"),
+        ("list_set", "xs[0] = 7"),
+    ] {
+        let shared = |n: usize| {
+            fbca_marginal(
+                &format!("共有 {op}"),
+                &format!("let xs = range(0, {n})\nlet ys = xs\n{stmt}\n"),
+                &format!("let xs = range(0, {n})\nlet ys = xs\n"),
+            )
+        };
+        assert_eq!(shared(30) - shared(5), 25, "共有中の List の {op}");
+        let unique = |n: usize| {
+            fbca_marginal(
+                &format!("一意 {op}"),
+                &format!("let xs = range(0, {n})\n{stmt}\n"),
+                &format!("let xs = range(0, {n})\n"),
+            )
+        };
+        assert_eq!(
+            unique(30),
+            unique(5),
+            "一意所有の List の {op} は複製しない"
+        );
+    }
+    // 共有中の Dict の index 代入。
+    let shared_dict = |n: usize| {
+        fbca_marginal(
+            "共有 dict_set",
+            &format!("let d = {}\nlet e = d\nd[\"k0\"] = 7\n", dict(n)),
+            &format!("let d = {}\nlet e = d\n", dict(n)),
+        )
+    };
+    assert_eq!(shared_dict(30) - shared_dict(5), 25, "共有中の Dict の代入");
+    let unique_dict = |n: usize| {
+        fbca_marginal(
+            "一意 dict_set",
+            &format!("let d = {}\nd[\"k0\"] = 7\n", dict(n)),
+            &format!("let d = {}\n", dict(n)),
+        )
+    };
+    assert_eq!(
+        unique_dict(30),
+        unique_dict(5),
+        "一意所有の Dict の代入は複製しない"
+    );
+    // 一意所有のはずの値の最初の書き換え（range の結果・List / Dict リテラル・binding の種類違い・
+    // REPL でない単発）で、tree と VM が同じ N になる（複製の有無が揃っている）。
+    for place in ["global", "inner", "outer"] {
+        for op in ["push", "pop", "list_set", "dict_set"] {
+            let d = |n: usize| {
+                fbca_marginal(
+                    &format!("{place} {op}"),
+                    &ccu_source(place, op, 1, n),
+                    &ccu_source(place, op, 0, n),
+                )
+            };
+            assert_eq!(d(40), d(8), "一意所有の {place} {op} は n に依らない");
+        }
+    }
+    for place in ["global", "local", "upvalue", "upvalue_captured_local"] {
+        let d = |n: usize| {
+            fbca_marginal(
+                &format!("pop {place}"),
+                &ccp_pop_source(place, n, 1),
+                &ccp_pop_source(place, n, 0),
+            )
+        };
+        assert_eq!(d(40), d(8), "一意所有の pop {place} は n に依らない");
+    }
+    // List リテラル・Dict リテラルへの最初の書き換え。
+    for lit in ["[1, 2, 3, 4, 5, 6, 7, 8]", "[[1], [2]]"] {
+        let with = format!("let xs = {lit}\npush(xs, 1)\nprint(len(xs))\n");
+        assert_fuel_parity("リテラルへの push", &with);
+    }
+    // for の反復列: Dict・Str は要素数ぶんの反復列を作る。List は共有するので 0。
+    let for_dict = |n: usize| {
+        fbca_marginal(
+            "for dict",
+            &format!("let d = {}\nfor k in d\n  break\nend\n", dict(n)),
+            &format!("let d = {}\n", dict(n)),
+        )
+    };
+    assert_eq!(for_dict(30) - for_dict(5), 25, "for の Dict の反復列");
+    let for_str = |n: usize| {
+        let s = "a".repeat(n);
+        fbca_marginal(
+            "for str",
+            &format!("let s = \"{s}\"\nfor c in s\n  break\nend\n"),
+            &format!("let s = \"{s}\"\n"),
+        )
+    };
+    assert_eq!(for_str(30) - for_str(5), 25, "for の Str の反復列");
+    let for_list = |n: usize| {
+        fbca_marginal(
+            "for list",
+            &format!("let xs = range(0, {n})\nfor x in xs\n  break\nend\n"),
+            &format!("let xs = range(0, {n})\n"),
+        )
+    };
+    assert_eq!(
+        for_list(30),
+        for_list(5),
+        "for の List の反復列は共有する（0）"
+    );
+}
+
+/// FBCa-AT-04: 上の script の N は両 engine とも成功、N − 1 は両 engine とも fuel の上限で失敗し、terminal が
+/// 一致する（`assert_fuel_parity` が検査する）。CLI の stdout・stderr・exit code も一致する。
+/// `max_collection_elements` と fuel の両方を超える `range` は collection の上限の error になる。
+#[test]
+fn fbca_at_04_boundary_and_cli_parity() {
+    let sources: Vec<(&str, String)> = vec![
+        (
+            "map",
+            "let xs = range(0, 6)\nlet r = map(xs, fn(x) x * 2 end)\nprint(len(r))\n".into(),
+        ),
+        (
+            "filter",
+            "let xs = range(0, 6)\nlet r = filter(xs, fn(x) x > 2 end)\nprint(len(r))\n".into(),
+        ),
+        (
+            "each",
+            "let xs = range(0, 6)\neach(xs, fn(x) print(x) end)\n".into(),
+        ),
+        (
+            "range・keys・values",
+            "let d = {\"a\": 1, \"b\": 2}\nprint(len(keys(d)))\nprint(len(values(d)))\nprint(len(range(0, 9)))\n"
+                .into(),
+        ),
+        (
+            "slice・reverse・split",
+            "let xs = range(0, 9)\nprint(len(slice(xs, 1, 5)))\nprint(len(reverse(xs)))\nprint(len(split(\"a,b,c\", \",\")))\n"
+                .into(),
+        ),
+        (
+            "共有中の push と for",
+            "let xs = range(0, 9)\nlet ys = xs\npush(xs, 1)\nprint(len(ys))\nlet d = {\"a\": 1}\nfor k in d\n  print(k)\nend\nfor c in \"xyz\"\n  print(c)\nend\n"
+                .into(),
+        ),
+    ];
+    for (label, source) in &sources {
+        assert_fuel_parity(&format!("FBCa-AT-04 {label}"), source);
+    }
+    let dir = ImportTestDir::new("FBCa CLI parity");
+    for (label, source) in &sources {
+        let script = dir.path.join("fbca.tsg");
+        std::fs::write(&script, source).expect("script の書き込みに失敗");
+        let tree = run_file_subprocess(&script, false, None);
+        let vm = run_file_subprocess(&script, true, None);
+        assert_eq!(tree.status.code(), vm.status.code(), "[{label}] exit code");
+        assert_eq!(
+            output_text(&tree),
+            output_text(&vm),
+            "[{label}] stdout/stderr"
+        );
+    }
+    // collection の上限と fuel の両方を超える range は、collection の上限の error になる（検査の順）。
+    let source = "let r = range(0, 5000000)\n";
+    let tree = run_tree_single(source, Limits::Fuel(100)).1.err();
+    let vm = run_vm_single(source, Limits::Fuel(100)).1.err();
+    let tree = tree.expect("tree は失敗するはず");
+    assert_eq!(
+        Some(tree.clone()),
+        vm,
+        "上限超過の terminal が tree/VM で一致"
+    );
+    assert!(
+        tree.kind() == Some(tsumugi::error::ErrorKind::CollectionLimit),
+        "fuel でなく collection の上限の error: {tree:?}"
+    );
+}
+
+/// FBCa-AT-03（REPL）: REPL の入力の中の最初の書き換えの形（前の入力で作った値と、その入力で作った値への `push` など）で、
+/// 2 入力目の「成功する最小の上限 N」が tree と VM で一致する（複製の有無が揃っている）。
+#[test]
+fn fbca_at_03_repl_first_write_in_input_parity() {
+    fn tree_ok(first: &str, second: &str, fuel: u64) -> bool {
+        let mut evaluator = Evaluator::new();
+        evaluator.set_capabilities(print_capabilities());
+        let parse = |s: &str| {
+            Parser::new(Lexer::new(s).tokenize())
+                .parse()
+                .expect("parse")
+        };
+        evaluator
+            .run_repl_submission(&parse(first), first.len() as u64)
+            .expect("入力 1");
+        evaluator.rearm_budget_for_repl(
+            BudgetConfig::for_legacy(fuel, 1_000_000),
+            Arc::new(tsumugi::SystemMonotonicClock::new()),
+            tsumugi::CancellationToken::new(),
+        );
+        evaluator
+            .run_repl_submission(&parse(second), second.len() as u64)
+            .is_ok()
+    }
+    fn vm_ok(first: &str, second: &str, fuel: u64) -> bool {
+        let mut compiler = Compiler::new();
+        let mut vm = Vm::new_repl();
+        vm.set_capabilities(print_capabilities());
+        let mut submit = |src: &str, config: BudgetConfig| -> bool {
+            let program = Parser::new(Lexer::new(src).tokenize())
+                .parse()
+                .expect("parse");
+            vm.begin_repl_submission(config);
+            if vm.charge_link_graph(src.len() as u64, &[]).is_err() {
+                return false;
+            }
+            let chunk = compiler.compile_repl_line(&program).expect("compile");
+            vm.run_repl_chunk(chunk).is_ok()
+        };
+        assert!(submit(
+            first,
+            BudgetConfig::for_legacy(1_000_000, 1_000_000)
+        ));
+        submit(second, BudgetConfig::for_legacy(fuel, 1_000_000))
+    }
+    let dict: String = (0..40)
+        .map(|i| format!("\"k{i}\": {i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let cases: Vec<(String, &str, &str)> = vec![
+        ("push".into(), "let xs = range(0, 40)\n", "push(xs, 1)\n"),
+        ("pop".into(), "let xs = range(0, 40)\n", "pop(xs)\n"),
+        (
+            "index 代入".into(),
+            "let xs = range(0, 40)\n",
+            "xs[0] = 7\n",
+        ),
+        (
+            "closure 経由".into(),
+            "let xs = range(0, 40)\n",
+            "fn f()\n  push(xs, 1)\n  return len(xs)\nend\nf()\n",
+        ),
+        (
+            "共有中".into(),
+            "let xs = range(0, 40)\nlet ys = xs\n",
+            "push(xs, 1)\n",
+        ),
+        ("dict".into(), "let d = {DICT}\n", "d[\"k0\"] = 7\n"),
+        // その入力で作った値への最初の書き換え（両 engine とも複製しない。issue #517）。
+        (
+            "同じ入力の push".into(),
+            "let z = 1\n",
+            "let xs = range(0, 400)\npush(xs, 1)\n",
+        ),
+        (
+            "同じ入力の pop".into(),
+            "let z = 1\n",
+            "let xs = range(0, 400)\npop(xs)\n",
+        ),
+        (
+            "同じ入力の index 代入".into(),
+            "let z = 1\n",
+            "let xs = range(0, 400)\nxs[0] = 7\n",
+        ),
+        (
+            "同じ入力の closure 経由".into(),
+            "let z = 1\n",
+            "let xs = range(0, 400)\nfn f()\n  push(xs, 1)\n  return len(xs)\nend\nf()\n",
+        ),
+        (
+            "同じ入力の dict".into(),
+            "let z = 1\n",
+            "let d = {DICT}\nd[\"k0\"] = 7\n",
+        ),
+    ];
+    for (label, first, second) in &cases {
+        let first = first.replace("DICT", &dict);
+        let second = &second.replace("DICT", &dict);
+        let tree = min_fuel(&format!("{label} [tree]"), |n| tree_ok(&first, second, n));
+        let vm = min_fuel(&format!("{label} [vm]"), |n| vm_ok(&first, second, n));
+        assert_eq!(tree, vm, "[REPL {label}] 2 入力目の N が tree/VM で不一致");
+    }
 }

@@ -633,7 +633,7 @@ order      = 44
 [[slice]]
 id         = "fuel-bulk-charge-a"
 title      = "map/filter/each と要素を作る・複製する操作（range/keys/values/slice/reverse/split・COW の複製・for の反復列）の per-element fuel（§4.1 1/element）・fuel_accounting_revision 2 → 3・既定 total_fuel 再測定"
-status     = "ready"
+status     = "done"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fuel-bulk-charge-a 実装スライス（`map` / `filter` / `each` と要素を作る・複製する操作の per-element fuel、版 2 → 3）" }
@@ -641,6 +641,7 @@ acceptance = ["FBCa-AT-01..05"]
 depends_on = ["F-2c", "fix-cow-copy-parity", "fix-cow-copy-parity-upvalue", "fix-cow-copy-parity-journal"]
 design_pr  = 523
 issues     = [502, 510, 517]
+impl_pr    = 516
 order      = 47
 
 # 見積もり: src/ 約 400〜600 行、触る仕組みは budget の byte の課金 1 つ、受入基準は設計で決める（5 以内）。

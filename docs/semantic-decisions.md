@@ -2006,13 +2006,16 @@ run_frames dispatch loop:
 push_call_frame(...):      # frame を積む唯一の経路（Call / callback。root frame は数えない）
   watchdog_tick(line)?     # (W2) frame の追加
 
-fuel の論理課金点（tree の課金点と同じ。値は実行予算・協調実行仕様 §4.1 の版 2 の表）:
+fuel の論理課金点（tree の課金点と同じ。値は実行予算・協調実行仕様 §4.1 の版 3 の表）:
   (F1) ループの反復の開始 : body の先頭の `Charge(LoopIteration)`（`while` は条件の `JumpIfFalse` の後、
                              `for` は次の要素の判定の後。`Loop` は back-edge 専用で、`Loop` 自体は課金しない。
                              `for` の `continue` は前方 `Jump` で increment へ飛ばす）
   (F2) 呼び出し           : `PrepareCall` の直前の `Charge(Invocation)`（呼び出し位置の line。深度検査の前。
                              `PrepareCall` 自体は課金しない。builtin 経路も引数の評価の前に同じ `Charge`）
-  (F3) builtin の callback : `call_fn_value`（builtin 呼び出しの line。invocation）
+  (F3) builtin の callback : `call_fn_value`（builtin 呼び出しの line。要素の走査 1（版 3、fuel-bulk-charge-a）の後に invocation）
+  (F4) 要素の課金（版 3）  : `exec_builtin` が `range` / `keys` / `values` / `slice` / `reverse` / `split` の結果の
+                             要素数 n を確保の前に 1 回で直接課金する。COW の複製（`detach_list` / `detach_dict`）と
+                             `for` の Dict・Str の反復列も複製・生成する要素数を 1 回で直接課金する（bytecode に出ない）
   ほか statement・expression・operation の `Charge`（compiler が文・式・演算の境界に出す）と、builtin の
   実行が直接課金する host call attempt。どれも dispatch 自体は課金しない
 ```
