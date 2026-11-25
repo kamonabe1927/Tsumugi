@@ -667,6 +667,8 @@ order      = 47
 # c1〜c4 の 4 スライスへ分割した（spec「audit-strict-cbor の sub-slice 分割」）。元の id は置き換えて残さない。
 # 「strict CBOR スライス」と書かれた既存の延期先は c1〜c4 全体を指す。
 # c2〜c4 は depends_on が done でないため todo。c3・c4 の判断（Q2〜Q4）は kamonabe の選択で決まり、spec 小節に記録済み。
+# c2 は c1 が done（#261）になった後の設計 PR で ready にした（spec 小節の「`ready` にする設計 PR の確かめ」。範囲・受入基準は変えず、
+# design_pr をその PR にした。初版の設計 PR は #256）。
 [[slice]]
 id         = "audit-strict-cbor-c1"
 title      = "strict deterministic CBOR c1：§9.2 encoder 本体（schema v1 全型・size pass / write pass、crate 内部、未配線）"
@@ -682,7 +684,7 @@ impl_pr    = 261
 [[slice]]
 id         = "audit-strict-cbor-c2"
 title      = "strict deterministic CBOR c2：journal・audit drain queue の byte 計測を encoder の実長へ差し替え（§11）"
-status     = "todo"
+status     = "ready"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cbor-c2 実装スライス（journal・audit drain queue の byte 計測を encoder の実長へ差し替え）" }

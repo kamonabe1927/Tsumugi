@@ -1893,6 +1893,33 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
   - **SC-AT-10（決定性）**: 同じ script・同じ注入 budget・同じ sink 応答列で、`committed_bytes` と yield 位置と envelope 列が 100 回一致する（§15.1）。
 - **想定の変更規模**: `src/audit.rs`・`src/eval.rs`・`src/embedding.rs`・`src/budget.rs` で約 80〜150 行（推定関数の置き換えと呼び出し側）。仕組みは監査の byte 会計 1 つ。
 
+**`ready` にする設計 PR の確かめ**（2026-11-25。c1 が done（実装 PR #261）になった後の main 4d12771 で確かめた。上の実装範囲・範囲外・受入基準・想定の変更規模は変えない。
+判断の候補 Q5・Q6 を設計 PR に出した。選ばれた内容はこの下に追記する）:
+
+- c1 の encoder は `src/audit.rs` の `pub(crate) mod cbor` にあり、c2 が使う入口は `cbor::encoded_len`（size pass、checked）・`cbor::encode_to_vec`
+  （size pass の長さと write pass の byte 長が違えば `CborError::LengthMismatch`）・`cbor::envelope_fixed_len_upper_bound(language_revision)`
+  （sequence を `u64::MAX` の 9 byte とみなした envelope 固定部の上限値。上の queue の計上規則のための入口）の 3 つである。
+  `cbor` モジュールの `#![cfg_attr(not(test), expect(dead_code))]` は c1 の間だけの許可なので、c2 で本番経路から使った時点で外す（残る未使用の項目があれば項目ごとに許す）。
+- 置き換える呼び出し点は次のとおり（main 4d12771）。journal: `AuditJournal::append_normal` の `estimate_encoded_bytes(envelope)`。
+  queue: `Evaluator::audit_queue_admit` / `audit_queue_release`（`src/eval.rs`。`estimate_event_bytes`）、`AuditQueueMeter.envelope_overhead` を張る
+  `src/embedding.rs` の `set_audit_queue` の呼び出し（`estimate_envelope_overhead_bytes`）、`BudgetChargeAccumulator::push_finalized` /
+  `finalized_queue_bytes`（`src/audit.rs`。確定済み `BudgetCharged` の queue 計上）。release は push と同じ規則で event から測り直すので、
+  envelope 固定部の上限値が execution の中で不変である限り「push 時に足した値と同じ値を引く」を満たす。
+- `append_terminal` は現在 byte を数えていない（event 数・byte の通常枠を検査せず、sequence だけを払い出す）。SC-AT-06 の「Terminal は reserve 側」の
+  数え方は判断の候補 Q6 にした。
+- size pass の長さが `u64` を超える（`CborError::LengthOverflow`）event は、その長さが通常枠（`u64` 以下）を必ず超えるので、journal では §11 と
+  SC-AT-08 の「単一 event の実長が通常枠を超える」に当たり `AuditFailure::EventTooLarge` とする。queue の計上は現行の飽和加算と同じく `u64::MAX`
+  に飽和させる（その event の push で queue は上限を超え、yield・backpressure の既存の経路に入る）。これは上の実装範囲から従うもので、判断ではない。
+- naive 推定そのものを固定している `src/` の unit test（`src/audit.rs` の R-AT-08 `r_at_08_estimate_event_bytes_frozen_for_host_call_events` と
+  host-call event の `estimate_event_bytes == 128` の検査、`src/audit.rs`・`src/eval.rs` の B2-AT-10 の検査）は、推定の実装を削除するのにあわせて
+  SC-AT-06（journal の実長）・SC-AT-07（B2-AT-10 の置き換え）の unit test へ置き換える。SC-AT-09 の「無改変で緑」は `tests/audit_*.rs` についての条件で、
+  これらの unit test は対象外である（R-AT-08 は「R-1 では 128 固定を据え置く」ことの確かめで、strict CBOR スライスで naive 推定全体を差し替えることは R-1 小節が予定している）。
+- `estimate_encoded_bytes` は `pub fn` で、`pub mod audit` を通して `tsumugi::audit::estimate_encoded_bytes` として crate の外から呼べる（crate root の
+  `pub use` には無い）。上の実装範囲は「関数名を残すかどうかは実装者に任せる」としているが、公開 API に当たるので判断の候補 Q5 にした。
+  `estimate_envelope_overhead_bytes` / `estimate_event_bytes` は `pub(crate)` なので実装者に任せたままでよい。
+- 規模は手順書 §14.1 の目安（`src/` 1000 行以内・仕組み 1 つ・受入基準 5 項目以内）に収まる。`src/budget.rs` は呼び出し点に無く、変えずに済む見込み
+  （上の見積もりの範囲に含めたままでよい）。
+
 #### audit-strict-cbor-c3 実装スライス（`original_bytes` と Path HMAC 入力を canonical encoding へ）
 
 > 状態: **未実装**（設計のみ）。c1 が done になってから着手する。判断 Q2・Q3 は kamonabe の選択（Q2 = A、Q3 = 3a・3b・3c とも A）で決まり、以下の実装範囲はその選択で書いている（§9.1 にも反映済み）。
