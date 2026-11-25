@@ -2582,7 +2582,7 @@ impl Engine {
         // （据え直し）が計器を外した後に、この実行の envelope 固定部と共に設定する。
         context.evaluator.set_audit_queue(
             self.audit_budget.max_pending_bytes,
-            crate::audit::estimate_envelope_overhead_bytes(&delivery.language_revision),
+            crate::audit::queue_envelope_overhead_bytes(&delivery.language_revision),
         );
         // Phase 6 R-1: host-call payload 構築へ注入 redaction policy を渡す（§9.1 / R-AT-04）。
         // set_audit_queue と同じく install（据え直し）後に設定する。

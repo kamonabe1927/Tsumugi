@@ -685,13 +685,14 @@ impl_pr    = 261
 [[slice]]
 id         = "audit-strict-cbor-c2"
 title      = "strict deterministic CBOR c2：journal・audit drain queue の byte 計測を encoder の実長へ差し替え（§11）"
-status     = "ready"
+status     = "done"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cbor-c2 実装スライス（journal・audit drain queue の byte 計測を encoder の実長へ差し替え）" }
 acceptance = ["SC-AT-06..10"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 519
+impl_pr    = 522
 order      = 48
 
 [[slice]]
