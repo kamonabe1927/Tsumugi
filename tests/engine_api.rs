@@ -1870,10 +1870,7 @@ mod tree_expr_continuation_e1 {
                 let (caps, buffer) = stdout_caps();
                 let mut evaluator = tsumugi::eval::Evaluator::new();
                 evaluator.set_capabilities(caps);
-                // 埋め込みの実行は transaction（submission journal）を張る。journal が元の値を握るので、
-                // push・index 代入の最初の書き換えは COW の複製になり、版 3 から fuel に出る
-                // （fuel-bulk-charge-a）。同期経路も journal 付きで走らせて、複製の有無を揃える。
-                let result = evaluator.run_repl_submission(&program, text.len() as u64);
+                let result = evaluator.run(&program, text.len() as u64);
                 let stdout =
                     String::from_utf8(buffer.lock().expect("lock").clone()).expect("utf-8");
                 (result, stdout, evaluator.budget_usage().committed.fuel)

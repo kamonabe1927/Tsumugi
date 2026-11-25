@@ -2399,7 +2399,7 @@ fn fbca_at_04_boundary_and_cli_parity() {
     );
 }
 
-/// FBCa-AT-03（REPL）: REPL の入力の中の最初の書き換えの形（前の入力で作った値への `push` など）で、
+/// FBCa-AT-03（REPL）: REPL の入力の中の最初の書き換えの形（前の入力で作った値と、その入力で作った値への `push` など）で、
 /// 2 入力目の「成功する最小の上限 N」が tree と VM で一致する（複製の有無が揃っている）。
 #[test]
 fn fbca_at_03_repl_first_write_in_input_parity() {
@@ -2467,9 +2467,36 @@ fn fbca_at_03_repl_first_write_in_input_parity() {
             "push(xs, 1)\n",
         ),
         ("dict".into(), "let d = {DICT}\n", "d[\"k0\"] = 7\n"),
+        // その入力で作った値への最初の書き換え（両 engine とも複製しない。issue #517）。
+        (
+            "同じ入力の push".into(),
+            "let z = 1\n",
+            "let xs = range(0, 400)\npush(xs, 1)\n",
+        ),
+        (
+            "同じ入力の pop".into(),
+            "let z = 1\n",
+            "let xs = range(0, 400)\npop(xs)\n",
+        ),
+        (
+            "同じ入力の index 代入".into(),
+            "let z = 1\n",
+            "let xs = range(0, 400)\nxs[0] = 7\n",
+        ),
+        (
+            "同じ入力の closure 経由".into(),
+            "let z = 1\n",
+            "let xs = range(0, 400)\nfn f()\n  push(xs, 1)\n  return len(xs)\nend\nf()\n",
+        ),
+        (
+            "同じ入力の dict".into(),
+            "let z = 1\n",
+            "let d = {DICT}\nd[\"k0\"] = 7\n",
+        ),
     ];
     for (label, first, second) in &cases {
         let first = first.replace("DICT", &dict);
+        let second = &second.replace("DICT", &dict);
         let tree = min_fuel(&format!("{label} [tree]"), |n| tree_ok(&first, second, n));
         let vm = min_fuel(&format!("{label} [vm]"), |n| vm_ok(&first, second, n));
         assert_eq!(tree, vm, "[REPL {label}] 2 入力目の N が tree/VM で不一致");
