@@ -2096,14 +2096,54 @@ fn fbca_marginal(label: &str, with: &str, without: &str) -> u64 {
     a - b
 }
 
+/// tree の poll 経路（埋め込みの `Engine::run`。`run_slice` の driver で、callback は式 frame の
+/// `step_callback_call` を通る）で、`total_fuel = fuel` の実行が完了するか。
+fn tree_poll_ok(source: &str, fuel: u64) -> bool {
+    use tsumugi::embedding::CompileOptions;
+    use tsumugi::{
+        EmbeddingContext, EmbeddingEngine, EmbeddingOutcome, EmbeddingRequest, ExecutionId,
+        FakeClock, LinkRequest, MonotonicClock, Source, SourceId,
+    };
+    let clock: Arc<dyn MonotonicClock> = Arc::new(FakeClock::new());
+    let mut budget = BudgetConfig::standard(clock.as_ref()).expect("standard budget");
+    budget.total_fuel = fuel;
+    let execution_id = || ExecutionId::new(7u128.try_into().expect("nonzero"));
+    let engine = EmbeddingEngine::builder().build().expect("build");
+    let script = engine
+        .compile(
+            Source::new(SourceId::new("m").expect("source id"), source),
+            &CompileOptions {
+                retain_source: true,
+            },
+        )
+        .expect("compile");
+    let linked = match engine.link(
+        &script,
+        LinkRequest::new(execution_id(), CapabilitySet::empty(), budget),
+    ) {
+        Ok(linked) => linked,
+        Err(_) => return false,
+    };
+    let mut context = EmbeddingContext::new(&engine);
+    let request = EmbeddingRequest::new(budget, clock)
+        .expect("同じ clock")
+        .with_execution_id(execution_id())
+        .with_capabilities(print_capabilities());
+    matches!(
+        engine.run(&linked, &mut context, request),
+        EmbeddingOutcome::Completed { .. }
+    )
+}
+
 /// FBCa-AT-01: `map` / `filter` / `each` の要素数が 1 増えたときの N の差が 1（走査）+ callback 1 回分で、
-/// 両 engine（tree は同期経路と式 frame の両方）で一致する。
+/// 両 engine で一致する。tree は同期経路（`Evaluator::run`。`assert_fuel_parity` で VM と突合）と
+/// poll 経路（`tree_poll_ok`。callback は式 frame を通る）の両方で同じ差になる。
 #[test]
 fn fbca_at_01_map_filter_each_per_element() {
     // callback 1 回分 = invocation 5 + 本体（1 式の本体 = statement 1 + expression 1）。
     // 要素の走査 1（版 3 で足した課金）を足した 8 が要素 1 つぶんの増分。
     let per_element = 1 + 5 + 2;
-    // (builtin, callback) の組。tree の同期経路（文・let の右辺）と式 frame（式の中に入れ子）の両方を作る。
+    // (builtin, callback) の組。文・let の右辺・式の中に入れ子・関数の中の 4 つの形を作る。
     let cases: &[(&str, &str)] = &[
         ("map", "fn(x) x end"),
         ("filter", "fn(x) true end"),
@@ -2137,7 +2177,23 @@ fn fbca_at_01_map_filter_each_per_element() {
                     &format!("{pre}{base}"),
                 )
             };
+            // poll 経路（式 frame）の N の差。
+            let poll_margin = |m: usize| {
+                let pre = format!("let xs = range(0, {m})\n");
+                let with = format!("{pre}{stmt}");
+                let without = format!("{pre}{base}");
+                min_fuel(&format!("{name} {form} m={m} [poll with]"), |n| {
+                    tree_poll_ok(&with, n)
+                }) - min_fuel(&format!("{name} {form} m={m} [poll without]"), |n| {
+                    tree_poll_ok(&without, n)
+                })
+            };
             let (m3, m4, m10) = (margin(3), margin(4), margin(10));
+            assert_eq!(
+                (poll_margin(3), poll_margin(4), poll_margin(10)),
+                (m3, m4, m10),
+                "[{name} {form}] tree の poll 経路（式 frame）の N の差が同期経路・VM と一致しません"
+            );
             assert_eq!(
                 m4 - m3,
                 per_element,
