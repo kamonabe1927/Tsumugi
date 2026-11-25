@@ -1893,6 +1893,51 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
   - **SC-AT-10（決定性）**: 同じ script・同じ注入 budget・同じ sink 応答列で、`committed_bytes` と yield 位置と envelope 列が 100 回一致する（§15.1）。
 - **想定の変更規模**: `src/audit.rs`・`src/eval.rs`・`src/embedding.rs`・`src/budget.rs` で約 80〜150 行（推定関数の置き換えと呼び出し側）。仕組みは監査の byte 会計 1 つ。
 
+**`ready` にする設計 PR の確かめ**（2026-11-25。c1 が done（実装 PR #261）になった後の main 4d12771 で確かめた。上の実装範囲・範囲外・受入基準・想定の変更規模は変えない。
+判断の候補 Q5・Q6 を設計 PR #519 に出した。選ばれた内容はこの下に追記する）:
+
+- c1 の encoder は `src/audit.rs` の `pub(crate) mod cbor` にあり、c2 が使う入口は `cbor::encoded_len`（size pass、checked）・`cbor::encode_to_vec`
+  （size pass の長さと write pass の byte 長が違えば `CborError::LengthMismatch`）・`cbor::envelope_fixed_len_upper_bound(language_revision)`
+  （sequence を `u64::MAX` の 9 byte とみなした envelope 固定部の上限値。上の queue の計上規則のための入口）の 3 つである。
+  `cbor` モジュールの `#![cfg_attr(not(test), expect(dead_code))]` は c1 の間だけの許可なので、c2 で本番経路から使った時点で外す（残る未使用の項目があれば項目ごとに許す）。
+- 置き換える呼び出し点は次のとおり（main 4d12771）。journal: `AuditJournal::append_normal` の `estimate_encoded_bytes(envelope)`。
+  queue: `Evaluator::audit_queue_admit` / `audit_queue_release`（`src/eval.rs`。`estimate_event_bytes`）、`AuditQueueMeter.envelope_overhead` を張る
+  `src/embedding.rs` の `set_audit_queue` の呼び出し（`estimate_envelope_overhead_bytes`）、`BudgetChargeAccumulator::push_finalized` /
+  `finalized_queue_bytes`（`src/audit.rs`。確定済み `BudgetCharged` の queue 計上）。release は push と同じ規則で event から測り直すので、
+  envelope 固定部の上限値が execution の中で不変である限り「push 時に足した値と同じ値を引く」を満たす。
+- `append_terminal` は現在 byte を数えていない（event 数・byte の通常枠を検査せず、sequence だけを払い出す）。SC-AT-06 の「Terminal は reserve 側」の
+  数え方は判断の候補 Q6 にした。
+- size pass の長さが `u64` を超える（`CborError::LengthOverflow`）event は、その長さが通常枠（`u64` 以下）を必ず超えるので、journal では §11 と
+  SC-AT-08 の「単一 event の実長が通常枠を超える」に当たり `AuditFailure::EventTooLarge` とする。queue の計上は現行の飽和加算と同じく `u64::MAX`
+  に飽和させる（その event の push で queue は上限を超え、yield・backpressure の既存の経路に入る）。これは上の実装範囲から従うもので、判断ではない。
+- naive 推定そのものを固定している `src/` の unit test（`src/audit.rs` の R-AT-08 `r_at_08_estimate_event_bytes_frozen_for_host_call_events` と
+  host-call event の `estimate_event_bytes == 128` の検査、`src/audit.rs`・`src/eval.rs` の B2-AT-10 の検査）は、推定の実装を削除するのにあわせて
+  SC-AT-06（journal の実長）・SC-AT-07（B2-AT-10 の置き換え）の unit test へ置き換える。SC-AT-09 の「無改変で緑」は `tests/audit_*.rs` についての条件で、
+  これらの unit test は対象外である（R-AT-08 は「R-1 では 128 固定を据え置く」ことの確かめで、strict CBOR スライスで naive 推定全体を差し替えることは R-1 小節が予定している）。
+- `estimate_encoded_bytes` は `pub fn` で、`pub mod audit` を通して `tsumugi::audit::estimate_encoded_bytes` として crate の外から呼べる（crate root の
+  `pub use` には無い）。上の実装範囲は「関数名を残すかどうかは実装者に任せる」としているが、公開 API に当たるので判断の候補 Q5 にした。
+  `estimate_envelope_overhead_bytes` / `estimate_event_bytes` は `pub(crate)` なので実装者に任せたままでよい。
+- 規模は手順書 §14.1 の目安（`src/` 1000 行以内・仕組み 1 つ・受入基準 5 項目以内）に収まる。`src/budget.rs` は呼び出し点に無く、変えずに済む見込み
+  （上の見積もりの範囲に含めたままでよい）。
+
+**判断 Q5・Q6 の記録**（判断役が選択（PR #519、Q5=A、Q6=A）。2026-11-25 の設計 PR #519 の追加の commit で反映）:
+
+- **Q5（公開関数 `tsumugi::audit::estimate_encoded_bytes` の扱い）= A**: 公開面から外す（削除するか `pub(crate)` にする。crate 内は `cbor::encoded_len` を使う）。
+  外から呼べる関数を消す破壊的変更なので、c2 の実装 PR で [組み込みAPI仕様](embedding-api.md) §13.1 の表に 1 行記録する（表の文言は crate root の公開型についてだが、
+  公開 API の変更の記録を 1 か所に置く原則 9 に沿って同じ表に書く）。上の実装範囲の「関数名を残すかどうかは実装者に任せる」は、この関数については
+  この決定で置き換わる（`pub(crate)` の 2 関数は実装者に任せたまま）。理由: manifesto 原則 8（名前が「estimate」のまま実長を返す関数や、encoder の長さだけを
+  先に見せる公開関数を増やさない）。c1 小節の範囲外「encoder の公開は行わない」（公開面は sink 必須化・record/replay のスライスで決める）と食い違わないのは A だけ。
+  alpha の破壊的変更は §13.1 への記録を条件に受容される。採らなかったもの: B（名前と意味が食い違う関数を公開面に残し、encoder の公開を事実上先に行う）、
+  C（公開関数を新しく足し、後続へ送った公開面の判断を c2 で先取りする）。
+- **Q6（Terminal の byte の数え方）= A**: `append_terminal` で Terminal の実長を size pass で測り、journal の非公開 field（例 `terminal_bytes`）に記録する。
+  上限とは比べず、c4 までは reserve（`terminal_reserve_bytes`）を超えても append する。SC-AT-06 の「Terminal は reserve 側」は、`committed_bytes + terminal_bytes` が
+  全 envelope の実長の和と一致することで確かめる。公開 API は変わらない。理由: §11「Started と Terminal も encoded bytes へ含める」「Terminal は専用 reserve だけを使い、
+  通常上限を使い切っても必ず append できる」と §10.1 を両方満たすのは A だけで、SC-AT-06 を c2 の中で検証でき受入基準を動かさずに済む（manifesto 原則 7・原則 8）。
+  採らなかったもの: B（§11 の「Terminal も数える」が c4 まで満たされず、受入基準の範囲が変わる）、C（Terminal を欠いた監査列を作り、原則 6・7 と §10.1・§11 に反しうる）。
+  - **残る逸脱**: c4 までの間は「Terminal の実長が `terminal_reserve_bytes` を超えても append する」ことが §11 の reserve に対する逸脱として残る
+    （Terminal が reserve を超えうる状態は c2 の前から同じで、A が新しく上限を緩めるわけではない。60 KiB 縮退と Terminal の `Emergency` は c4、SC-AT-18）。
+    c2 の done PR は、上の「c2 の done PR で行う逸脱一覧の更新」に加えて、逸脱一覧にこの行（§11、延期先 c4）を足す。c4 の done PR でその行を削除する。
+
 #### audit-strict-cbor-c3 実装スライス（`original_bytes` と Path HMAC 入力を canonical encoding へ）
 
 > 状態: **未実装**（設計のみ）。c1 が done になってから着手する。判断 Q2・Q3 は kamonabe の選択（Q2 = A、Q3 = 3a・3b・3c とも A）で決まり、以下の実装範囲はその選択で書いている（§9.1 にも反映済み）。
