@@ -3337,6 +3337,62 @@ c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR
   `builtin_pop_update`（`src/builtin_core.rs`）は引き続きどこからも呼ばれていないので課金しない。
 - 実装役のブランチ `feat/fuel-bulk-charge-a`（origin の cf30a53。main 2b8e7fa から 1 commit、WIP）は、main 65437cd へ載せ直して再開の土台にしてよい。
 
+**3 回目に実装で止まった後の判断の記録**（[issue #517](https://github.com/kamonabe1927/Tsumugi/issues/517)、判断役が選択（issue #517、Q1=A）。2026-11-25 の設計 PR で反映）:
+
+- 実装 PR #516（f4f77df）のレビューで、REPL の同じ入力の中で作った値への最初の `push`・index 代入で tree だけが複製すること（1 入力目 `let z = 1`、
+  2 入力目 `let xs = range(0, 400)` + `push(xs, 1)` の最小の成功する上限 N が tree 819・VM 419）が見つかり、上の FBCa-AT-03 の条件（判断 Q3 = A）と
+  「2 回目の `ready` に戻す設計 PR の確かめ」の注記（REPL の入力の中の最初の書き換えの形で食い違えば止める）に当たった。前の入力で作った値は両 engine とも
+  複製するので、`fbca_at_03_repl_first_write_in_input_parity` はこの形を見ていなかった。同じ原因で、tree の `Engine::run`（どの execution も journal を張る）でも
+  その execution で作った値の最初の書き換えが複製になり、CLI の `Evaluator::run` と変わる。PR #516 は `tests/engine_api.rs` の `run_recursive` を journal 付きの
+  `run_repl_submission` に変えてこの差を揃えていたが、spec にも PR の「仕様外で判断した点」にも記録していなかった。
+- **Q1 = A（journal が元の値を握る対象を両 engine で揃える修正スライスを先に足し、PR #516 は止めて、修正スライスが done になってから本スライスを出し直す）**:
+  食い違いの元は課金の規則ではなく、journal がその入力・execution で作った cell の元の値も握るという engine 差である。直さずに版 `3` を固定すると、
+  同じ入力の fuel が backend で変わる状態を課金表の版に焼き込む（[マニフェスト](manifesto.md) 原則 5、優先順位の表「一貫した意味論 > backend 固有の最適化」
+  「再現可能な検証」、判断 Q3 = A の決定記録「engine 差を版 3 に固定しない」）。§10 の rollback は execution 開始時点まで戻すもので、その入力・execution で
+  作った値の旧 value を握る必要は規範に無いので、複製しない側へ揃えても §10・判断 Q3 = A・§4.1 の「copy 1 / element」を変えずに済み、起きた複製だけが
+  fuel に出る（原則 3）。issue #502・#510 の判断（Q1 = A）と同じ進め方である。握らない対象の決め方・直し方・`run_recursive` を元の `run` に戻せるかは、
+  修正スライスの設計で確かめる事項とされた。採らなかった案: B（journal による最初の複製を版 3 の課金に含め、engine 差を逸脱一覧に載せて PR #516 のまま進める）は、
+  同じ入力の fuel が backend で変わる状態を版 3 に固定するので原則 5 に反しうる。FBCa-AT-03 の止める条件とも食い違う。C（VM の journal もその入力で作った値の
+  元の値を握るように寄せる）は、rollback に要らない旧 value を VM にも握らせ、一意所有の値の最初の書き換えを O(n) の複製にするので原則 1 に反しうる
+  （優先順位の表「制御可能な最悪時負荷」。issue #510 で複製する側へ寄せる案を採らなかったのと同じ理由）。
+- 反映: 修正スライス `fix-cow-copy-parity-journal`（§14 の小節。原因は main 2d412aa で確かめた。VM の `checkpoint_cell` もその入力で作った captured cell の元の値を
+  握っていたので、両 engine の journal を範囲にした）を足し、本スライスの `depends_on` に加えた。`depends_on` が done でなくなったので、`slices.toml` の本スライスは
+  `ready` から `todo` に戻した（documentation-guide「ready の条件」3）。範囲・範囲外・受入基準・想定の変更規模は変えない。`fix-cow-copy-parity-journal` が
+  done になった後、本スライスを `ready` に戻す設計 PR を出す。その設計 PR で、`tests/engine_api.rs` の `run_recursive` を main と同じ `Evaluator::run` のまま
+  使えるか（修正後は `Engine::run` もその execution で作った値を複製しないので、`run_repl_submission` に変える理由が無くなる見込み）を確かめる。
+  実装 PR #516（ブランチ `feat/fuel-bulk-charge-a-2`）は、再開するときの土台にしてよい。
+
+**3 回目の `ready` に戻す設計 PR の確かめ**（2026-11-25。`fix-cow-copy-parity-journal` が done（実装 PR #521）になった後の main 384cc6e で確かめた。
+範囲・範囲外・受入基準・想定の変更規模は変えない。判断の候補は無い）:
+
+- `fix-cow-copy-parity-journal` で、tree の submission journal（`SubmissionJournal`、`src/env.rs`）は journal を張っている間に `Env::set` が作った cell を
+  `created_cells` に記録し、`Env::journal_cell` はその cell の元の値を握らなくなった。VM の REPL journal（`ReplStackCheckpoint`、`src/vm.rs`）も
+  `ensure_local_cell` が作った cell を `created_cells` に記録し、`checkpoint_cell` はその cell の元の値を握らない（開始時点にあった stack slot を昇格するときの
+  `checkpoint_stack_slot(at)` は残る）。issue #517 で見つかった食い違い（REPL の同じ入力で作った値への最初の `push`・index 代入で tree だけが複製する）と、
+  その入力で作った captured cell で両 engine が複製していた形、tree の `Engine::run` が `Evaluator::run` と変わる形は、`tests/cow_copy_journal.rs` の
+  CCJ-AT-01（top-level・関数の local・同じ入力で捕捉した binding の 3 つの形の `push`・`pop`・List / Dict の index 代入で、両 engine と `Engine::run` が複製しない
+  こと。`let ys = xs` の共有と前の入力からある値は両 engine とも 1 回だけ複製すること）と CCJ-AT-02（issue #517 の表の形と深度の読み直しの形を含めた REPL の
+  入力ごとの最小の上限 N と N − 1 の失敗の一致、`Engine::execute` と `Evaluator::run` の `committed.fuel` の一致）で確かめ済みである（main 384cc6e で
+  `cargo test --test cow_copy_journal` が 7 件とも緑）。したがって FBCa-AT-03 の条件は、issue #502・#510・#517 で見つかった経路について満たされる前提で
+  実装に入れる。ほかの経路で tree と VM の複製の有無が食い違えば、従来どおり FBCa-AT-03 の条件（判断 Q3 = A）で止める。
+- 実装役は FBCa-AT-03 の確かめに、REPL の入力の中の最初の書き換えとして「前の入力で作った値」（両 engine とも 1 回複製する）と「その入力で作った値」
+  （両 engine とも複製しない）の両方の形を含める。PR #516 の `fbca_at_03_repl_first_write_in_input_parity` は前者しか見ていなかった（issue #517）。
+  食い違えば同じ条件で止める（受入基準の文言は変えない）。
+- 判断の記録（issue #517）の「`run_recursive` を `Evaluator::run` のまま使えるか」: 使える。main の `tests/engine_api.rs` の `run_recursive` は
+  `Evaluator::run` のままで、修正後は `Engine::run` もその execution で作った値を複製しない（CCJ-AT-01 の `Engine::run`、CCJ-AT-02 の `committed.fuel` の
+  一致）。したがって PR #516 が `run_recursive` を journal 付きの `run_repl_submission` に変えた差分は要らない。再開するときは元の `Evaluator::run` に戻し、
+  それでも期待値が両 engine・両経路で揃うことを確かめる（変える必要が残れば、PR 本文の「仕様外で判断した点」に理由を書く）。
+- 上の「設計時の注記」（main 87166f4）と 1・2 回目の確かめ（main 6f9e556・65437cd）は main 384cc6e でも成り立つ。65437cd からの `src/` の差分は、
+  `fix-cow-copy-parity-journal` の `src/env.rs`・`src/vm.rs` の journal の記録対象と、audit-strict-cbor-c2 の監査の byte 計測（`src/audit.rs`・
+  `src/eval.rs`・`src/embedding.rs`）、`src/builtin_core.rs` のコメントだけで、次は変わっていない: `ChargeKind` と `FuelSchedule`・`FUEL_ACCOUNTING_REVISION`
+  （`2`）・`DEFAULT_TOTAL_FUEL`（`src/budget.rs`）、`Value::detach_list` / `detach_dict` の in place の条件と複製の枝（`src/value.rs`）、
+  `Value::new_iter_str_list`、`dispatch` と `apply_pure_core_builtin`・`builtin_collection`（`src/builtin.rs`）、VM の `exec_builtin` の `map` / `filter` / `each`、
+  `BudgetLedger::track_result`。`builtin_pop_update`（`src/builtin_core.rs`）は引き続きどこからも呼ばれていないので課金しない。
+- 実装 PR #516（ブランチ `feat/fuel-bulk-charge-a-2`、head f4f77df。main 2d412aa の上）は一時停止（`loop:paused`）のままで、本 PR のマージ後に loop-runbook §6.6 の
+  再開で main 384cc6e 以降へ取り込んで進める。取り込むときは上の 2 点（REPL の入力の中で作った値の形を FBCa-AT-03 に足すこと、`run_recursive` を戻すこと）を
+  直す。`fix-cow-copy-parity-journal` は既存テストの期待値を変えていない（実装 PR #521 の CCJ-AT-04）ので、取り込みで期待値の食い違いは出ない見込みである。
+  PR #516 の期待値のうち、REPL・`Engine::run` の中で作った値の最初の書き換えの複製を含めて測ったものがあれば、取り込み後に測り直す。
+
 ### fix-contains-budgeted-equality 実装スライス（`contains` の等価判定を予算付き比較へ）
 
 issue #290 から作ったスライス（不具合の修正、`slices.toml` の `fix-contains-budgeted-equality`）。issue の仕分けで「受け入れ」とし、判断は要らないとした部分である（[言語仕様](language-spec.md)「等価比較」の「この規則は`contains`のように等価判定を使う組み込み関数でも共有する」で直し方が決まる）。
@@ -4093,6 +4149,85 @@ context baseline を課金済みの状態である。facade の `Engine::run` �
     変更なしで通る。期待値を変えたテストは PR 本文に列挙する。
 - **想定の変更規模:** `src/` 約 10〜40 行（`src/vm.rs` の `ensure_local_cell` と doc）。テストは 150〜300 行。触る仕組みは「VM の captured cell への昇格」1 つ。
   受入基準 4。§14.1（[開発ループ手順書](loop-runbook.md)）に収まる。
+
+### fix-cow-copy-parity-journal 実装スライス（transaction の journal が作った cell の元の値を握らず、COW の複製の有無を tree と VM で揃える）
+
+[issue #517](https://github.com/kamonabe1927/Tsumugi/issues/517)（`needs-design`。fuel-bulk-charge-a の実装 PR #516 のレビューで FBCa-AT-03 の確かめに当たった）から作ったスライス（親 REV-015、`slices.toml` の `fix-cow-copy-parity-journal`）。issue #517 の判断（Q1 = A）は、journal が元の値を握る対象を両 engine で揃える修正スライスを先に足し、PR #516 は止めて、このスライスが done になってから fuel-bulk-charge-a を出し直すというもの（判断の記録は fuel-bulk-charge-a 小節の後ろ）。目標の規範は §2 の不変条件 5（tree と VM で同じ charge 列）、§5.2（COW で新 object を作るときの課金）、§10（rollback は execution 開始時点まで）で、現在の差は冒頭の逸脱一覧の行にある。
+
+- **原因の確かめ**（判断 Q1 = A の「修正スライスの設計で確かめる事項」。main 2d412aa で確かめた。issue #517 の「原因の見立て」は未確認だった）:
+  - tree: binding はすべて cell で、cell を作るのは `Env::set`（`src/env.rs` の `Value::new_cell`）だけである。cell を書き換える経路（`Env::update`、
+    `src/builtin.rs` の `push`・`pop`、`src/eval.rs` の index 代入）は書き換えの前に `Env::journal_cell` を呼び、`journal_cell` は cell の出どころを見ずに
+    元の値を clone して undo log に積む。その入力で作った cell でも元の値の `Rc` を journal が握るので strong が 2 になり、最初の書き換えで
+    `Value::detach_list` / `detach_dict` が backing を複製する。journal は REPL の入力（`Evaluator::run_repl_submission`）と、埋め込み API の
+    `Engine::run`（`run_transactional`）と handle 経路（どちらも `begin_execution_from_graph(.., true, ..)`）で張られ、CLI の `Evaluator::run` では張られない。
+  - VM: その入力で作った top-level・local の binding は stack slot で、`checkpoint_stack_slot` は `index < checkpoint.stack_len`（入力の開始時点にあった slot）
+    だけを記録するので握らない。一方で cell を作るのは `ensure_local_cell`（`src/vm.rs`）だけで、cell を書き換える経路は書き換えの前に `checkpoint_cell` を呼び、
+    `checkpoint_cell` も cell の出どころを見ずに元の値を記録する。したがって、その入力で作って closure に捕捉した binding（cell に昇格したもの）の最初の
+    書き換えは VM でも複製する。tree だけを直すと、この形で新しい engine 差が生まれる（issue #517 の見立ては tree の側だけだった）。
+  - 測ったもの（`peak_heap_bytes`。要素数 1000 の `range` の結果。REPL の各入力を `BudgetConfig::for_legacy(1_000_000, 10_000_000)` で実行。1 入力目は
+    `let z = 1`。差は List body（24 + 32 × 1000）の複製 1 回分）:
+
+    | 2 入力目 | tree | VM |
+    |---|---:|---:|
+    | `let xs = range(0, 1000)`（書き換えない） | 32527 | 32520 |
+    | 同 + `push(xs, 1)` | 64957 | 32968 |
+    | 同 + `xs[0] = 5` | 64793 | 32696 |
+    | 関数の中で `let ys = range(0, 1000)` + `push(ys, 1)` | 65567 | 33400 |
+    | 同（書き換えない） | 33137 | 32952 |
+    | `let xs = range(0, 1000)` + `xs` を捕捉した関数の中で `push(xs, 1)` | 65631 | 65536 |
+    | 同（書き換えない） | 33137 | 32968 |
+    | 1 入力目で `let xs = range(0, 1000)`、2 入力目で `push(xs, 1)`（前の入力の値） | 64550 | 64624 |
+    | 同（2 入力目は `let q = 1`） | 32495 | 32216 |
+
+    その入力で作った binding では tree だけが、その入力で作った captured cell では両 engine が複製し、前の入力からある値では両 engine が複製する。
+  - rollback に要る値が journal の開始時点にあった cell だけで足りることの確かめ: §10 の rollback は execution 開始時点の language-state へ戻す。
+    その入力・execution の中で作った cell に、開始時点の language-state から届くのは、開始時点にあった場所（tree の scope の binding と cell、VM の
+    開始時点の stack slot・`locals_cells`・cell）へ書き込んだときだけで、その書き込みはどれも journal（tree の `journal_scope_entry`・`journal_cell`、VM の
+    `checkpoint_stack_slot`・`checkpoint_cell`・frames の checkpoint）が元の値を記録している。rollback でそれらを戻すと作った cell には届かなくなるので、
+    作った cell の中身を戻す必要は無い。作った cell を外から握るのは、その execution の中で作った closure と scope だけである。
+- **実装範囲:**
+  1. tree の submission journal（`SubmissionJournal`、`src/env.rs`）に、journal を張っている間に作った cell を記録し（作る場所は `Env::set` の 1 か所）、
+     `Env::journal_cell` はその cell の元の値を記録せずに返す（entry も journal entry の heap token も作らない）。cell の見分け方は実装に任せる
+     （例: 既存の `seen_cells` と同じ `Rc::as_ptr` の集合）。ポインタの集合で見分けるときは、開始時点にあった cell が journal の間に解放されて番地を
+     作った cell に使い回されても誤らないこと（開始時点にあった cell を「作った cell」と見なさないこと）を doc に根拠つきで書く。
+  2. VM の REPL journal（`ReplStackCheckpoint`、`src/vm.rs`）でも同じにする。`ensure_local_cell` が journal の間に作った cell を記録し、`checkpoint_cell` は
+     その cell の元の値を記録しない。`ensure_local_cell` が開始時点にあった stack slot を昇格するときの `checkpoint_stack_slot(at)` は今のまま残す
+     （その slot の元の値は rollback に要る。前の入力からある値の最初の書き換えは、今と同じく両 engine とも 1 回複製する）。
+  3. 課金点・課金値・`fuel_accounting_revision`・`language_revision` は変えない。複製が無くなる経路では、複製に伴っていた heap の課金（`Tracked::new`）と、
+     複製した backing の上で起きていた深度の読み直しの fuel が無くなり、記録しなくなった cell の journal entry（`rollback_journal_entry(0)` = 48 byte）の heap も
+     その入力・execution の終わりまで残らなくなる。§2 の不変条件 5 から外れた engine 差と、`Engine::run` が `Evaluator::run` と変わる差を直すもので、
+     課金表の変更ではないので版は上げない（`fix-cow-copy-parity`・`fix-cow-copy-parity-upvalue` と同じ扱い）。
+  4. 冒頭の逸脱一覧の、journal が作った cell の元の値を握る行を、done にする実装 PR で削除する。
+- **範囲外:**
+  - COW の複製・反復列の fuel の課金（fuel-bulk-charge-a）。本スライスは複製の有無を揃えるだけで、fuel の課金点は足さない。
+  - 前の入力・execution の開始時点からある値の最初の書き換えの複製。journal が元の値を握るのは §10 の rollback に要るためで（§10「旧 value の保持は heap budget へ
+    課金する」）、両 engine で揃っている。
+  - 共有中の backing（`let ys = xs` の後の書き換えなど）の 1 回の複製。§5.2 どおりで、両 engine で一致している。
+  - journal の binding の記録（tree の `journal_scope_entry`、VM の frames の checkpoint）。値の `Rc` を握らず、複製の有無に関わらない。
+- **受入基準:**
+  - **CCJ-AT-01（その入力・execution で作った cell の最初の書き換えは一意所有の backing を複製しない）:** REPL の入力の中で作った一意所有の List（`range` の結果、
+    要素数 1000）への `push`・`pop`・index 代入と、Dict（entry 数 1000）への index 代入を k 回（1・5）行う入力を、top-level の binding・関数の local・
+    同じ入力で closure に捕捉した binding の 3 つの形で実行し、その入力の後の `peak_heap_bytes` が、各 engine の中で、書き換えない入力の peak を List / Dict body の
+    複製ぶん超えない。同じ script を tree の `Engine::run` で実行した `peak_heap_bytes` も、同じ形で複製ぶん超えない。`let ys = xs` で共有した場合と
+    前の入力で作った値は、両 engine とも 1 回だけ複製する（`ys` と rollback 後の値は変わらない）。確かめ方: in-process で両 engine の usage を読む統合テスト
+    （`tests/scaling.rs` の `peak_heap_after` の形に REPL の入力を足す。`Engine::run` は `tests/engine_api.rs`）。tree と VM の間は §5.3 の A-1 どおり
+    複製の有無の一致にとどめ、byte 単位の一致は求めない。
+  - **CCJ-AT-02（fuel・出力の一致）:** CCJ-AT-01 の各形と issue #517 の表の 4 本（`xs[0] = 1`、関数の local、要素数 40 を含む）で、REPL の入力ごとに tree と VM の
+    `committed.fuel` が完全に一致し、上限 N と N − 1 の成功・失敗の境界と stdout・stderr・exit code が一致する。深度の読み直しが起きる形（最も深い要素を
+    `pop` で取り除く）を含める。同じ script の tree の `Engine::run` と `Evaluator::run` の `committed.fuel` も一致する。確かめ方: `tests/differential.rs` の
+    paired test（`tree_usage_per_input` と `ccu_at_03_vm_repl_rollback_after_promotion` の REPL の入力の形）と `tests/engine_api.rs`。
+  - **CCJ-AT-03（rollback）:** 両 engine の REPL で、その入力で作った binding・captured cell を書き換えた後に失敗する入力が、入力開始時点へ戻る（作った binding は
+    残らず、次の入力で同じ名前を定義し直せる）。その入力で作った closure・値を、前の入力からある binding（List への `push`・代入）へ書き込んでから失敗する入力も、
+    前の入力からある binding が元の値へ戻る。前の入力からある binding を書き換えて失敗する入力と、VM で前の入力からある top-level の slot を入力の中で
+    昇格して書き換えて失敗する入力（CCU-AT-03 の形）も元の値へ戻る。`Engine::run` で同じ context を再利用し、失敗する execution の後に context が
+    execution 開始時点のままであることも確かめる。確かめ方: 既存の REPL の rollback のテストの形（`tests/integration.rs` の `heap_released_after_repl_rollback_in_both_engines`・
+    `tests/differential.rs` の `ccu_at_03_vm_repl_rollback_after_promotion`）と `tests/engine_api.rs` の rollback のテスト。
+  - **CCJ-AT-04（既存の挙動の維持）:** 既存の golden fixture・`tests/differential.rs`・`tests/scaling.rs`・`tests/engine_api.rs`・REPL の rollback のテストが、
+    heap の期待値の変化（その入力・execution で作った cell の最初の書き換えで複製が消えたぶんと、記録しなくなった journal entry のぶん（実装範囲 3））を除いて
+    変更なしで通る。期待値を変えたテストは PR 本文に列挙する。
+- **想定の変更規模:** `src/` 約 30〜80 行（`src/env.rs` の `SubmissionJournal`・`Env::set`・`journal_cell` 約 15〜40、`src/vm.rs` の `ReplStackCheckpoint`・
+  `ensure_local_cell`・`checkpoint_cell` 約 15〜40、doc）。テストは 250〜400 行。触る仕組みは「transaction の journal の記録対象」1 つ（tree と VM の journal が
+  同じ規則を持つ）。受入基準 4。§14.1（[開発ループ手順書](loop-runbook.md)）に収まる。
 
 ## 15. 境界受入テスト
 

@@ -597,6 +597,7 @@ CHANGELOG は置いていないので、公開 API の変更の記録は公開 A
 |---|---|---|---|
 | `YieldReason::AuditBackpressure` と `AuditFailure::BackpressureDeadline` の追加（B-1） | 公開 enum を網羅的に `match` する外部コード | bump なし（既存 tag 5/6・既存 `AuditYieldReason::AuditBackpressure`） | [決定性・実行時監査仕様](determinism-and-audit.md) の A-1 実装スライスの「`AuditBackpressure`-yield 配線（§10/§10.2、B-1、実装済み）」の項 |
 | 簡略 `AuditPayloadField` の撤去と `AuditPayload.fields` の §9.1 の `BTreeMap<String, AuditField>` への差し替え（R-1a） | `AuditPayload`・`AuditPayloadField` に依存する外部コード | bump なし（CBOR tag 表・charge table・script 観測値は不変） | [決定性・実行時監査仕様](determinism-and-audit.md) の R-1 実装スライス |
+| 公開関数 `tsumugi::audit::estimate_encoded_bytes`（`pub mod audit` 経由で crate root の `pub use` には無い）の削除（audit-strict-cbor-c2）。journal・audit drain queue の byte 計測は §9.2 の encoder の実 encode 長に差し替え、naive 推定の関数は残さない | `tsumugi::audit::estimate_encoded_bytes` を呼ぶ外部コード | bump なし（CBOR tag 表・charge table・script 観測値は不変） | [決定性・実行時監査仕様](determinism-and-audit.md) の audit-strict-cbor-c2 実装スライス（判断 Q5=A） |
 
 この節は loop:drift #318 の D-22 で足した。受容の記録を roadmap でなく spec に置くこと（Q1=A）は判断役が選択（issue #318）した。
 理由: ロードマップは「完了の履歴」を持たないと運用ガイドが定めており、破壊的変更を受容した設計判断はマニフェスト原則 9（動機・保証・

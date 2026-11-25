@@ -596,6 +596,27 @@ issues     = [510]
 impl_pr    = 512
 order      = 43
 
+# issue #517（needs-design、fuel-bulk-charge-a の実装 PR #516 のレビューで FBCa-AT-03 の確かめに当たった）の判断 Q1=A で足した修正スライス。
+# REPL の入力・Engine::run の execution の中で作った cell の最初の書き換えで、tree の submission journal（Env::journal_cell）と
+# VM の REPL journal（checkpoint_cell）がその cell の元の値を握るので一意所有の backing を複製する。tree は binding がすべて cell なので
+# その入力で作った binding の最初の push・index 代入で複製し、VM は stack slot の binding では複製しない（captured cell では両方が複製する。
+# main 2d412aa で確かめた）。journal が元の値を握る対象を「journal の開始時点にあった cell」に揃えてから fuel-bulk-charge-a の COW の複製の課金を入れる。
+# fuel-bulk-charge-a の depends_on に加え、a は ready から todo に戻した（issues = [502, 510, 517]）。空きを作るため、
+# fuel-bulk-charge-a・b・c と audit-strict-cbor-c2・c3・c4・audit-sink-required・audit-fs-builtin-scope を 44〜51 → 45〜52 に付け直した（相対順は変えていない）。
+# 見積もり: src/ 約 30〜80 行、触る仕組みは transaction の journal の記録対象 1 つ、受入基準 4。
+[[slice]]
+id         = "fix-cow-copy-parity-journal"
+title      = "REPL・Engine::run の journal がその入力・execution で作った cell の元の値を握らず、最初の push・index 代入の COW の複製を tree と VM で揃える"
+status     = "done"
+parent     = "REV-015"
+spec_slice = "exec-control Slice 6"
+spec       = { doc = "docs/execution-control.md", section = "fix-cow-copy-parity-journal 実装スライス（transaction の journal が作った cell の元の値を握らず、COW の複製の有無を tree と VM で揃える）" }
+acceptance = ["CCJ-AT-01..04"]
+design_pr  = 518
+issues     = [517]
+impl_pr    = 521
+order      = 44
+
 # fuel-bulk-charge は 1 PR に収まらない（触る仕組み 3・受入基準 10 超・src/ 約 900〜1400 行、loop-runbook §14.1）ため
 # fuel-bulk-charge-a / -b / -c に分割した（spec「fuel-bulk-charge の sub-slice 分割」、設計 PR #501。
 # 割り方と a の課金の規則は判断役が選択（PR #501、Q1・Q2=A））。元の id は置き換えて残さない。「fuel-bulk-charge が done」は a・b・c がともに done。
@@ -606,6 +627,9 @@ order      = 43
 # （spec 小節の「ready に戻す設計 PR の確かめ」。範囲・受入基準は変えず、design_pr をその PR にした。初版の設計 PR は #501）。
 # issue #510 で再び todo に戻し、fix-cow-copy-parity-upvalue が done（#512）になった後の設計 PR で再び ready に戻した
 # （spec 小節の「2 回目の ready に戻す設計 PR の確かめ」。範囲・受入基準は変えず、design_pr をその PR にした。1 回目に戻した設計 PR は #509）。
+# issue #517 で 3 回目に todo に戻した（実装 PR #516 のレビューで FBCa-AT-03 の確かめに当たった。depends_on に fix-cow-copy-parity-journal を加え、
+# issues = [502, 510, 517]）。fix-cow-copy-parity-journal が done（#521）になった後の設計 PR で 3 回目に ready に戻した
+# （spec 小節の「3 回目の ready に戻す設計 PR の確かめ」。範囲・受入基準は変えず、design_pr をその PR にした。2 回目に戻した設計 PR は #513）。
 [[slice]]
 id         = "fuel-bulk-charge-a"
 title      = "map/filter/each と要素を作る・複製する操作（range/keys/values/slice/reverse/split・COW の複製・for の反復列）の per-element fuel（§4.1 1/element）・fuel_accounting_revision 2 → 3・既定 total_fuel 再測定"
@@ -614,11 +638,11 @@ parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fuel-bulk-charge-a 実装スライス（`map` / `filter` / `each` と要素を作る・複製する操作の per-element fuel、版 2 → 3）" }
 acceptance = ["FBCa-AT-01..05"]
-depends_on = ["F-2c", "fix-cow-copy-parity", "fix-cow-copy-parity-upvalue"]
-design_pr  = 513
-issues     = [502, 510]
+depends_on = ["F-2c", "fix-cow-copy-parity", "fix-cow-copy-parity-upvalue", "fix-cow-copy-parity-journal"]
+design_pr  = 523
+issues     = [502, 510, 517]
 impl_pr    = 516
-order      = 44
+order      = 45
 
 # 見積もり: src/ 約 400〜600 行、触る仕組みは budget の byte の課金 1 つ、受入基準は設計で決める（5 以内）。
 # scan だけの string builtin の扱いと host function の引数・結果の serialize の数え方は、ready にする設計 PR で決める。
@@ -629,7 +653,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["fuel-bulk-charge-a"]
-order      = 45
+order      = 46
 
 # 見積もり: src/ 約 200〜350 行、触る仕組みは compile・link の fuel の課金 1 つ、受入基準は設計で決める（5 以内）。
 # compile・link の fuel の払い手（execution の台帳か LinkRequest の budget か）は、ready にする設計 PR で決める。
@@ -640,12 +664,14 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["fuel-bulk-charge-b"]
-order      = 46
+order      = 47
 
 # audit-strict-cbor（strict deterministic CBOR、§9.2）は 1 PR の大きさの目安に収まらないため、
 # c1〜c4 の 4 スライスへ分割した（spec「audit-strict-cbor の sub-slice 分割」）。元の id は置き換えて残さない。
 # 「strict CBOR スライス」と書かれた既存の延期先は c1〜c4 全体を指す。
 # c2〜c4 は depends_on が done でないため todo。c3・c4 の判断（Q2〜Q4）は kamonabe の選択で決まり、spec 小節に記録済み。
+# c2 は c1 が done（#261）になった後の設計 PR で ready にした（spec 小節の「`ready` にする設計 PR の確かめ」。範囲・受入基準は変えず、
+# design_pr をその PR（#519）にした。初版の設計 PR は #256）。
 [[slice]]
 id         = "audit-strict-cbor-c1"
 title      = "strict deterministic CBOR c1：§9.2 encoder 本体（schema v1 全型・size pass / write pass、crate 内部、未配線）"
@@ -661,14 +687,15 @@ impl_pr    = 261
 [[slice]]
 id         = "audit-strict-cbor-c2"
 title      = "strict deterministic CBOR c2：journal・audit drain queue の byte 計測を encoder の実長へ差し替え（§11）"
-status     = "todo"
+status     = "done"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cbor-c2 実装スライス（journal・audit drain queue の byte 計測を encoder の実長へ差し替え）" }
 acceptance = ["SC-AT-06..10"]
 depends_on = ["audit-strict-cbor-c1"]
-design_pr  = 256
-order      = 47
+design_pr  = 519
+impl_pr    = 522
+order      = 48
 
 [[slice]]
 id         = "audit-strict-cbor-c3"
@@ -680,7 +707,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-11..15"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 48
+order      = 49
 
 [[slice]]
 id         = "audit-strict-cbor-c4"
@@ -692,7 +719,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-16..20"]
 depends_on = ["audit-strict-cbor-c2", "audit-strict-cbor-c3"]
 design_pr  = 256
-order      = 49
+order      = 50
 
 [[slice]]
 id         = "audit-sink-required"
@@ -701,7 +728,7 @@ status     = "todo"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 depends_on = ["A-1"]
-order      = 50
+order      = 51
 
 [[slice]]
 id         = "audit-fs-builtin-scope"
@@ -710,7 +737,7 @@ status     = "todo"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 depends_on = ["R-1a"]
-order      = 51
+order      = 52
 
 # loop:drift #342 の D-52（機械的）で逸脱一覧に載せた「fs 以外の host call は triple を出さない」の延期先。未設計。
 # order は fs builtin の監査範囲（50）の次に置いた（同じ監査の host-call 範囲の拡張のため）。
