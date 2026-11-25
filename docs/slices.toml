@@ -639,7 +639,7 @@ spec_slice = "exec-control Slice 6"
 spec       = { doc = "docs/execution-control.md", section = "fuel-bulk-charge-a 実装スライス（`map` / `filter` / `each` と要素を作る・複製する操作の per-element fuel、版 2 → 3）" }
 acceptance = ["FBCa-AT-01..05"]
 depends_on = ["F-2c", "fix-cow-copy-parity", "fix-cow-copy-parity-upvalue", "fix-cow-copy-parity-journal"]
-design_pr  = 513
+design_pr  = 523
 issues     = [502, 510, 517]
 order      = 45
 
