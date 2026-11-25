@@ -782,6 +782,7 @@ spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "vm-parity-diff-a 実装スライス（tree と VM の網羅的な差分テストの土台と、既知の差分一覧の CI gate）" }
 acceptance = ["VPD-AT-01..06"]
 order      = 27
+design_pr  = 526
 
 [[slice]]
 id         = "vm-parity-diff-b"
