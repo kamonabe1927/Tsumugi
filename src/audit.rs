@@ -2827,6 +2827,46 @@ mod tests {
                 poll_index: 0,
                 usage: BudgetUsage::default(),
             },
+            AuditEvent::CapabilityDecision {
+                operation_id: 0,
+                call_id: Some(0),
+                capability: "filesystem".to_string(),
+                action: "write_file".to_string(),
+                resource: AuditPayload {
+                    fields: [(
+                        "path".to_string(),
+                        AuditField::HmacSha256 {
+                            class: AuditFieldClass::Path,
+                            digest: [0xabu8; 32],
+                            original_bytes: 11,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+                decision: CapabilityDecisionKind::Allow,
+                rule_id: "mount-granted".to_string(),
+            },
+            AuditEvent::HostCallFinished {
+                operation_id: 0,
+                call_id: 0,
+                outcome: HostCallOutcome::Success,
+                response: AuditPayload {
+                    fields: [(
+                        "path".to_string(),
+                        AuditField::HmacSha256 {
+                            class: AuditFieldClass::Path,
+                            digest: [0xabu8; 32],
+                            original_bytes: 11,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+                response_bytes: 0,
+                error_code: None,
+                effect_status: EffectStatus::Committed,
+            },
             charged,
         ]
     }
