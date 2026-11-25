@@ -793,13 +793,40 @@ spec_slice = "determinism Slice 6"
 depends_on = ["vm-parity-diff-a"]
 order      = 31
 
+# audit-vm-triple（VM の audit triple 対応）は §6.7 のフェーズのスライスとして 90 分に収めるため a・b・c に分けた
+# （spec「audit-vm-triple のスライス分割」小節に理由）。元の id は置き換えて残さない。
+# a: VM の fs host call で host-call triple と flush 点を buffer へ積む（facade の配線なし）。見積もり src/ 約 120〜250 行、
+#   tests 約 250〜400 行、受入基準 5（AVT-AT-01..05）。§6.7 のとおり §14.1 の上限は当てない。
+# b: run_audited の VM 経路（Started・drain・Terminal）。VM の Engine::run の経路が前提（設計 PR の判断の候補 Q1）のため todo。
+# c: VM の audit backpressure と ConfigError::AuditSinkWithExperimentalBackend の撤去。b に依存するため todo。
+# order は元の 70 を a に、b・c は空いている 71・72。
 [[slice]]
-id         = "audit-vm-triple"
-title      = "VM の audit triple 対応"
+id         = "audit-vm-triple-a"
+title      = "VM の fs host call で host-call triple と host call 開始前の BudgetCharged の flush を tree と同じ順序・中身で buffer へ積む"
+status     = "ready"
+parent     = "Phase 6 残"
+spec_slice = "determinism Slice 6"
+spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-triple-a 実装スライス（VM の fs host call で host-call triple と flush 点を buffer へ積む）" }
+acceptance = ["AVT-AT-01..05"]
+order      = 70
+
+[[slice]]
+id         = "audit-vm-triple-b"
+title      = "Engine::run_audited の VM 経路（Started・VM の buffer の drain・Terminal を tree と同じ journal・sink の規則で出す）"
 status     = "todo"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 6"
-order      = 70
+depends_on = ["audit-vm-triple-a"]
+order      = 71
+
+[[slice]]
+id         = "audit-vm-triple-c"
+title      = "VM の audit backpressure（drain queue の byte 計上とトップレベル境界の Yielded/Resumed）と ConfigError::AuditSinkWithExperimentalBackend の撤去"
+status     = "todo"
+parent     = "Phase 6 残"
+spec_slice = "determinism Slice 6"
+depends_on = ["audit-vm-triple-b"]
+order      = 72
 
 [[slice]]
 id         = "audit-record-replay"
