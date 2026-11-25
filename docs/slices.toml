@@ -797,7 +797,9 @@ order      = 31
 # （spec「audit-vm-triple のスライス分割」小節に理由）。元の id は置き換えて残さない。
 # a: VM の fs host call で host-call triple と flush 点を buffer へ積む（facade の配線なし）。見積もり src/ 約 120〜250 行、
 #   tests 約 250〜400 行、受入基準 5（AVT-AT-01..05）。§6.7 のとおり §14.1 の上限は当てない。
-# b: run_audited の VM 経路（Started・drain・Terminal）。VM の Engine::run の経路が前提（設計 PR の判断の候補 Q1）のため todo。
+# b: run_audited の VM 経路（Started・drain・Terminal）。VM の Engine::run の経路が前提のため todo。判断役が Q1=A・Q2=A を選んだ（PR #527）:
+#   経路は vm-parity-diff-a の done の後に既知の差分一覧の項目を減らすフェーズのスライスとして別に設計し、b はそれに依存させる（Q1=A）。
+#   b の設計 PR は tests/vm_parity.rs への監査の軸の追加を受入基準に入れる（Q2=A の条件）。
 # c: VM の audit backpressure と ConfigError::AuditSinkWithExperimentalBackend の撤去。b に依存するため todo。
 # order は元の 70 を a に、b・c は空いている 71・72。
 [[slice]]

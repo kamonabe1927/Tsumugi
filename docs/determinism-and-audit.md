@@ -2332,7 +2332,7 @@ issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発�
 | スライス | 範囲 | 依存 | 状態 |
 |---|---|---|---|
 | audit-vm-triple-a | VM の中で、tree と同じ event 列（fs 4 builtin の host-call triple と、host call 開始前の `BudgetCharged` の flush）を buffer へ積む。facade の配線はしない | — | ready（下の小節） |
-| audit-vm-triple-b | `Engine::run_audited` の VM 経路: Started・a の buffer の drain・終了時の `BudgetCharged`・Terminal（`host_effects_may_remain` を含む）を tree と同じ journal・sink の規則で出す。redaction policy の注入 | audit-vm-triple-a と、VM の `Engine::run` の経路（下の Q1） | todo |
+| audit-vm-triple-b | `Engine::run_audited` の VM 経路: Started・a の buffer の drain・終了時の `BudgetCharged`・Terminal（`host_effects_may_remain` を含む）を tree と同じ journal・sink の規則で出す。redaction policy の注入 | audit-vm-triple-a と、VM の `Engine::run` の経路のスライス（下の小節の決定記録 Q1=A。vm-parity-diff-a の done の後に設計） | todo |
 | audit-vm-triple-c | VM の audit backpressure（audit drain queue の byte 計上と、トップレベル境界での `Yielded`/`Resumed(AuditBackpressure)`）と、`ConfigError::AuditSinkWithExperimentalBackend` の撤去。逸脱一覧の「tree-only」の行を消す | audit-vm-triple-b | todo |
 
 割り方の理由:
@@ -2340,7 +2340,7 @@ issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発�
 - 1 本にまとめると、(1) VM の builtin 経路に triple と flush 点を足す、(2) VM を `Engine::run_audited` に載せる（journal・sink・Started/Terminal・fail-closed）、(3) VM に yield の境界を作って backpressure を通す、の 3 つの仕組みに触れる。(2) は VM を `ExecutionContext` で回す経路そのもの（E9 の残り）を前提にし、その経路は今どのスライスにも無い（vm-parity-diff-a の決定記録 Q1 で「フェーズを終えるまでに要る」とされたもの）。前提ごと 1 回で入れると 90 分に収まらない。
 - (1) は facade に触れずに、同じ source を `Evaluator` と `Vm` に流して buffer を比べるだけで確かめられる。先に入れれば、b と c は「drain して配送する」だけになり、event の中身の差（課金の順序・label・body）と配線の差を別の PR で切り分けられる。
 - (3) を (2) から分けるのは、VM に yield の境界を足す変更が VM の実行ループ（`Vm::run`）に触れ、sink が常に `Ack` を返す経路（b）とは確かめ方も壊れ方も違うためである。`ConfigError::AuditSinkWithExperimentalBackend` は、backpressure まで揃って「監査付きの VM 実行が tree と同じ event 列を出す」と言える c で外す（b の間に外すと、backpressure の無い VM 監査が使えてしまう）。
-- b・c は、VM の `Engine::run` の経路のスライスが決まるまで受入基準を採番しない（todo）。a が done になり、その経路のスライスが決まった後の設計 PR で採番して ready にする。
+- b・c は、VM の `Engine::run` の経路のスライスが決まるまで受入基準を採番しない（todo）。a が done になり、その経路のスライスが決まった後の設計 PR で採番して ready にする。その経路のスライスは、vm-parity-diff-a の done の後に既知の差分一覧の項目「VM に `Engine::run` の経路が無い」を減らすフェーズのスライスとして別に設計し、b はそれに依存させる（下の小節の決定記録 Q1=A）。b の設計 PR は、`tests/vm_parity.rs` への監査の軸の追加を受入基準に入れる（同 Q2=A の条件）。
 
 #### audit-vm-triple-a 実装スライス（VM の fs host call で host-call triple と flush 点を buffer へ積む）
 
@@ -2357,17 +2357,17 @@ issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発�
   - audit drain queue の byte 計上（`set_audit_queue` / `audit_queue_admit` に当たるもの）と backpressure の `Yielded`/`Resumed`、`ConfigError::AuditSinkWithExperimentalBackend` の撤去（audit-vm-triple-c）。
   - fs 4 builtin 以外の host call の triple（audit-host-boundary-scope、fs builtin の監査範囲のスライス）。tree が出さないものは VM も出さない。
   - `normalize_for_conformance`（未実装範囲の行のまま）。このスライスの比較は event をそのまま比べる。
-  - vm-parity-diff-a の差分テスト（`tests/vm_parity.rs`）への監査の軸の追加（下の Q2）。
+  - vm-parity-diff-a の差分テスト（`tests/vm_parity.rs`）への監査の軸の追加。audit-vm-triple-b で行い、b の設計 PR の受入基準に入れる（下の決定記録 Q2=A の条件）。
 - **done PR で行う逸脱一覧の更新**: 冒頭の逸脱一覧の「audit triple / yield/resume の emission が tree-only」の行を、「VM は host-call triple と flush 点の event を内部 buffer へ積むが、監査付き実行（`run_audited`）の経路が無いため配送しない。yield/resume は tree-only」と書き直す（行は c で消す）。未実装範囲の「VM の audit triple 対応（監査 wiring）」の行は、延期先を audit-vm-triple-b・c に改める。
 - **受入基準**:
-  - **AVT-AT-01（event 列の一致）**: fs 4 builtin（`read_file`・`read_lines`・`write_file`・`append_file`）を、allow・deny（capability 未 grant と operation 不足）・host error（存在しないファイルの読み込み）の各経路で呼ぶ source を、同じ capability と budget で `Evaluator` と `Vm` に流し、drain した event 列（`HostCallStarted`・`CapabilityDecision`・`HostCallFinished`・`BudgetCharged` の全 field と順序）が完全に一致する。確かめ方: tree と VM に同じ source を流す table-driven の test（crate 内の `#[cfg(test)]`。下の Q2=A の場合）。
+  - **AVT-AT-01（event 列の一致）**: fs 4 builtin（`read_file`・`read_lines`・`write_file`・`append_file`）を、allow・deny（capability 未 grant と operation 不足）・host error（存在しないファイルの読み込み）の各経路で呼ぶ source を、同じ capability と budget で `Evaluator` と `Vm` に流し、drain した event 列（`HostCallStarted`・`CapabilityDecision`・`HostCallFinished`・`BudgetCharged` の全 field と順序）が完全に一致する。確かめ方: tree と VM に同じ source を流す table-driven の test（crate 内の `#[cfg(test)]`。下の決定記録 Q2=A）。
   - **AVT-AT-02（flush の位置）**: host call より前の文で fuel などを消費した source で、その消費の `BudgetCharged` が host call の `HostCallStarted` より前に、host call 自身の課金（描画・attempt・request・response）の `BudgetCharged` が次の flush 点以降に出ることを、VM で確かめ、tree と一致する。確かめ方: AVT-AT-01 と同じ test の 1 ケース。
   - **AVT-AT-03（operation_id と flag）**: 1 回の実行の中で `operation_id` が 0 から単調に振られ、triple の中で同じ値を使う。REPL では入力ごとに 0 へ戻る（tree と同じ）。`effect_status` が `Committed` か `Unknown` の host call を行った実行で `host_effects_may_remain` が `true`、deny だけの実行で `false` になる。確かめ方: tree と VM の比較 test（単発と REPL の入力の列）。
   - **AVT-AT-04（redaction と label）**: Path が canonical label の HMAC、Body が既定 policy で `Omitted` になり、label を取れない経路（route 前の拒否）でも tree と同じ `original_bytes` になる。確かめ方: AVT-AT-01 の event の比較に含む。
   - **AVT-AT-05（非破壊）**: sink 無しの経路の観測挙動を変えない。既存の test（`tests/audit_*.rs`・`tests/differential.rs`・`tests/integration.rs`・golden fixture）が無改変で緑。確かめ方: `cargo test`。
-- **判断の候補（PR の設計時点、判断役の選択待ち）**:
-  - Q1: VM の `Engine::run` / `Engine::run_audited` の経路（b の前提）をどこで作るか。推奨 A: vm-parity-diff-a の既知の差分一覧の項目（VM に `Engine::run` の経路が無い）を減らすフェーズのスライスとして、vm-parity-diff-a の done の後に別に設計し、b はそれに依存する。B: audit-vm-triple の分割に含め、b の前の sub-slice にする。
-  - Q2: a の tree/VM の一致をどこで確かめるか。推奨 A: crate 内の `#[cfg(test)]` の比較 test（vm-parity-diff-a に依存せず、今 ready にできる）。監査の軸を `tests/vm_parity.rs` に足すのは、監査付き実行が VM で通る b で行う。B: `tests/vm_parity.rs` に監査の軸を足す（vm-parity-diff-a に依存し、a は todo のまま）。
+- **決定記録（判断役が選択（PR #527）。Q1=A・Q2=A）**:
+  - **Q1（VM の `Engine::run` / `Engine::run_audited` の経路をどこで作るか）= A**: vm-parity-diff-a の done の後に、既知の差分一覧の項目「VM に `Engine::run` の経路が無い」を減らすフェーズのスライスとして別に設計し、audit-vm-triple-b はそれに依存させる。理由: vm-parity-diff-a の決定記録 Q1=A（PR #526）が経路の欠けを一覧の 1 項目として数え、「フェーズを終えるまでに VM の `Engine::run` の経路（E9 の残り）を扱うスライスが要る」と書いており、[開発ループ手順書](loop-runbook.md) §6.7「以降のスライスは一覧の項目を減らす」と同じ形で 1 項目を 1 スライスで消せる（既存の決定との一貫性、[マニフェスト](manifesto.md) 原則 9）。経路は[組み込みAPI仕様](embedding-api.md)の逸脱一覧のとおり監査より広く（deadline・cancel・host function・context の継続を含む）、監査の系列に入れずに分けたほうが 1 スライスの範囲が小さく、配線で入る差と監査 event の差を別の PR で切り分けられる（原則 8・原則 5）。採らなかった案: B（audit-vm-triple の分割に b の前の sub-slice として含める）は、E9 の残りを監査のスライス（parent「Phase 6 残」）が抱えて範囲が広がり、PR #526 の Q1=A で決めた「一覧の項目を減らすスライス」と消し方が二重になる。§6.7「大きさ」の 90 分にも収めにくい。
+  - **Q2（a の tree/VM の一致をどこで確かめるか）= A**: crate 内の `#[cfg(test)]` の比較 test（同じ source を `Evaluator` と `Vm` に流し、drain した event の全 field と順序を exact に比べる）で確かめ、`tests/vm_parity.rs` への監査の軸の追加は、監査付き実行が VM で通る audit-vm-triple-b で行う。理由: a の範囲は VM の内部 buffer へ積むところまでで facade からは観測できず、buffer の drain は tree でも `pub(crate)`（`Evaluator::drain_audit_events`）なので、integration test から比べるには検査のためだけの公開（`#[doc(hidden)]` など）を足すことになる（原則 8、公開 API を広げない）。A でも同じ入力を tree と VM に流して一致を確かめるので、[開発ループ手順書](loop-runbook.md) §14.1 の趣旨と原則 5・原則 9 は a の時点で満たせる。a は vm-parity-diff-a（未 done）に依存せず、今 ready にできる。**条件**: audit-vm-triple-b の設計 PR は、`tests/vm_parity.rs` への監査の軸の追加を受入基準に入れる（この小節の「範囲外」に書いた先送りを落とさない。§14.1「受入基準に §6.7 の差分テストへの追加を含める」）。採らなかった案: B（`tests/vm_parity.rs` に監査の軸を足す）は、差分テストのために buffer を crate の外へ出す必要があり、a が todo に戻って vm-parity-diff-a 待ちになる。facade から観測できる監査の差は b で初めて生じるので、差分テストの軸は b で足せば足りる。
 - **想定の変更規模**: `src/` 約 120〜250 行（`src/vm.rs` の状態・入口のリセット・`exec_builtin` の flush と triple 80〜150、tree と共有するための関数の移動 40〜100）。test は約 250〜400 行（比較の実行器 80〜120、経路ごとのケース 150〜250、REPL 50）。触る仕組みは VM の fs host call の監査 event 1 つ、受入基準は 5 項目。§6.7 のとおり §14.1 の上限は当てない。90 分に収まる根拠: tree 側の順序と共有関数がすでにあり、VM 側は同じ呼び出しを同じ位置に置く作業で、facade・journal・sink には触れない。
 
 ## 15. 受入基準
