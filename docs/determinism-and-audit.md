@@ -1,6 +1,6 @@
 # Tsumugi 決定性・実行時監査仕様
 
-最終更新: 2026-11-20
+最終更新: 2026-11-25
 
 設計ステータス: **到達目標の確定仕様（§1〜§13）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -2249,6 +2249,72 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
   - **VFH-AT-03（利用者の同名 binding を隠さない）**: `__index__` / `__collection__` をトップレベルの `let`・関数の local・関数から読む global・ループ変数の名前（`for __index__ in …`）・入れ子の `for` の外側のループ変数として宣言した script で、`for` の本体・本体の lambda・本体の lambda の中の lambda（2 段の入れ子）・`for` の後の読み書きが tree と同じ値を返す（上の表の `let __index__ = 10` は `10` を 3 回、`fn g()` の 2 段の入れ子は `10`）。VM の REPL で、前の入力で宣言した `__index__` を後の入力の `for` の本体で読んでも tree と同じ値になる。確かめ方: differential test と REPL の paired test。
   - **VFH-AT-04（非破壊）**: この 2 つの名前を書かない `for`（List・Dict・Str、`break` / `continue`、入れ子、本体でのクロージャの作成）の compile 結果の命令列・定数・local の数が変わらない。既存の `tests/differential.rs`・golden fixture・`tests/for_iter_charge.rs`・`tests/for_iter_copy_order.rs`・`tests/defensive_vm.rs`・`tests/scaling.rs` が無改変で緑。確かめ方: `src/compiler.rs` の `#[cfg(test)]` の unit test（代表の `for` の Chunk を変更前の命令列と比べる）と既存 test。
 - **想定の変更規模**: `src/compiler.rs` 約 5〜30 行（隠しローカルの作り方と名前の解決の 4 か所）。合わせて約 5〜30 行。テストは differential test・CLI と REPL の paired test・compiler の unit test で約 150〜250 行。触る仕組みは VM の `for` の隠しローカルの名前の解決 1 つ、受入基準は 4 項目。
+
+#### VM parity フェーズのスライス分割
+
+> 状態: 設計のみ（本小節と次の小節は設計時点の記録）。現在の逸脱・未実装範囲は冒頭の逸脱一覧が正本である。
+
+issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発ループ手順書](loop-runbook.md) §6.7 の「tree と VM の差分をなくすフェーズ」を、本節 Slice 6（VM conformance）に置く。理由: 冒頭の未実装範囲の「VM 適合 gate のうち audit 以外（全規範 fixture の differential matrix、limit 境界・REPL 継続・pause/resume の差分 0 件の CI gate、fuzz gate）」と「VM の audit triple 対応」が、どちらも Slice 6 へ延期と記録されており、§2.1 の VM の適合条件（全規範 fixture で value・error・context commit・side effect・fuel が tree と一致、既知非適合 0 件）もここが正本だからである。execution-control・embedding-api の側にも VM の差（fuel・heap・`Engine::run` の backend）が書かれているが、フェーズの入口は 1 つにして、各スライスの小節から該当の spec を参照する。
+
+- フェーズのスライスは、`slices.toml` で `parent = "VM parity"`（[ロードマップ](roadmap.md)「ステータス一覧」の `VM parity` の行）のものと、`audit-vm-triple`（VM の監査の配線、`parent = "Phase 6 残"` のまま）である。
+- 最初は網羅的な差分テストで、`vm-parity-diff-a` と `vm-parity-diff-b` の 2 つに分ける（下の表）。以降のスライスは、差分テストの「既知の差分一覧」の項目を減らすもので、`vm-parity-diff-a` の done の後に一覧の中身を見て設計役が切る（項目ごと、または同じ原因の項目の組ごと）。
+- フェーズのスライスには[開発ループ手順書](loop-runbook.md) §14.1 の行数・仕組みの数・受入基準の数の上限を当てず、1 回の実装（§14.3 の 90 分、実装役は Opus）で終わる量に割る（§6.7「大きさ」）。
+- フェーズの終わり（フェーズのスライスがすべて done で既知の差分一覧が 0 件）の設計 PR で、§2.1 の VM の `experimental` を外すかを判断の候補にする（issue #525）。
+
+| スライス | 範囲 | 依存 | 受入基準 |
+|---|---|---|---|
+| vm-parity-diff-a | 差分テストの土台（実行器・軸ごとの比較・既知の差分一覧と CI gate）、書き換えの種類 × 変数の置き場所の matrix、REPL 継続、print だけで動く fixture | — | VPD-AT-01..06 |
+| vm-parity-diff-b | 残りの fixture（fs・env・stdin・clock・import の capability が要るもの）を同じ軸で比べる。全 fixture の stdout・stderr・終了コードの byte 比較（tree と `--vm` の CLI を直接比べる） | vm-parity-diff-a | b の設計 PR で採番 |
+
+割り方の理由: 1 本にまとめると、94 本の fixture のうち capability の要る 26 本（`import`・fs builtin・`env`・`input`・`now` を使うもの、設計時点の main `a527274` で数えた）のために、in-process の tree と VM の両方へ fs の sandbox・env・stdin・import resolver を渡す実行器を作る作業が加わる。これは `tests/differential.rs` の `link_import_graph` と `tests/integration.rs` の CLI 実行器の両方を読み合わせる作業で、土台・matrix・一覧の初期化（差を 1 つずつ見て項目にする）と合わせると 90 分に収まらない見込みである。a は print だけの capability で閉じる範囲に絞り、一覧の形と gate を先に main へ入れる。b は a の実行器を使って fixture を足すだけになる。a の中で一覧の初期化に時間がかかりすぎる場合（差が多い）は、項目の説明を短くしてよいが、差を一覧に入れずに通すことはしない。
+
+#### vm-parity-diff-a 実装スライス（tree と VM の網羅的な差分テストの土台と、既知の差分一覧の CI gate）
+
+> 状態: **未実装**（設計のみ）。issue #525 から作ったフェーズの最初のスライス。§2.1 の適合方針（tree が規範）と §15.5 の tree/VM differential のうち、value・error・出力・fuel・budget の各カウンタ・REPL 継続を、今の VM が通らない差も含めて機械で数えられるようにする。差を直すのはこのスライスの範囲ではない。
+
+設計時点（main `a527274`）の事実:
+
+- `tests/differential.rs` は、宣言した fixture（source と上限の組）を in-process の tree（`Evaluator`）と VM（`Compiler` + `Vm`）で流し、`TsumugiError` の全 field と、`BudgetUsage` のうち engine 間で不変な軸（I/O の counter・string/source/import の count・per-item peak）を exact に、`committed.fuel` を F-1 以降 exact に、`live_heap_bytes` / `peak_heap_bytes` を向き・符号だけで比べる（§15.5 の PR-6c の注記）。比べるのは個別に書いた fixture だけで、`tests/fixtures/*.tsg` の全件ではない。
+- `tests/integration.rs` は `tests/fixtures/*.tsg`（94 本）を CLI の tree と `--vm` の両方で流すが、比べる相手は期待ファイル（`.expected` など）で、fuel・budget・`TsumugiError` の field は見ない。VM だけの期待ファイル（`.vm`）は設計時点で 0 本である。
+- heap は engine 間で数値を比べないため、COW の複製の回数の差（issue #502・#510・#517）は、どの検査にもかからずに残っていた。fix-cow-copy-parity 系の test（`tests/cow_copy_journal.rs` ほか）は、同じ engine の中で「操作をした script」と「しない script」の peak の差を取り、List body の大きさと比べて複製を見つけている。
+- `Engine::run`（`src/embedding.rs`）と `Engine::execute`（`src/engine.rs`）は backend を見ず、`VmExperimental` の engine でも tree 評価器で実行する（[組み込みAPI仕様](embedding-api.md)の逸脱一覧の行、延期先は E9 の残り）。`ExecutionContext` を使う VM の経路は無い。
+
+- **実装範囲**:
+  - 新しい test file `tests/vm_parity.rs`（名前は実装 PR で変えてよい）に、1 つのケース（source、または REPL の入力の列）を tree と VM で流して、次の軸ごとに比べる実行器を置く。tree は `Evaluator`（単発は `run`、REPL は `run_repl_submission` と据え直し）、VM は `Compiler` + `Vm`（単発は `Vm::new(...).run()` と root source の `charge_link_graph`、REPL は `Vm::new_repl` と `compile_repl_line` / `run_repl_chunk`）で、`tests/differential.rs` の `run_tree_single` / `run_vm_single` / `tree_usage_per_input` / `vm_usage_per_input` と同じ入口を使う（共有したいなら `tests/support/` に移してよい。既存の test の期待は変えない）。capability は print だけ（`tests/differential.rs` の `print_capabilities` と同じ）。
+    - **値**: 各ケースは観測したい値を `print` で出す。出力の比較で値を比べる。
+    - **error**: terminal の `TsumugiError` の全 field（kind・message・line・call trace）を exact に比べる。compile error も含む。
+    - **出力**: 出力の byte 列を比べる。in-process で byte 列を取れない engine があれば、I/O の counter（`output_calls`・`output_bytes`）の exact 一致で代え、byte 列の比較は vm-parity-diff-b の CLI 比較に任せる（どちらにしたかを test の冒頭に書く）。
+    - **fuel**: `committed.fuel` を exact に比べる（F-1 以降の規則）。REPL は入力ごとの値を比べる。
+    - **budget の各カウンタ**: `BudgetUsage` の `committed` と `reserved` の各 counter（fuel 以外）と `peaks` を exact に比べる。`live_heap_bytes` / `peak_heap_bytes` は、同じ engine の中で「操作をしたケース」と「操作をしない基準のケース」の peak・live の差を取り、その差を engine 間で exact に比べる（code artifact の分は差で打ち消す。`tests/cow_copy_journal.rs` と同じ方法）。基準のケースを持たない fixture は、今の `tests/differential.rs` と同じ向き・符号の比較にとどめる（下の Q3=A）。
+    - **REPL 継続**: 入力の列を 1 つの session で流し、入力ごとに上の各軸を比べる。error になった入力の後の入力で、前の入力の binding の値と、error の入力の途中の書き換えが残らないこと（rollback）を、両方の engine で比べる。
+  - **書き換えの種類 × 変数の置き場所の matrix** を、生成するケースとして持つ。
+    - 書き換えの種類: `push`、`pop`、List の index 代入、Dict の index 代入（既存 key・新しい key）、`for` の反復（本体で反復中の List・Dict を書き換えるものと、書き換えないもの）。値の持ち方は、一意に持っている値と、別の変数と共有している値（`let b = a` の後に `a` を書き換える）の 2 つ。
+    - 変数の置き場所: トップレベルの local、関数の local、upvalue（関数の中の lambda が外の変数を書き換える。1 段と 2 段の入れ子）、REPL の前の入力で宣言した変数、`Engine::run` / `Engine::execute` の `ExecutionContext` に前の実行で残った変数。
+    - 各ケースは、書き換えた後の値（共有した側の値を含む）を出し、上の全軸を比べる。heap は上の「基準のケースとの差」の方法で比べ（各ケースに、書き換えをしない基準のケースを対で持つ）、COW の複製の回数の差を見つけられるようにする。
+    - `Engine::run` の context の置き場所も matrix に入れる。tree は `Engine::run` / `Engine::execute` の `ExecutionContext` で流し、VM は経路が無いので「経路なし」として、置き場所ごと 1 項目（「VM に `Engine::run` の経路が無い」）を既知の差分一覧に入れる（下の Q1=A）。このスライスでは VM の経路を作らない。
+  - **fixture**: `tests/fixtures/*.tsg` のうち、print だけの capability で動くものをすべて流す（ファイルの一覧を読んで回し、capability の要るものは名前の一覧で外す。外した名前の一覧は vm-parity-diff-b の対象として test に持つ）。`tests/integration.rs` の `fixture_timeout` のような停止性の fixture は、上限を付けて流してよい。
+  - **既知の差分一覧**: 今ある差を、test の中の一覧（`const` の表、または `tests/vm_parity_known_diffs.toml` のような data file。形は実装 PR で決めてよい）に持つ。項目は「ケースの名前・軸・差の一行の説明・項目 ID（`KD-<番号>`）」で、同じ原因で多くのケースに出る差は、ケースの名前の pattern（接頭辞など）で 1 項目にまとめてよい。どの項目にも当たらない差が出たら test が落ちる。一覧の項目に当たる差が 1 件も出なくなった（直った）項目が一覧に残っていても test が落ちる（一覧と実際の差を完全一致させる。差を直すスライスは同じ PR で項目を消す。下の Q2=A）。
+  - 一覧の初期の中身は、このスライスの実装 PR で test を流して作る。PR 本文に項目の一覧（ID・説明・件数）を書く。
+  - CI: `cargo test` の一部として毎回流れる（新しい workflow は作らない。`.github/` は凍結）。
+- **変えないもの**: `src/` の挙動（このスライスは test と spec だけを足す）。既存の test（`tests/differential.rs`・`tests/integration.rs`・golden fixture）の期待値。
+- **範囲外**:
+  - 差を直すこと。見つけた差は一覧に入れ、後続のフェーズのスライスで直す。
+  - capability の要る fixture と、CLI の stdout・stderr・終了コードの byte 比較（vm-parity-diff-b）。
+  - pause/resume・cancel・host pending（§15.5 の注記のとおり VM に scheduler の経路が無い）、`normalize_for_conformance` 後の audit payload（`audit-vm-triple` と後続）、record/replay、fuzz の生成 matrix（AUD-022）。ただし `Engine::run` の経路が無いことは、上のとおり一覧の 1 項目にする（Q1=A）。
+  - limit 境界（各上限の N と N−1）の網羅。既存の `tests/differential.rs` の境界 test はそのまま残し、このスライスでは既定の上限で流す。
+- **done PR で行う逸脱一覧の更新**: 冒頭の未実装範囲の「VM 適合 gate のうち audit 以外」の行を、差分テストの土台と既知の差分一覧の gate が入ったことに合わせて書き直す（全規範 fixture のうち capability の要るもの・limit 境界・pause/resume・fuzz と、差分 0 件の gate が残ることを書く）。
+- **受入基準**:
+  - **VPD-AT-01（軸）**: 実行器が、1 つのケースについて値（出力）・`TsumugiError` の全 field・出力・`committed.fuel`・`BudgetUsage` の fuel 以外の counter と peaks・heap（基準のケースとの差の方法）を tree と VM で比べ、差を「ケース・軸・tree の値・VM の値」の形で報告する。確かめ方: わざと差を作った組（tree と VM に違う source を渡す、など）で、各軸の差を報告することを確かめる test。
+  - **VPD-AT-02（matrix）**: 書き換えの種類 × 値の持ち方 × 変数の置き場所の全組（`Engine::run` の context は、VM 側を一覧の 1 項目にする）のケースが生成され、全軸で比べられる。確かめ方: ケースの数を test で数えて組の数と一致させる。
+  - **VPD-AT-03（REPL 継続）**: REPL の入力の列（error の入力を途中に含むもの、前の入力の変数を書き換えるもの、前の入力の closure を呼ぶもの）を両方の engine で流し、入力ごとに全軸で比べる。確かめ方: test。
+  - **VPD-AT-04（fixture）**: print だけで動く `tests/fixtures/*.tsg` のすべてを全軸で比べる。外したものの名前の一覧が test にあり、外した理由（要る capability）が書いてある。確かめ方: test。fixture のファイルを増やしたとき、外す一覧に無ければ自動で比べる対象に入ることを、一覧の作り方で確かめる。
+  - **VPD-AT-05（既知の差分一覧と gate）**: 一覧に無い差が 1 件でもあると test が落ちる。一覧の各項目は ID・軸・説明を持つ。差の出なくなった項目が一覧に残っていても test が落ちる（Q2=A）。確かめ方: 一覧から 1 項目を消すと test が落ちること、差の出ない項目を 1 つ足すと test が落ちることを、実装 PR の中で手で確かめて PR 本文に書く（一覧を引数に取る関数の unit test でもよい）。
+  - **VPD-AT-06（非破壊）**: `src/` を変えない。既存の test が無改変で緑。確かめ方: `git diff --stat` と `cargo test`。
+- **決定記録（判断役が選択（PR #526）。Q1=A・Q2=A・Q3=A）**:
+  - **Q1（`Engine::run` の context の置き場所）= A**: matrix の置き場所に入れ、VM は「経路なし」を既知の差分一覧の 1 項目にする。理由: issue #525 が置き場所に `Engine::run` の context を挙げており、[組み込みAPI仕様](embedding-api.md)の逸脱一覧（`Engine::run` は `VmExperimental` でも tree で実行、延期先 E9）のとおり経路の欠けは今ある差である。一覧に載せれば [開発ループ手順書](loop-runbook.md) §6.7「終わり」（一覧 0 件）で数えられる（[マニフェスト](manifesto.md) 原則 7・原則 9）。§2.1 の「VM は全適合 gate を通るまで experimental」とも合う。このため、フェーズを終えるまでに VM の `Engine::run` の経路（E9 の残り）を扱うスライスが要る。採らなかった案: B（matrix から外して範囲外に書く）は経路の欠けが一覧に現れず、フェーズの終わりの判定から漏れる（原則 7 に反しうる）。C（このスライスで VM を配線する）は「差を直さない」「`src/` を変えない」（VPD-AT-06）と §6.7 の 90 分を破り、配線で入った差と元からの差を分けられない。
+  - **Q2（差の出なくなった項目）= A**: 一覧に残っていたら test を落とす（一覧と実際の差を完全一致させる）。理由: 直った差が戻ったときに残った項目が隠してしまうのを防ぎ（原則 5）、実際より多い一覧は裏付けのない記録になる（原則 9）。§6.7「終わり」を一覧だけで判定できる。issue #525 の「一覧が増えたら CI が落ちる」も満たす。採らなかった案: B（増えたときだけ落とす）は消し忘れが通り、同じ差の戻りを検出できない。
+  - **Q3（heap の比べ方）= A**: 同じ engine の中で操作をしたケースと基準のケースの peak・live の差を取り、その差を engine 間で exact に比べる。基準を持たない fixture は向き・符号の比較。理由: [実行予算・協調実行仕様](execution-control.md) §5.3 の A-1 と §15.5 は code artifact の heap 数値を engine 固有でよいとするが、差を取れば code artifact の分が打ち消せる。`tests/cow_copy_journal.rs` が同じ方法で複製を見つけた実績があり、原則 5 を `src/` を変えずに検査できる（原則 8）。採らなかった案: B（COW の複製の回数の内部 counter を足す）は `src/` を変え（VPD-AT-06）、検査のためだけのデータ構造を中核に足す。C（向き・符号だけ）は COW の複製の差（#502・#510・#517）を見逃したままになる（原則 5 に反しうる）。
+- **想定の変更規模**: `src/` 0 行。test は `tests/vm_parity.rs` 約 600〜1000 行（実行器 200〜300、matrix の生成 150〜250、REPL と fixture 150〜250、一覧と gate 100〜200）。触る仕組みは tree/VM の差分テスト 1 つ、受入基準は 6 項目。§6.7 のとおり §14.1 の上限は当てない。
 
 ## 15. 受入基準
 
