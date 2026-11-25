@@ -2137,7 +2137,7 @@ fn tree_poll_ok(source: &str, fuel: u64) -> bool {
 
 /// FBCa-AT-01: `map` / `filter` / `each` の要素数が 1 増えたときの N の差が 1（走査）+ callback 1 回分で、
 /// 両 engine で一致する。tree は同期経路（`Evaluator::run`。`assert_fuel_parity` で VM と突合）と
-/// poll 経路（`tree_poll_ok`。callback は式 frame を通る）の両方で同じ差になる。
+/// poll 経路（`tree_poll_ok`。callback は式 frame を通る）の両方で同じ N になる。
 #[test]
 fn fbca_at_01_map_filter_each_per_element() {
     // callback 1 回分 = invocation 5 + 本体（1 式の本体 = statement 1 + expression 1）。
@@ -2169,31 +2169,30 @@ fn fbca_at_01_map_filter_each_per_element() {
             ),
         ];
         for (form, stmt, base) in forms {
+            // 同期経路・VM の N（`assert_fuel_parity` で一致済み）と、tree の poll 経路（式 frame）の
+            // N が with・without のそれぞれで等しいことを確かめ、要素数による N の差を返す。
             let margin = |m: usize| {
                 let pre = format!("let xs = range(0, {m})\n");
-                fbca_marginal(
-                    &format!("{name} {form} m={m}"),
-                    &format!("{pre}{stmt}"),
-                    &format!("{pre}{base}"),
-                )
-            };
-            // poll 経路（式 frame）の N の差。
-            let poll_margin = |m: usize| {
-                let pre = format!("let xs = range(0, {m})\n");
-                let with = format!("{pre}{stmt}");
-                let without = format!("{pre}{base}");
-                min_fuel(&format!("{name} {form} m={m} [poll with]"), |n| {
-                    tree_poll_ok(&with, n)
-                }) - min_fuel(&format!("{name} {form} m={m} [poll without]"), |n| {
-                    tree_poll_ok(&without, n)
-                })
+                let mut ns = [0u64; 2];
+                for (i, (kind, src)) in [
+                    ("with", format!("{pre}{stmt}")),
+                    ("without", format!("{pre}{base}")),
+                ]
+                .iter()
+                .enumerate()
+                {
+                    let label = format!("{name} {form} m={m} [{kind}]");
+                    let sync_n = assert_fuel_parity(&label, src);
+                    let poll_n = min_fuel(&format!("{label} [poll]"), |n| tree_poll_ok(src, n));
+                    assert_eq!(
+                        poll_n, sync_n,
+                        "[{label}] tree の poll 経路（式 frame）の N が同期経路・VM と一致しません"
+                    );
+                    ns[i] = sync_n;
+                }
+                ns[0] - ns[1]
             };
             let (m3, m4, m10) = (margin(3), margin(4), margin(10));
-            assert_eq!(
-                (poll_margin(3), poll_margin(4), poll_margin(10)),
-                (m3, m4, m10),
-                "[{name} {form}] tree の poll 経路（式 frame）の N の差が同期経路・VM と一致しません"
-            );
             assert_eq!(
                 m4 - m3,
                 per_element,
