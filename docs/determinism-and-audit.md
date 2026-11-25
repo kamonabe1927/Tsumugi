@@ -1920,6 +1920,24 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
 - 規模は手順書 §14.1 の目安（`src/` 1000 行以内・仕組み 1 つ・受入基準 5 項目以内）に収まる。`src/budget.rs` は呼び出し点に無く、変えずに済む見込み
   （上の見積もりの範囲に含めたままでよい）。
 
+**判断 Q5・Q6 の記録**（判断役が選択（PR #519、Q5=A、Q6=A）。2026-11-25 の設計 PR #519 の追加の commit で反映）:
+
+- **Q5（公開関数 `tsumugi::audit::estimate_encoded_bytes` の扱い）= A**: 公開面から外す（削除するか `pub(crate)` にする。crate 内は `cbor::encoded_len` を使う）。
+  外から呼べる関数を消す破壊的変更なので、c2 の実装 PR で [組み込みAPI仕様](embedding-api.md) §13.1 の表に 1 行記録する（表の文言は crate root の公開型についてだが、
+  公開 API の変更の記録を 1 か所に置く原則 9 に沿って同じ表に書く）。上の実装範囲の「関数名を残すかどうかは実装者に任せる」は、この関数については
+  この決定で置き換わる（`pub(crate)` の 2 関数は実装者に任せたまま）。理由: manifesto 原則 8（名前が「estimate」のまま実長を返す関数や、encoder の長さだけを
+  先に見せる公開関数を増やさない）。c1 小節の範囲外「encoder の公開は行わない」（公開面は sink 必須化・record/replay のスライスで決める）と食い違わないのは A だけ。
+  alpha の破壊的変更は §13.1 への記録を条件に受容される。採らなかったもの: B（名前と意味が食い違う関数を公開面に残し、encoder の公開を事実上先に行う）、
+  C（公開関数を新しく足し、後続へ送った公開面の判断を c2 で先取りする）。
+- **Q6（Terminal の byte の数え方）= A**: `append_terminal` で Terminal の実長を size pass で測り、journal の非公開 field（例 `terminal_bytes`）に記録する。
+  上限とは比べず、c4 までは reserve（`terminal_reserve_bytes`）を超えても append する。SC-AT-06 の「Terminal は reserve 側」は、`committed_bytes + terminal_bytes` が
+  全 envelope の実長の和と一致することで確かめる。公開 API は変わらない。理由: §11「Started と Terminal も encoded bytes へ含める」「Terminal は専用 reserve だけを使い、
+  通常上限を使い切っても必ず append できる」と §10.1 を両方満たすのは A だけで、SC-AT-06 を c2 の中で検証でき受入基準を動かさずに済む（manifesto 原則 7・原則 8）。
+  採らなかったもの: B（§11 の「Terminal も数える」が c4 まで満たされず、受入基準の範囲が変わる）、C（Terminal を欠いた監査列を作り、原則 6・7 と §10.1・§11 に反しうる）。
+  - **残る逸脱**: c4 までの間は「Terminal の実長が `terminal_reserve_bytes` を超えても append する」ことが §11 の reserve に対する逸脱として残る
+    （Terminal が reserve を超えうる状態は c2 の前から同じで、A が新しく上限を緩めるわけではない。60 KiB 縮退と Terminal の `Emergency` は c4、SC-AT-18）。
+    c2 の done PR は、上の「c2 の done PR で行う逸脱一覧の更新」に加えて、逸脱一覧にこの行（§11、延期先 c4）を足す。c4 の done PR でその行を削除する。
+
 #### audit-strict-cbor-c3 実装スライス（`original_bytes` と Path HMAC 入力を canonical encoding へ）
 
 > 状態: **未実装**（設計のみ）。c1 が done になってから着手する。判断 Q2・Q3 は kamonabe の選択（Q2 = A、Q3 = 3a・3b・3c とも A）で決まり、以下の実装範囲はその選択で書いている（§9.1 にも反映済み）。
