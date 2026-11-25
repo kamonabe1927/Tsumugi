@@ -1459,3 +1459,23 @@ title      = "debug build の --vm で map / filter / each の callback を通�
 status     = "todo"
 parent     = "REV-012"
 order      = 118
+
+# loop:drift #529 の D-154（判断が要る。判断役が選択、#529 の Q1=A）で execution-control の逸脱一覧に足した行の fix（loop-runbook §12.3、
+#   ずれの修正の PR で追加）。fix-cow-copy-parity-journal（#521）で足した journal の集合 `created_cells`（tree `src/env.rs`・VM `src/vm.rs`）が
+#   heap budget へ課金されず、作った cell の数だけ commit / rollback まで増える（§10「journal自身の保持はheap budgetへ課金する」に対する逸脱）。
+#   既存の journal entry と同じ形（先に課金し、超過なら journal を汚さず返す。commit / rollback でまとめて release）で課金する。tree と VM を
+#   同じスライスで直す（loop-runbook §14.1）。課金の単位（§5.1 の allocator に依存しない論理サイズ）・`peak_heap_bytes` の変化の扱い（版・受入基準）・
+#   tree と VM で cell になる binding が違うことによる課金の差の書き方は、設計 PR で spec の小節に書く（todo）。parent は journal の heap 課金
+#   （REV-015 PR-d）と fix-cow-copy-parity-journal の親の REV-015。
+# order は loop-runbook §12.3 の 1 の既定（`すり抜け` の印が無い D-N から作るもの: 今あるすべての ready より後。今 ready は無い）を満たす、
+#   すべてのスライスより後の 119 に置いた（fix-vm-callback-recursion-stack の 118 と同じ置き方）。`すり抜け` の印は #529 の D-154 の行のとおり
+#   付いていない（印を付けるのは朝の点検だけ。§12.2）。§6.7 のフェーズのスライスではないので、設計はフェーズの後になる。
+# 見積もり: src/ 約 20〜60 行（`src/env.rs` の `Env::set`・`SubmissionJournal`、`src/vm.rs` の `ensure_local_cell`・`ReplStackCheckpoint`）、
+#   触る仕組みは transaction の journal の heap 課金 1 つ（tree と VM に同じ変更を当てる）、受入基準は設計で決める（5 以内）。
+[[slice]]
+id         = "fix-journal-created-cells-heap-charge"
+title      = "transaction の journal が作った cell を見分ける集合 created_cells の保持を、journal entry と同じ形で heap budget へ課金する（tree・VM、execution-control §10・§5.1、loop:drift #529 D-154）"
+status     = "todo"
+parent     = "REV-015"
+spec_slice = "exec-control Slice 2"
+order      = 119
