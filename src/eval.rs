@@ -716,7 +716,7 @@ pub struct Evaluator {
 struct AuditQueueMeter {
     /// `AuditBudget.max_pending_bytes`（per-execution 上限）。
     limit: u64,
-    /// envelope 固定部の推定 byte 数（`audit::estimate_envelope_overhead_bytes`）。
+    /// envelope 固定部の上限値の byte 数（`audit::queue_envelope_overhead_bytes`）。
     envelope_overhead: u64,
     /// 評価器 buffer 由来の未 ack event の推定 byte 合計。
     bytes: u64,
@@ -1387,7 +1387,7 @@ impl Evaluator {
     /// 監査付き実行の audit drain queue 上限を設定する（Phase 6 B-2、§10.2）。
     ///
     /// `limit` は `AuditBudget.max_pending_bytes`、`envelope_overhead` はこの実行の envelope
-    /// 固定部（`audit::estimate_envelope_overhead_bytes(language_revision)`）。監査付き facade が
+    /// 固定部（`audit::queue_envelope_overhead_bytes(language_revision)`）。監査付き facade が
     /// budget install（[`Self::reset_budget`]、計器を外す）の後に呼ぶ。
     pub(crate) fn set_audit_queue(&mut self, limit: u64, envelope_overhead: u64) {
         self.audit_queue = Some(AuditQueueMeter {
@@ -1408,12 +1408,12 @@ impl Evaluator {
 
     /// event 1 件を audit drain queue へ計上する（計器が無ければ no-op）。
     ///
-    /// journal が append 時に使う推定（envelope 固定部 ＋ event 本体）と同じ部品で数える。
+    /// envelope 固定部の上限値 ＋ event 本体の実 encode 長で数える（journal の append の増分以上）。
     pub(crate) fn audit_queue_admit(&mut self, event: &crate::audit::AuditEvent) {
         if let Some(meter) = self.audit_queue.as_mut() {
             let bytes = meter
                 .envelope_overhead
-                .saturating_add(crate::audit::estimate_event_bytes(event));
+                .saturating_add(crate::audit::queued_event_bytes(event));
             meter.bytes = meter.bytes.saturating_add(bytes);
         }
     }
@@ -1423,7 +1423,7 @@ impl Evaluator {
         if let Some(meter) = self.audit_queue.as_mut() {
             let bytes = meter
                 .envelope_overhead
-                .saturating_add(crate::audit::estimate_event_bytes(event));
+                .saturating_add(crate::audit::queued_event_bytes(event));
             meter.bytes = meter.bytes.saturating_sub(bytes);
         }
     }
@@ -7084,7 +7084,7 @@ mod tests {
     mod audit_queue_meter {
         use super::super::Evaluator;
         use crate::audit::{
-            AuditEvent, AuditPayload, estimate_envelope_overhead_bytes, estimate_event_bytes,
+            AuditEvent, AuditPayload, queue_envelope_overhead_bytes, queued_event_bytes,
         };
         use std::collections::BTreeMap;
 
@@ -7110,15 +7110,15 @@ mod tests {
         }
 
         #[test]
-        fn admit_and_release_use_journal_estimate() {
-            let overhead = estimate_envelope_overhead_bytes("0.21");
+        fn admit_and_release_use_encoder_length() {
+            let overhead = queue_envelope_overhead_bytes("0.21");
             let mut eval = Evaluator::new();
             eval.set_audit_queue(u64::MAX, overhead);
             assert_eq!(eval.audit_queue_bytes(), Some(0));
             let event = started(0);
-            let expected = overhead + estimate_event_bytes(&event);
+            let expected = overhead + queued_event_bytes(&event);
             eval.push_host_call_events([event.clone()]);
-            // B2-AT-10: push 時の計上値は envelope 固定部 ＋ event 本体（journal と同じ部品）。
+            // SC-AT-07: push 時の計上値は envelope 固定部の上限値 ＋ event 本体の実 encode 長。
             assert_eq!(eval.audit_queue_bytes(), Some(expected));
             // drain しても ack まで queue に残る（in-flight を含む）。
             let drained = eval.drain_audit_events();
@@ -7132,7 +7132,7 @@ mod tests {
         fn exceeded_requires_progress_in_slice() {
             // 前進保証: 上限 0 でも、この slice で 1 文も進めていなければ yield しない。
             let mut eval = Evaluator::new();
-            eval.set_audit_queue(0, estimate_envelope_overhead_bytes("0.21"));
+            eval.set_audit_queue(0, queue_envelope_overhead_bytes("0.21"));
             eval.push_host_call_events([started(0)]);
             assert!(!eval.audit_queue_exceeded(), "進捗なしでは判定しない");
             eval.audit_queue_progress = true;

@@ -19,8 +19,8 @@
 //!
 //! - `AuditBackpressure` の yield 配線（§10.2）と `engine.rs::YieldReason` 変種。
 //! - `ExecutionStarted` / `Terminal` 以外6 event の emission。
-//! - redaction policy 本体（§9）と strict deterministic CBOR（§9.2）。`encoded_bytes` は
-//!   [`estimate_encoded_bytes`] の naive 推定で、後で §9.2 encoder へ差し替え可能に隔離する。
+//! - redaction policy 本体（§9）。`encoded_bytes` は §9.2 の deterministic CBOR encoder
+//!   （`cbor` モジュール）の実 encode 長で数える（audit-strict-cbor-c2）。
 //! - record/replay（§6）、VM 変更、§1.1 の sink 必須ポリシー（opt-in のまま）。
 
 use std::cell::RefCell;
@@ -922,7 +922,7 @@ pub struct BudgetChargeAccumulator {
     groups: Vec<ChargeGroup>,
     /// 256 charge 到達等で確定した `BudgetCharged` レコード（emission 待ち）。
     finalized: Vec<AuditEvent>,
-    /// `finalized` の各 event の [`estimate_event_bytes`] 合計（Phase 6 B-2、§10.2）。
+    /// `finalized` の各 event の [`queued_event_bytes`] 合計（Phase 6 B-2、§10.2）。
     ///
     /// 確定済み `BudgetCharged` は audit drain queue の一部として数える（未確定の進行中グループは
     /// (resource, reason) ごとに 1 件で有界なので数えない）。envelope 固定部は呼び出し側が件数から
@@ -1058,16 +1058,16 @@ impl BudgetChargeAccumulator {
     fn push_finalized(&mut self, event: AuditEvent) {
         self.finalized_event_bytes = self
             .finalized_event_bytes
-            .saturating_add(estimate_event_bytes(&event));
+            .saturating_add(queued_event_bytes(&event));
         self.finalized.push(event);
     }
 
     /// 確定済み（emission 待ち）`BudgetCharged` が audit drain queue に占める推定 byte 数
     /// （Phase 6 B-2、§10.2）。
     ///
-    /// `envelope_overhead` は [`estimate_envelope_overhead_bytes`] の値で、確定済み 1 件ごとに
-    /// envelope 固定部として足す。journal が append 時に計上する [`estimate_encoded_bytes`] と
-    /// 同じ部品の和になる（§9.2: 別実装の size 推定を持たない）。
+    /// `envelope_overhead` は [`queue_envelope_overhead_bytes`] の値で、確定済み 1 件ごとに
+    /// envelope 固定部として足す。journal が append 時に計上する実 encode 長と同じ encoder の
+    /// size pass の和になる（§9.2: 別実装の size 推定を持たない）。
     pub(crate) fn finalized_queue_bytes(&self, envelope_overhead: u64) -> u64 {
         let count = self.finalized.len() as u64;
         self.finalized_event_bytes
@@ -1235,67 +1235,33 @@ impl AuditBudget {
 }
 
 // =============================================================================
-// D4 encoded_bytes の naive 推定（§9.2 strict CBOR は後続スライスで差し替え）
+// encoded_bytes の計上（§11、§9.2 の deterministic CBOR の実 encode 長）
 // =============================================================================
 
-/// envelope の encoded byte 数の naive 推定（D4）。
+/// envelope の実 encode 長（§9.2 の size pass）。journal の byte 予算が課金する値。
 ///
-/// A-1 では §9.2 の deterministic CBOR を実装しないため、journal の byte 予算が課金できる概算を
-/// 返す。call site を 1 関数へ隔離し、後続スライスで §9.2 encoder へ差し替えられるようにする。
-/// 推定は保守的（固定 overhead + 可変 field の byte 長）で、厳密な CBOR 長とは一致しない。
-///
-/// 「envelope 固定部（`estimate_envelope_overhead_bytes`）＋ event 本体
-/// （`estimate_event_bytes`）」の和。Phase 6 B-2 の audit drain queue（§10.2）は envelope 化前
-/// （sequence 未確定）の event を同じ 2 部品で計上するため、journal と queue が同一の推定を
-/// 共有する（§9.2: 予算 byte counter が別実装の size 推定を持つことを禁止）。
-pub fn estimate_encoded_bytes(envelope: &AuditEnvelope) -> u64 {
-    estimate_envelope_overhead_bytes(&envelope.language_revision)
-        .saturating_add(estimate_event_bytes(&envelope.event))
+/// 長さが `u64` を超える（[`cbor::CborError::LengthOverflow`]）ときは `None`。通常枠は
+/// `u64` 以下なので、`None` は単一 event が通常枠を超える場合に当たる。
+fn envelope_encoded_len(envelope: &AuditEnvelope) -> Option<u64> {
+    cbor::encoded_len(envelope).ok()
 }
 
-/// envelope 固定部の naive 推定（Phase 6 B-2 で [`estimate_encoded_bytes`] から分離）。
+/// sequence 確定前の event 1 件を audit drain queue へ計上する byte 数（§10.2、B-2）。
 ///
-/// schema_version(2) + execution_id(16) + source_hash(32) + sequence(8) + timestamp(16)
-/// ＝ 74 bytes 程度に可変長の language_revision を足す。sequence に依存しないので、sequence
-/// 確定前の event にも適用できる。§9.2 strict CBOR へ差し替えると sequence/timestamp の encode
-/// 長が値依存になるため、その時点では sequence を最大長とみなした上限値を返す。
-pub(crate) fn estimate_envelope_overhead_bytes(language_revision: &str) -> u64 {
-    74u64.saturating_add(language_revision.len() as u64)
+/// event 本体の実 encode 長。長さが `u64` を超えるときは `u64::MAX` に飽和させる
+/// （その event の push で queue は上限を超え、yield・backpressure の既存の経路に入る）。
+/// envelope 固定部は [`queue_envelope_overhead_bytes`] を別に足す。
+pub(crate) fn queued_event_bytes(event: &AuditEvent) -> u64 {
+    cbor::encoded_len(event).unwrap_or(u64::MAX)
 }
 
-/// event 本体の naive 推定（envelope 固定部を除く）。
-pub(crate) fn estimate_event_bytes(event: &AuditEvent) -> u64 {
-    match event {
-        AuditEvent::ExecutionStarted {
-            engine_version,
-            redaction_policy_id,
-            ..
-        } => {
-            // 固定 field（backend/revision/budget/hash/mode）＋可変 string を概算。
-            let fixed: u64 = 256;
-            fixed
-                .saturating_add(engine_version.len() as u64)
-                .saturating_add(redaction_policy_id.len() as u64)
-        }
-        AuditEvent::Terminal { error, .. } => {
-            let fixed: u64 = 128;
-            let err_bytes = match error {
-                None => 0,
-                Some(AuditErrorPayload::Full(e)) => {
-                    (e.code.len()
-                        + e.message_id.len()
-                        + e.trace.iter().map(|f| f.function.len() + 16).sum::<usize>())
-                        as u64
-                }
-                Some(AuditErrorPayload::Emergency {
-                    code, message_id, ..
-                }) => (code.len() + message_id.len() + 40) as u64,
-            };
-            fixed.saturating_add(err_bytes)
-        }
-        // A-1 では emission しない event。概算のみ（journal には積まれない）。
-        _ => 128,
-    }
+/// sequence 確定前の event に足す envelope 固定部の上限値（§10.2、B-2）。
+///
+/// sequence を `u64` の最大幅（9 byte）とみなした encode 長で、sequence 確定後の実際の固定部
+/// 以上になる（差は sequence の encode 幅の差、0〜8 byte）。`language_revision` は execution の
+/// 中で不変、timestamp は 18 byte 固定。飽和は [`queued_event_bytes`] と同じ。
+pub(crate) fn queue_envelope_overhead_bytes(language_revision: &str) -> u64 {
+    cbor::envelope_fixed_len_upper_bound(language_revision).unwrap_or(u64::MAX)
 }
 
 // =============================================================================
@@ -1339,8 +1305,11 @@ pub struct AuditJournal {
     next_sequence: u64,
     /// commit 済み通常 event 数（Terminal を含まない）。
     committed_events: u64,
-    /// commit 済み通常 encoded byte 合計（Terminal を含まない）。
+    /// commit 済み通常 encoded byte 合計（Terminal を含まない）。各 envelope の実 encode 長の和。
     committed_bytes: u64,
+    /// append 済み Terminal の実 encode 長（未 append は 0）。上限とは比べず、`committed_bytes` とは
+    /// 別に持つ（Terminal は専用 reserve 側、§11。60 KiB 縮退と `Emergency` は c4）。
+    terminal_bytes: u64,
     /// Started を append したか（Terminal 予約が有効か）。
     started: bool,
     /// Terminal を append したか（以後 append 禁止、§8 規則9）。
@@ -1357,6 +1326,7 @@ impl AuditJournal {
             next_sequence: 0,
             committed_events: 0,
             committed_bytes: 0,
+            terminal_bytes: 0,
             started: false,
             terminated: false,
         }
@@ -1428,7 +1398,10 @@ impl AuditJournal {
             }
         }
 
-        let event_bytes = estimate_encoded_bytes(envelope);
+        // size pass の長さが u64 を超える event は通常枠を必ず超える（§11）。
+        let Some(event_bytes) = envelope_encoded_len(envelope) else {
+            return Err(AuditFailure::EventTooLarge);
+        };
 
         // 通常 event が使える event-count 上限（Terminal 予約を除く）。
         let normal_event_limit = self
@@ -1536,9 +1509,12 @@ impl AuditJournal {
         if envelope.sequence != self.next_sequence {
             return Err(AuditFailure::InvariantViolation);
         }
-        // Terminal は専用予約を使うので通常 byte/event 残量は検査しない（§11）。
+        // Terminal は専用予約を使うので通常 byte/event 残量は検査しない（§11）。実 encode 長は
+        // 数えて持つ（`u64` を超えるなら飽和。Terminal は必ず append する）。
+        let terminal_bytes = envelope_encoded_len(envelope).unwrap_or(u64::MAX);
         // sequence の overflow だけは fail-closed（§7.1）。
         let seq = self.take_sequence()?;
+        self.terminal_bytes = terminal_bytes;
         self.terminated = true;
         Ok(seq)
     }
@@ -2188,7 +2164,6 @@ fn wrong_execution_id(id: ExecutionId) -> ExecutionId {
 /// 入れ子の再帰は `AuditValue` の nesting 上限（64 段、§9.1）を前提にしており、上限の強制は
 /// 呼び出し側（redaction、c4）の責務である。
 pub(crate) mod cbor {
-    #![cfg_attr(not(test), expect(dead_code))]
 
     use super::*;
 
@@ -2198,6 +2173,7 @@ pub(crate) mod cbor {
         /// size pass の長さが `u64` を超えた。
         LengthOverflow,
         /// write pass の byte 長が size pass の長さと一致しない（internal audit failure）。
+        #[cfg_attr(not(test), expect(dead_code))]
         LengthMismatch,
     }
 
@@ -2220,6 +2196,7 @@ pub(crate) mod cbor {
         }
 
         /// `len` から数える（overflow 経路の検証用）。
+        #[cfg_attr(not(test), expect(dead_code))]
         pub(crate) fn starting_at(len: u64) -> Self {
             Self { len }
         }
@@ -2313,6 +2290,7 @@ pub(crate) mod cbor {
     }
 
     /// null（simple value 22）。
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn null<O: CborOut>(out: &mut O) -> Result<(), CborError> {
         out.put(&[0xf6])
     }
@@ -2726,6 +2704,7 @@ pub(crate) mod cbor {
 
     /// write pass: `value` の canonical bytes を返す。先に size pass で長さを求め、write pass の
     /// byte 長と一致しなければ [`CborError::LengthMismatch`] とする（§11）。
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn encode_to_vec<T: Encode>(value: &T) -> Result<Vec<u8>, CborError> {
         let len = encoded_len(value)?;
         let mut buf = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
@@ -2822,17 +2801,13 @@ mod tests {
         }
     }
 
-    // --- B-2（§10.2・§9.2）: audit drain queue と journal が同じ byte 推定を共有する ---
+    // --- audit-strict-cbor-c2（§10.2・§11）: journal と audit drain queue は encoder の実長で数える ---
 
-    /// B2-AT-10: envelope 化前の event を「envelope 固定部 ＋ event 本体」で計上した値が、同じ
-    /// event を journal へ append したときの `committed_bytes` の増分と一致する。
-    #[test]
-    fn b2_at_10_queue_estimate_matches_journal_committed_bytes() {
-        let id = exec_id(42);
+    fn lifecycle_events() -> Vec<AuditEvent> {
         let mut acc = BudgetChargeAccumulator::new();
         acc.note_charge(BudgetResource::Fuel, BudgetChargeReason::Operation, 3, 3);
         let charged = acc.flush().remove(0);
-        let events = vec![
+        vec![
             AuditEvent::HostCallStarted {
                 operation_id: 0,
                 call_id: 0,
@@ -2853,35 +2828,184 @@ mod tests {
                 usage: BudgetUsage::default(),
             },
             charged,
-        ];
+        ]
+    }
 
+    /// SC-AT-06: journal の `committed_bytes` / `terminal_bytes` が各 envelope の c1 encoder による
+    /// byte 長の和と一致する。Reveal された body を含む event は payload に応じた長さになる。
+    #[test]
+    fn sc_at_06_journal_counts_encoder_length() {
+        let id = exec_id(42);
+        let revealed = AuditEvent::HostCallStarted {
+            operation_id: 1,
+            call_id: 1,
+            function: "write_file".to_string(),
+            request: AuditPayload {
+                fields: [(
+                    "body".to_string(),
+                    AuditField::Revealed {
+                        class: AuditFieldClass::Body,
+                        value: AuditValue::Scalar(AuditScalar::Utf8("x".repeat(300))),
+                        original_bytes: 303,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+            request_bytes: 300,
+        };
+        let mut events = lifecycle_events();
+        events.push(revealed.clone());
+
+        let mut journal = AuditJournal::open(AuditBudget::default());
+        let started = started_envelope(id, 0);
+        let mut sum = cbor::encoded_len(&started).expect("len");
+        journal.append_normal(&started).expect("started");
+        for event in events {
+            let envelope = AuditEnvelope {
+                event,
+                sequence: journal.next_sequence(),
+                ..started_envelope(id, 0)
+            };
+            sum += cbor::encoded_len(&envelope).expect("len");
+            journal.append_normal(&envelope).expect("append");
+            assert_eq!(journal.committed_bytes, sum);
+            // size pass と write pass は一致する（c1 の契約）。
+            assert_eq!(
+                cbor::encode_to_vec(&envelope).expect("bytes").len() as u64,
+                cbor::encoded_len(&envelope).expect("len")
+            );
+        }
+        assert_eq!(journal.terminal_bytes, 0);
+
+        // Reveal された body は payload に応じた長さで、128 固定ではない。
+        let revealed_len = cbor::encoded_len(&revealed).expect("len");
+        let empty_len = cbor::encoded_len(&lifecycle_events()[0]).expect("len");
+        assert!(revealed_len >= empty_len + 300);
+
+        let terminal = terminal_envelope(id, journal.next_sequence(), TerminalOutcome::Completed);
+        let terminal_len = cbor::encoded_len(&terminal).expect("len");
+        journal.append_terminal(&terminal).expect("terminal");
+        // Terminal は reserve 側に数え、通常枠の和へ混ぜない。全 envelope の和と一致する。
+        assert_eq!(journal.committed_bytes, sum);
+        assert_eq!(journal.terminal_bytes, terminal_len);
+        assert_eq!(
+            journal.committed_bytes + journal.terminal_bytes,
+            sum + terminal_len
+        );
+    }
+
+    /// SC-AT-07（B2-AT-10 の置き換え）: queue の push 時計上値は、同じ event を journal へ append
+    /// したときの増分以上で、差は sequence の encode 幅の差（0〜8 byte）に限られる。
+    #[test]
+    fn sc_at_07_queue_value_is_upper_bound_of_journal_increment() {
+        let id = exec_id(42);
         let mut journal = AuditJournal::open(AuditBudget::default());
         journal
             .append_normal(&started_envelope(id, 0))
             .expect("started");
-        for event in events {
+        for event in lifecycle_events() {
             let envelope = AuditEnvelope {
                 event: event.clone(),
                 sequence: journal.next_sequence(),
                 ..started_envelope(id, 0)
             };
-            let queued = estimate_envelope_overhead_bytes(&envelope.language_revision)
-                .saturating_add(estimate_event_bytes(&event));
+            let queued = queue_envelope_overhead_bytes(&envelope.language_revision)
+                .saturating_add(queued_event_bytes(&event));
             let before = journal.committed_bytes;
             journal.append_normal(&envelope).expect("append");
-            assert_eq!(
-                journal.committed_bytes - before,
-                queued,
-                "queue の計上値と journal の committed_bytes 増分が一致する: {event:?}"
+            let increment = journal.committed_bytes - before;
+            assert!(queued >= increment, "上限値は実長以上: {event:?}");
+            assert!(
+                queued - increment <= 8,
+                "差は sequence 幅の差だけ: {event:?}"
             );
-            assert_eq!(estimate_encoded_bytes(&envelope), queued);
+        }
+    }
+
+    /// SC-AT-08: 実長で上限を判定する。実長の合計が通常枠を超えると `BudgetExceeded`、単一 event の
+    /// 実長が通常枠を超えると `EventTooLarge`。Terminal は予約枠で必ず append される。
+    #[test]
+    fn sc_at_08_limits_use_encoder_length() {
+        let id = exec_id(1);
+        let started = started_envelope(id, 0);
+        let started_len = cbor::encoded_len(&started).expect("len");
+        let yielded = |seq| AuditEnvelope {
+            event: lifecycle_events().remove(1),
+            sequence: seq,
+            ..started_envelope(id, 0)
+        };
+        let yielded_len = cbor::encoded_len(&yielded(1)).expect("len");
+
+        // 通常枠 = Started ＋ Yielded 1 件ちょうど。2 件目の Yielded で合計が枠を超える。
+        let budget = AuditBudget {
+            max_encoded_bytes: 64 * KIB + started_len + yielded_len,
+            ..AuditBudget::default()
+        };
+        let mut journal = AuditJournal::open(budget);
+        journal.append_normal(&started).expect("started");
+        journal
+            .append_normal(&yielded(1))
+            .expect("枠ちょうどは通る");
+        assert_eq!(journal.committed_bytes, started_len + yielded_len);
+        assert_eq!(
+            journal.append_normal(&yielded(2)),
+            Err(AuditFailure::BudgetExceeded)
+        );
+        // Terminal は予約枠で必ず append される。
+        let terminal = terminal_envelope(id, 2, TerminalOutcome::Completed);
+        assert_eq!(journal.append_terminal(&terminal), Ok(2));
+
+        // 単一 event の実長が通常枠を超えると EventTooLarge。
+        let small = AuditBudget {
+            max_encoded_bytes: 64 * KIB + started_len - 1,
+            ..AuditBudget::default()
+        };
+        let mut journal = AuditJournal::open(small);
+        assert_eq!(
+            journal.append_normal(&started),
+            Err(AuditFailure::EventTooLarge)
+        );
+    }
+
+    /// SC-AT-09（回帰）: `tests/audit_*.rs`（`tests/audit_queue_bytes.rs` を含む）は無改変で緑。
+    /// この変更は byte 値の期待値を持つ統合テストを動かさなかったので、ここでは unit test の更新範囲
+    /// （B2-AT-10・R-AT-08・R1b-AT-08 の naive 推定の固定を SC-AT-06・07 へ置き換え）だけを持つ。
+    ///
+    /// SC-AT-10: 同じ入力なら committed_bytes・queue の計上値・envelope の byte 列が 100 回一致する。
+    #[test]
+    fn sc_at_10_accounting_is_deterministic() {
+        let run = || {
+            let id = exec_id(7);
+            let mut journal = AuditJournal::open(AuditBudget::default());
+            let mut queue = 0u64;
+            let mut bytes = Vec::new();
+            journal
+                .append_normal(&started_envelope(id, 0))
+                .expect("started");
+            bytes.push(cbor::encode_to_vec(&started_envelope(id, 0)).expect("bytes"));
+            for event in lifecycle_events() {
+                queue += queue_envelope_overhead_bytes("0.20") + queued_event_bytes(&event);
+                let envelope = AuditEnvelope {
+                    event,
+                    sequence: journal.next_sequence(),
+                    ..started_envelope(id, 0)
+                };
+                journal.append_normal(&envelope).expect("append");
+                bytes.push(cbor::encode_to_vec(&envelope).expect("bytes"));
+            }
+            (journal.committed_bytes, queue, bytes)
+        };
+        let first = run();
+        for _ in 0..100 {
+            assert_eq!(run(), first);
         }
     }
 
     /// accumulator の確定済み（256-charge cut）分だけが queue byte に数えられ、flush で 0 に戻る。
     #[test]
     fn b2_finalized_charges_count_toward_queue_until_flush() {
-        let overhead = estimate_envelope_overhead_bytes("0.21");
+        let overhead = queue_envelope_overhead_bytes("0.21");
         let mut acc = BudgetChargeAccumulator::new();
         // 進行中グループ（未確定）は数えない。
         acc.note_charge(BudgetResource::Fuel, BudgetChargeReason::Operation, 1, 1);
@@ -2894,7 +3018,7 @@ mod tests {
         assert_eq!(finalized.len(), 1);
         assert_eq!(
             acc.finalized_queue_bytes(overhead),
-            overhead + estimate_event_bytes(&finalized[0])
+            overhead + queued_event_bytes(&finalized[0])
         );
         let _ = acc.flush();
         assert_eq!(acc.finalized_queue_bytes(overhead), 0);
@@ -3936,24 +4060,6 @@ mod tests {
         ));
     }
 
-    /// R1b-AT-08: Reveal された body を載せても host-call event の byte 推定は 128 固定のまま。
-    #[test]
-    fn r1b_at_08_estimate_unchanged_with_revealed_body() {
-        let key = r1b_key("body");
-        let body = fold_body_field(&r1b_policy(100), Some(&key), 6, r1b_text("CANARY"));
-        assert!(matches!(body, AuditField::Revealed { .. }));
-        let started = AuditEvent::HostCallStarted {
-            operation_id: 1,
-            call_id: 1,
-            function: "write_file".to_string(),
-            request: AuditPayload {
-                fields: [("body".to_string(), body)].into_iter().collect(),
-            },
-            request_bytes: 6,
-        };
-        assert_eq!(estimate_event_bytes(&started), 128);
-    }
-
     /// Identifier は既定（Reveal）で渡した value を `Revealed`、Omit 設定時は `Omitted`。
     #[test]
     fn fold_identifier_reveals_in_reveal_mode() {
@@ -3994,64 +4100,6 @@ mod tests {
                 original_bytes: 3
             }
         ));
-    }
-
-    /// R-AT-08: §9.1 の payload ツリーを載せても host-call lifecycle event の `estimate_event_bytes`
-    /// が payload 非依存の 128 固定のまま据え置かれる（B-2 queue 会計の不変条件）。
-    #[test]
-    fn r_at_08_estimate_event_bytes_frozen_for_host_call_events() {
-        let mut big_fields = BTreeMap::new();
-        big_fields.insert(
-            "path".to_string(),
-            AuditField::HmacSha256 {
-                class: AuditFieldClass::Path,
-                digest: [0xabu8; 32],
-                original_bytes: 4096,
-            },
-        );
-        big_fields.insert(
-            "arguments".to_string(),
-            AuditField::Revealed {
-                class: AuditFieldClass::Identifier,
-                value: AuditValue::Sequence(vec![AuditField::Omitted {
-                    class: AuditFieldClass::Body,
-                    original_bytes: 9999,
-                }]),
-                original_bytes: 9999,
-            },
-        );
-        let big_payload = AuditPayload { fields: big_fields };
-
-        let started = AuditEvent::HostCallStarted {
-            operation_id: 0,
-            call_id: 0,
-            function: "write_file".to_string(),
-            request: big_payload.clone(),
-            request_bytes: 4096,
-        };
-        let decision = AuditEvent::CapabilityDecision {
-            operation_id: 0,
-            call_id: Some(0),
-            capability: "filesystem".to_string(),
-            action: "write_file".to_string(),
-            resource: big_payload.clone(),
-            decision: CapabilityDecisionKind::Allow,
-            rule_id: "mount-granted".to_string(),
-        };
-        let finished = AuditEvent::HostCallFinished {
-            operation_id: 0,
-            call_id: 0,
-            outcome: HostCallOutcome::Success,
-            response: big_payload,
-            response_bytes: 0,
-            error_code: None,
-            effect_status: EffectStatus::Committed,
-        };
-
-        // host-call lifecycle 3 event は `_ => 128` 分岐で payload に依存せず 128 固定。
-        assert_eq!(estimate_event_bytes(&started), 128);
-        assert_eq!(estimate_event_bytes(&decision), 128);
-        assert_eq!(estimate_event_bytes(&finished), 128);
     }
 
     // --- §10 sink callback 再入 guard（fix-audit-sink-reentrancy-guard、RG-AT-04）---
