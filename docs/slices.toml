@@ -318,7 +318,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "fix-heap-charge
 acceptance = ["HCN-AT-01..05"]
 design_pr  = 456
 depends_on = ["A-1"]
-order      = 41
+order      = 46
 blocked_reason = "manifesto: 原則5（予測可能性）— Tracked の Drop の release を通知すると、scope の drop 順（src/env.rs の HashMap、既定の hasher）が 256 charge ごとに確定する HeapBytes の BudgetCharged の released_delta・usage_after に出て、同じ script・同じ入力で process ごとに event 列が変わる（実装 PR #457 の審査、issue #458）"
 issues     = [458]
 
@@ -368,7 +368,7 @@ id         = "fix-closure-capture-chain-stack"
 title      = "closure の capture の連鎖の破棄による stack 枯渇を防ぐ（TM-007、semantic-decisions §21.3 の範囲外）"
 status     = "todo"
 parent     = "REV-001"
-order      = 27
+order      = 32
 
 # loop:drift #263 D-3 (e)（Q2=A、返信なしのため推奨案で確定）で見つかった不具合の fix。
 # capability-model §11.1「host function ID は registry 内で一意」に対し、register_cooperative が
@@ -641,7 +641,7 @@ acceptance = ["FBCa-AT-01..05"]
 depends_on = ["F-2c", "fix-cow-copy-parity", "fix-cow-copy-parity-upvalue", "fix-cow-copy-parity-journal"]
 design_pr  = 523
 issues     = [502, 510, 517]
-order      = 45
+order      = 47
 
 # 見積もり: src/ 約 400〜600 行、触る仕組みは budget の byte の課金 1 つ、受入基準は設計で決める（5 以内）。
 # scan だけの string builtin の扱いと host function の引数・結果の serialize の数え方は、ready にする設計 PR で決める。
@@ -652,7 +652,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["fuel-bulk-charge-a"]
-order      = 46
+order      = 49
 
 # 見積もり: src/ 約 200〜350 行、触る仕組みは compile・link の fuel の課金 1 つ、受入基準は設計で決める（5 以内）。
 # compile・link の fuel の払い手（execution の台帳か LinkRequest の budget か）は、ready にする設計 PR で決める。
@@ -663,7 +663,7 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 6"
 depends_on = ["fuel-bulk-charge-b"]
-order      = 47
+order      = 50
 
 # audit-strict-cbor（strict deterministic CBOR、§9.2）は 1 PR の大きさの目安に収まらないため、
 # c1〜c4 の 4 スライスへ分割した（spec「audit-strict-cbor の sub-slice 分割」）。元の id は置き換えて残さない。
@@ -706,7 +706,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-11..15"]
 depends_on = ["audit-strict-cbor-c1"]
 design_pr  = 256
-order      = 49
+order      = 51
 
 [[slice]]
 id         = "audit-strict-cbor-c4"
@@ -718,7 +718,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-strict-cb
 acceptance = ["SC-AT-16..20"]
 depends_on = ["audit-strict-cbor-c2", "audit-strict-cbor-c3"]
 design_pr  = 256
-order      = 50
+order      = 52
 
 [[slice]]
 id         = "audit-sink-required"
@@ -727,7 +727,7 @@ status     = "todo"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 depends_on = ["A-1"]
-order      = 51
+order      = 53
 
 [[slice]]
 id         = "audit-fs-builtin-scope"
@@ -736,7 +736,7 @@ status     = "todo"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 depends_on = ["R-1a"]
-order      = 52
+order      = 54
 
 # loop:drift #342 の D-52（機械的）で逸脱一覧に載せた「fs 以外の host call は triple を出さない」の延期先。未設計。
 # order は fs builtin の監査範囲（50）の次に置いた（同じ監査の host-call 範囲の拡張のため）。
@@ -757,6 +757,40 @@ parent     = "Phase 6 残"
 spec_slice = "determinism Slice 5"
 depends_on = ["B-1"]
 order      = 60
+
+# issue #525（kamonabe、仕分け「受け入れ」、「優先」）から作った VM parity フェーズ（loop-runbook §6.7）の最初の 2 本。
+# spec の置き場所は determinism-and-audit §14 Slice 6（VM conformance。未実装範囲の「VM 適合 gate」「VM の audit triple 対応」の延期先）。
+# 割り方: a は差分テストの土台・書き換えの種類 × 変数の置き場所の matrix・REPL 継続・print だけで動く fixture と既知の差分一覧の gate、
+#   b は capability の要る fixture と CLI の byte 比較。理由は spec の「VM parity フェーズのスライス分割」小節に書いた（90 分に収める）。
+# vm-parity-diff-a: 見積もり src/ 0 行、tests/ 約 600〜1000 行、受入基準 6（VPD-AT-01..06）。§6.7 のとおり §14.1 の上限は当てない。
+#   判断の候補 Q1〜Q3（Engine::run の context の扱い・差の出なくなった項目の扱い・heap の比べ方）は設計 PR で判断役が選ぶ。
+# vm-parity-diff-b: a に依存するため todo。a が done になったら設計 PR で受入基準を採番して ready にする。
+# order は loop-runbook §8 の「優先」の既定（今あるすべての ready・todo より前）で 27・31。0〜52 に空きが無いので、この PR の中で付け直した。
+#   done のスライスの order は変えず、todo・blocked・ready どうしの相対順を保つよう、それぞれを 2 つ後ろの todo・blocked・ready の値へ、
+#   最後の 2 つを空いている 53・54 へ送った: fix-closure-capture-chain-stack 27 → 32、fix-run-foreign-engine-mismatch 31 → 34、
+#   fix-execution-request-send-sync 32 → 35、fix-host-error-code-invalid-descriptor 34 → 37、fix-sync-run-concurrent-handle 35 → 38、
+#   fix-scheduler-context-reset-step-budget 37 → 40、fix-execution-budget-usage-fresh 38 → 41、fix-cancel-token-waker-recheck 40 → 45、
+#   fix-heap-charge-audit-notify 41 → 46、fuel-bulk-charge-a 45 → 47、fuel-bulk-charge-b 46 → 49、fuel-bulk-charge-c 47 → 50、
+#   audit-strict-cbor-c3・c4 49・50 → 51・52、audit-sink-required 51 → 53、audit-fs-builtin-scope 52 → 54。55 以降は変えていない。
+#   fuel-bulk-charge-a は実装 PR #516 が開いており、issue #525 と §6.7 のとおりそのまま完了させる（order の付け直しは着手先の選択に効かない）。
+[[slice]]
+id         = "vm-parity-diff-a"
+title      = "tree と VM の網羅的な差分テストの土台（全軸の比較・書き換え × 置き場所の matrix・REPL 継続・print だけの fixture）と既知の差分一覧の CI gate"
+status     = "ready"
+parent     = "VM parity"
+spec_slice = "determinism Slice 6"
+spec       = { doc = "docs/determinism-and-audit.md", section = "vm-parity-diff-a 実装スライス（tree と VM の網羅的な差分テストの土台と、既知の差分一覧の CI gate）" }
+acceptance = ["VPD-AT-01..06"]
+order      = 27
+
+[[slice]]
+id         = "vm-parity-diff-b"
+title      = "差分テストを capability の要る fixture と CLI の stdout・stderr・終了コードの byte 比較へ広げる"
+status     = "todo"
+parent     = "VM parity"
+spec_slice = "determinism Slice 6"
+depends_on = ["vm-parity-diff-a"]
+order      = 31
 
 [[slice]]
 id         = "audit-vm-triple"
@@ -869,14 +903,14 @@ id         = "fix-run-foreign-engine-mismatch"
 title      = "Engine::run に別 engine の context・LinkedScript を渡したとき、開始前の EngineMismatch として拒否し context を poison しない（embedding-api §9・§10 規則1・EMB-AT-03、loop:drift #352 D-63）"
 status     = "todo"
 parent     = "REV-008"
-order      = 31
+order      = 34
 
 [[slice]]
 id         = "fix-execution-request-send-sync"
 title      = "MonotonicClock に Send + Sync の bound を足して ExecutionRequest を Send・Sync にし、EMB-AT-02 の assertion に加える（embedding-api §9、loop:drift #352 D-64）"
 status     = "todo"
 parent     = "REV-015"
-order      = 32
+order      = 35
 
 [[slice]]
 id         = "fix-repl-submission-budget"
@@ -894,7 +928,7 @@ id         = "fix-host-error-code-invalid-descriptor"
 title      = "HostErrorCode::new の文字種の違反に ConfigError::InvalidDescriptor を返す（embedding-api §3・§8、loop:drift #352 D-68）"
 status     = "todo"
 parent     = "REV-015"
-order      = 34
+order      = 37
 
 # 週次計画 #355 の P-1（loop-guard §4.1 の 1 段目＝CI の機械チェックを cargo test のテストとして置く）を元にしたスライス（loop-runbook §10、PM が分割）。未設計（todo）。
 # 検査項目の選定（何を・どの許可リストで弾くか）は設計役が選択肢と推奨案を出し、判断役が決める（#355 P-1）。.github/（凍結）は変えない。
@@ -969,14 +1003,14 @@ id         = "fix-sync-run-concurrent-handle"
 title      = "同期の Engine::execute・execute_repl_submission が他の nonterminal handle を検出して ConcurrentRunRequiresPolling を返し、戻らない経路を無くす（execution-control §9.2、loop:drift #373 D-69）"
 status     = "todo"
 parent     = "REV-015"
-order      = 35
+order      = 38
 
 [[slice]]
 id         = "fix-scheduler-context-reset-step-budget"
 title      = "scheduler 側の ExecutionContext::reset_step_budget（fuel だけを戻す公開メソッド）を削除する（execution-control §13、loop:drift #373 D-71）"
 status     = "todo"
 parent     = "REV-015"
-order      = 37
+order      = 40
 
 [[slice]]
 id         = "budget-reservation-settle"
@@ -1318,7 +1352,7 @@ id         = "fix-execution-budget-usage-fresh"
 title      = "scheduler の handle 経路で budget の使用量を execution ごとに新しく数え、前の execution の使用量を上限の判定と usage に含めない（execution-control §2・§9.1・§13、loop:drift #429 D-136）"
 status     = "todo"
 parent     = "REV-015"
-order      = 38
+order      = 41
 
 [[slice]]
 id         = "fix-link-context-baseline-charge"
@@ -1336,7 +1370,7 @@ id         = "fix-cancel-token-waker-recheck"
 title      = "CancellationToken::register_waker で waker を保存したあと cancel 済みかを確かめ直し、cancel 済みなら即 wake する（execution-control §8・§9.1、loop:drift #429 D-139）"
 status     = "todo"
 parent     = "REV-015"
-order      = 40
+order      = 45
 
 # issue #374（kamonabe、PR #349 の判断 Q2 を A から C へ変えた `判断:`。§8 の仕分けで「受け入れ」）から作った fix 2 本。
 # fix-vm-dict-literal-depth-settle: VM の Dict リテラルの構築（OpCode::DictInsert）で途中の深度の読み直しを無くし、tree と同じく
