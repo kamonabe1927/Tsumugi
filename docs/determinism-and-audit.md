@@ -1894,7 +1894,7 @@ c1 は byte 計測にも redaction にも配線しないため、c1 だけでは
 - **想定の変更規模**: `src/audit.rs`・`src/eval.rs`・`src/embedding.rs`・`src/budget.rs` で約 80〜150 行（推定関数の置き換えと呼び出し側）。仕組みは監査の byte 会計 1 つ。
 
 **`ready` にする設計 PR の確かめ**（2026-11-25。c1 が done（実装 PR #261）になった後の main 4d12771 で確かめた。上の実装範囲・範囲外・受入基準・想定の変更規模は変えない。
-判断の候補 Q5・Q6 を設計 PR に出した。選ばれた内容はこの下に追記する）:
+判断の候補 Q5・Q6 を設計 PR #519 に出した。選ばれた内容はこの下に追記する）:
 
 - c1 の encoder は `src/audit.rs` の `pub(crate) mod cbor` にあり、c2 が使う入口は `cbor::encoded_len`（size pass、checked）・`cbor::encode_to_vec`
   （size pass の長さと write pass の byte 長が違えば `CborError::LengthMismatch`）・`cbor::envelope_fixed_len_upper_bound(language_revision)`
