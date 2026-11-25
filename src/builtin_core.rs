@@ -2439,6 +2439,50 @@ pub fn builtin_path_join_budgeted(
 // [`dispatch_filesystem_capability`]）を通る。`path_join` は純関数なので残す。
 
 // =============================================================================
+// 結果の要素数の課金（fuel-bulk-charge-a、execution-control §4.1）
+// =============================================================================
+
+/// 要素を作る・複製する builtin（`range` / `keys` / `values` / List の `slice` / List の `reverse` /
+/// `split`）の結果の要素数 n を、`dispatch` の前に tree・VM が同じ位置で fuel へ払うために数える。
+///
+/// 順は「arity・型の検査 → `max_collection_elements` の検査 → fuel n → 結果の確保」。ここは検査を
+/// 通る引数のときだけ `Some(n)` を返し、arity・型の誤りや n が上限を超える場合は `None`（課金せず、
+/// その後の `dispatch` が同じ error を返す）。Str の `slice` / `reverse` は要素でなく UTF-8 の copy
+/// なので `None`（fuel-bulk-charge-b の範囲）。
+pub fn result_element_count(name: &str, args: &[Value], max_collection: u64) -> Option<u64> {
+    let count: u64 = match (name, args) {
+        ("range", [Value::Int(start), Value::Int(end)]) => {
+            if end > start {
+                u64::try_from(end.checked_sub(*start)?).ok()?
+            } else {
+                0
+            }
+        }
+        ("keys", [Value::Dict(map)]) | ("values", [Value::Dict(map)]) => map.len() as u64,
+        ("slice", [Value::List(v), Value::Int(start), Value::Int(end)]) => {
+            let start = usize::try_from(*start).unwrap_or(0).min(v.len());
+            let end = usize::try_from(*end).unwrap_or(0).min(v.len());
+            end.saturating_sub(start) as u64
+        }
+        ("reverse", [Value::List(v)]) => v.len() as u64,
+        ("split", [Value::Str(s), Value::Str(sep)]) => {
+            // 上限を 1 つ超えたところで数えるのをやめる（`dispatch` が collection の上限の error を返す）。
+            let cap = max_collection.saturating_add(1);
+            let mut n: u64 = 0;
+            for _ in s.split(sep.as_str()) {
+                n += 1;
+                if n >= cap {
+                    break;
+                }
+            }
+            n
+        }
+        _ => return None,
+    };
+    (count <= max_collection).then_some(count)
+}
+
+// =============================================================================
 // ディスパッチ関数
 // =============================================================================
 

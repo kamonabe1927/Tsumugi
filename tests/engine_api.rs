@@ -1870,7 +1870,10 @@ mod tree_expr_continuation_e1 {
                 let (caps, buffer) = stdout_caps();
                 let mut evaluator = tsumugi::eval::Evaluator::new();
                 evaluator.set_capabilities(caps);
-                let result = evaluator.run(&program, text.len() as u64);
+                // 埋め込みの実行は transaction（submission journal）を張る。journal が元の値を握るので、
+                // push・index 代入の最初の書き換えは COW の複製になり、版 3 から fuel に出る
+                // （fuel-bulk-charge-a）。同期経路も journal 付きで走らせて、複製の有無を揃える。
+                let result = evaluator.run_repl_submission(&program, text.len() as u64);
                 let stdout =
                     String::from_utf8(buffer.lock().expect("lock").clone()).expect("utf-8");
                 (result, stdout, evaluator.budget_usage().committed.fuel)
@@ -3502,9 +3505,11 @@ print(a, b)
         }
         // 比較の段を含む poll は、`sort` の文の直後の yield 可能点で SliceFuelExhausted になる
         // （従来は slice が count_step だけを数え、比較の段の後も文を続けていた）。
+        // `range(0, 2000)` の要素数 2000 は版 3 から 1 回の課金で払う（fuel-bulk-charge-a）。その区間は
+        // §4.2 の超過として別に扱い（`max_collection_elements` で有界）、比較の段としては数えない。
         let heavy: Vec<_> = polls
             .iter()
-            .filter(|(increment, _)| *increment > 16 + BCY_CHUNK_FUEL)
+            .filter(|(increment, _)| *increment > 16 + BCY_CHUNK_FUEL + 2000)
             .collect();
         assert_eq!(heavy.len(), 1, "比較の段は 1 回: {heavy:?}");
         assert!(heavy[0].1, "比較の段のあと slice fuel で yield する");
@@ -3861,11 +3866,11 @@ end
         use tsumugi::embedding::LanguageRevision;
         let nested = bcy_nested("ys", 600);
         // (前置き, builtin を呼ぶ文, 版, builtin 自体の fuel, 文の主要 charge point の課金)
-        // builtin 自体の fuel は、変更前の値（1799・1200・4000・1200・1208・0）から前置きの版 1 の課金
+        // builtin 自体の fuel は、変更前の値（1799・1200・4000・1200・1208・0。最後だけ版 3 の range の 600 を足した）から前置きの版 1 の課金
         // （ループの反復 600 回、`BCY_SCALARS_2000` は 2,000 回）を引いたもの。
         // `let s = sort(ys)`: 文 1・call 式 1・invocation 5・引数 1・assignment 1 = 9。
         // `let j = join(ys, ",")`: 引数が 1 つ多く 10。`let c = contains(ys, [599])`: 引数 [599] が 2 で 11、2 文で 22。
-        // `let xs = range(0, 600)` 10・`let j = join(xs, ",")` 10・`let c = contains(xs, -1)`（`-1` は単項演算 3）12。
+        // `let xs = range(0, 600)` 10（結果の要素 600 は builtin 自体の fuel）・`let j = join(xs, ",")` 10・`let c = contains(xs, -1)`（`-1` は単項演算 3）12。
         let cases: [(String, String, LanguageRevision, u64, u64); 6] = [
             (
                 nested.clone(),
@@ -3907,7 +3912,8 @@ end
                 "let xs = range(0, 600)\nlet j = join(xs, \",\")\nlet c = contains(xs, -1)\n"
                     .to_string(),
                 LanguageRevision::CURRENT,
-                0,
+                // `range(0, 600)` の結果の要素数 600（版 3 から、fuel-bulk-charge-a）。
+                600,
                 32,
             ),
         ];

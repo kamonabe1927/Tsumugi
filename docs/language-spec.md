@@ -977,7 +977,7 @@ runtime error は operation ごとの共通 constructor から `kind`・メッ�
 
 外部操作の権限は冒頭の「外部操作の権限」と[Capability Model仕様](capability-model.md)に従う。以下は誤操作や過剰な資源消費を抑えるためのdefense-in-depth機構であり、敵対的なスクリプトを隔離するセキュリティ境界ではない。非信頼コードを実行する場合は、非rootプロセス、権限制限されたコンテナ、read-only filesystem、CPU・メモリ・実行時間上限などOS側の分離を併用する。
 
-構文とASTは深度256、非循環import chainはroot scriptを除いて128に制限し、parser・compiler・evaluatorがhost stackを消費する前にエラー化する。実行中に作るListとDictの入れ子の深さも256に制限し、値の破棄・比較・表示がhost stackを使い切る前に、値を作る時点で拒否する。ステップ予算（fuel）は実行した文・式・演算・関数とcallbackの呼び出し・loop反復・host call（[実行予算・協調実行仕様](execution-control.md) §4.1）を数えるので、直線的な大量コードも制限する。構文解析、コンパイル、一部の重いbuiltin（要素ごとの課金が無いもの）、I/O待ちは包括的に制限しない。文字列・source・live heap・入出力の量は、ステップ予算とは別の包括budgetで実行ごとに制限する（[実行予算・協調実行仕様](execution-control.md) §3.1）。filesystem制御にもsymlinkのTOCTOU制約がある。
+構文とASTは深度256、非循環import chainはroot scriptを除いて128に制限し、parser・compiler・evaluatorがhost stackを消費する前にエラー化する。実行中に作るListとDictの入れ子の深さも256に制限し、値の破棄・比較・表示がhost stackを使い切る前に、値を作る時点で拒否する。ステップ予算（fuel）は実行した文・式・演算・関数とcallbackの呼び出し・loop反復・host call・collection要素の走査・生成・複製（`map`・`filter`・`each`の要素、`range`・`keys`・`values`・`slice`・`reverse`・`split`の結果、COWの複製、`for`のDict・Strの反復列）（[実行予算・協調実行仕様](execution-control.md) §4.1）ので、直線的な大量コードも制限する。構文解析、コンパイル、一部の重いbuiltin（要素ごとの課金が無いもの）、I/O待ちは包括的に制限しない。文字列・source・live heap・入出力の量は、ステップ予算とは別の包括budgetで実行ごとに制限する（[実行予算・協調実行仕様](execution-control.md) §3.1）。filesystem制御にもsymlinkのTOCTOU制約がある。
 
 ### ステップ予算
 

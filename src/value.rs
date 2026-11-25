@@ -993,6 +993,8 @@ impl Value {
         phase: ExecutionPhase,
     ) -> Result<Rc<TrackedList>, ControlStop> {
         budget.check_collection_elements(count as u64, phase)?;
+        // 作る要素数を、要素数の検査の後・backing の確保の前に 1 回で払う（fuel-bulk-charge-a）。
+        budget.charge_elements(count as u64, phase)?;
         let mut items = Vec::with_capacity(count);
         for part in parts {
             budget.charge_string(part.len() as u64, phase)?;
@@ -1134,6 +1136,8 @@ impl Value {
             return Ok(&mut tracked.data);
         }
         // 共有中または未 tracked。複製して新しい tracked backing を作る（§5.2 COW）。
+        // 複製する要素数を複製の前に 1 回で払う（§4.1 の copy 1 / element、fuel-bulk-charge-a）。
+        budget.charge_elements(list.data.len() as u64, phase)?;
         let cloned: Vec<Value> = (**list).clone();
         let bytes = heap_size::list_body(cloned.len() as u64);
         let fresh = Tracked::summarized(Tracked::new(cloned, bytes, budget, phase)?);
@@ -1153,6 +1157,8 @@ impl Value {
             let tracked = Rc::get_mut(dict).expect("strong==1 && weak==0 のとき get_mut は Some");
             return Ok(&mut tracked.data);
         }
+        // 複製する entry 数を複製の前に 1 回で払う（fuel-bulk-charge-a）。
+        budget.charge_elements(dict.data.len() as u64, phase)?;
         let cloned: BTreeMap<String, Value> = (**dict).clone();
         let key_bytes_total: u64 = cloned
             .keys()

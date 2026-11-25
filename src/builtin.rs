@@ -22,6 +22,9 @@ impl Evaluator {
         arg_count: usize,
         line: usize,
     ) -> Result<(), TsumugiError> {
+        // 要素の走査 1（§4.1、fuel-bulk-charge-a）は callback の invocation の前、要素を渡す直前に払う。
+        // 式 frame の段階実行は yield を跨ぐが、この前処理は要素ごとに 1 回だけ通る（resume で再課金しない）。
+        self.charge(crate::budget::ChargeKind::Element, line)?;
         // 再帰制限チェック（通常の関数呼び出しと同じガードを適用）
         self.charge(crate::budget::ChargeKind::Invocation, line)?;
         if self.call_stack.len() >= super::MAX_USER_CALL_DEPTH {
@@ -357,6 +360,15 @@ impl Evaluator {
             // ここで初めて error を伝播する（triple は deny/host-error でも push 済み）。
             Some(fs_result?)
         } else {
+            // 要素を作る・複製する builtin は、結果の要素数 n を確保の前に 1 回で払う
+            // （fuel-bulk-charge-a。VM の `exec_builtin` と同じ位置・同じ共有 helper）。
+            if let Some(count) =
+                crate::builtin_core::result_element_count(name, &evaluated, max_collection)
+            {
+                self.budget
+                    .charge_elements(count, ExecutionPhase::Run)
+                    .map_err(|stop| self.control_stop_to_error(stop, line))?;
+            }
             crate::builtin_core::dispatch(name, &evaluated, max_collection, line)?
         };
         match result {

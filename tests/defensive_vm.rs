@@ -414,7 +414,8 @@ fn f2c_at_05_fuel_limit_comes_before_watchdog() {
     let sources = [
         "while true\nend\n",
         "let i = 0\nwhile true\n  i = i + 1\n  if i > 0\n    continue\n  end\nend\n",
-        "for x in range(0, 1000000)\nend\n",
+        // `range` の要素数は版 3 から 1 回で払うので、fuel の上限（1000）より小さい要素数にする。
+        "for x in range(0, 400)\nend\n",
         "fn f(n)\n  return f(n + 1)\nend\nf(0)\n",
     ];
     for source in sources {
