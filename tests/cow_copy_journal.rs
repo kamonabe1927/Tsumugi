@@ -289,8 +289,10 @@ fn ccj_at_02_fuel_parity_between_engines() {
         let vm = min_fuel(true, source);
         assert_eq!(tree, vm, "[{label}] 消費 fuel が tree/VM で不一致");
         if tree > 0 {
-            assert!(run(false, source, tree - 1).is_err(), "[{label}] tree N-1");
-            assert!(run(true, source, tree - 1).is_err(), "[{label}] VM N-1");
+            let tree_err = run(false, source, tree - 1);
+            let vm_err = run(true, source, tree - 1);
+            assert!(tree_err.is_err(), "[{label}] N-1 で tree が失敗しません");
+            assert_eq!(tree_err, vm_err, "[{label}] N-1 の失敗が tree/VM で不一致");
         }
     }
 }
