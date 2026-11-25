@@ -3362,6 +3362,37 @@ c（AST node）の直列にする。各 sub-slice は課金点を足す同じ PR
   使えるか（修正後は `Engine::run` もその execution で作った値を複製しないので、`run_repl_submission` に変える理由が無くなる見込み）を確かめる。
   実装 PR #516（ブランチ `feat/fuel-bulk-charge-a-2`）は、再開するときの土台にしてよい。
 
+**3 回目の `ready` に戻す設計 PR の確かめ**（2026-11-25。`fix-cow-copy-parity-journal` が done（実装 PR #521）になった後の main 384cc6e で確かめた。
+範囲・範囲外・受入基準・想定の変更規模は変えない。判断の候補は無い）:
+
+- `fix-cow-copy-parity-journal` で、tree の submission journal（`SubmissionJournal`、`src/env.rs`）は journal を張っている間に `Env::set` が作った cell を
+  `created_cells` に記録し、`Env::journal_cell` はその cell の元の値を握らなくなった。VM の REPL journal（`ReplStackCheckpoint`、`src/vm.rs`）も
+  `ensure_local_cell` が作った cell を `created_cells` に記録し、`checkpoint_cell` はその cell の元の値を握らない（開始時点にあった stack slot を昇格するときの
+  `checkpoint_stack_slot(at)` は残る）。issue #517 で見つかった食い違い（REPL の同じ入力で作った値への最初の `push`・index 代入で tree だけが複製する）と、
+  その入力で作った captured cell で両 engine が複製していた形、tree の `Engine::run` が `Evaluator::run` と変わる形は、`tests/cow_copy_journal.rs` の
+  CCJ-AT-01（top-level・関数の local・同じ入力で捕捉した binding の 3 つの形の `push`・`pop`・List / Dict の index 代入で、両 engine と `Engine::run` が複製しない
+  こと。`let ys = xs` の共有と前の入力からある値は両 engine とも 1 回だけ複製すること）と CCJ-AT-02（issue #517 の表の形と深度の読み直しの形を含めた REPL の
+  入力ごとの最小の上限 N と N − 1 の失敗の一致、`Engine::execute` と `Evaluator::run` の `committed.fuel` の一致）で確かめ済みである（main 384cc6e で
+  `cargo test --test cow_copy_journal` が 7 件とも緑）。したがって FBCa-AT-03 の条件は、issue #502・#510・#517 で見つかった経路について満たされる前提で
+  実装に入れる。ほかの経路で tree と VM の複製の有無が食い違えば、従来どおり FBCa-AT-03 の条件（判断 Q3 = A）で止める。
+- 実装役は FBCa-AT-03 の確かめに、REPL の入力の中の最初の書き換えとして「前の入力で作った値」（両 engine とも 1 回複製する）と「その入力で作った値」
+  （両 engine とも複製しない）の両方の形を含める。PR #516 の `fbca_at_03_repl_first_write_in_input_parity` は前者しか見ていなかった（issue #517）。
+  食い違えば同じ条件で止める（受入基準の文言は変えない）。
+- 判断の記録（issue #517）の「`run_recursive` を `Evaluator::run` のまま使えるか」: 使える。main の `tests/engine_api.rs` の `run_recursive` は
+  `Evaluator::run` のままで、修正後は `Engine::run` もその execution で作った値を複製しない（CCJ-AT-01 の `Engine::run`、CCJ-AT-02 の `committed.fuel` の
+  一致）。したがって PR #516 が `run_recursive` を journal 付きの `run_repl_submission` に変えた差分は要らない。再開するときは元の `Evaluator::run` に戻し、
+  それでも期待値が両 engine・両経路で揃うことを確かめる（変える必要が残れば、PR 本文の「仕様外で判断した点」に理由を書く）。
+- 上の「設計時の注記」（main 87166f4）と 1・2 回目の確かめ（main 6f9e556・65437cd）は main 384cc6e でも成り立つ。65437cd からの `src/` の差分は、
+  `fix-cow-copy-parity-journal` の `src/env.rs`・`src/vm.rs` の journal の記録対象と、audit-strict-cbor-c2 の監査の byte 計測（`src/audit.rs`・
+  `src/eval.rs`・`src/embedding.rs`）、`src/builtin_core.rs` のコメントだけで、次は変わっていない: `ChargeKind` と `FuelSchedule`・`FUEL_ACCOUNTING_REVISION`
+  （`2`）・`DEFAULT_TOTAL_FUEL`（`src/budget.rs`）、`Value::detach_list` / `detach_dict` の in place の条件と複製の枝（`src/value.rs`）、
+  `Value::new_iter_str_list`、`dispatch` と `apply_pure_core_builtin`・`builtin_collection`（`src/builtin.rs`）、VM の `exec_builtin` の `map` / `filter` / `each`、
+  `BudgetLedger::track_result`。`builtin_pop_update`（`src/builtin_core.rs`）は引き続きどこからも呼ばれていないので課金しない。
+- 実装 PR #516（ブランチ `feat/fuel-bulk-charge-a-2`、head f4f77df。main 2d412aa の上）は一時停止（`loop:paused`）のままで、本 PR のマージ後に loop-runbook §6.6 の
+  再開で main 384cc6e 以降へ取り込んで進める。取り込むときは上の 2 点（REPL の入力の中で作った値の形を FBCa-AT-03 に足すこと、`run_recursive` を戻すこと）を
+  直す。`fix-cow-copy-parity-journal` は既存テストの期待値を変えていない（実装 PR #521 の CCJ-AT-04）ので、取り込みで期待値の食い違いは出ない見込みである。
+  PR #516 の期待値のうち、REPL・`Engine::run` の中で作った値の最初の書き換えの複製を含めて測ったものがあれば、取り込み後に測り直す。
+
 ### fix-contains-budgeted-equality 実装スライス（`contains` の等価判定を予算付き比較へ）
 
 issue #290 から作ったスライス（不具合の修正、`slices.toml` の `fix-contains-budgeted-equality`）。issue の仕分けで「受け入れ」とし、判断は要らないとした部分である（[言語仕様](language-spec.md)「等価比較」の「この規則は`contains`のように等価判定を使う組み込み関数でも共有する」で直し方が決まる）。
