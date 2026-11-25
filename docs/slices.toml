@@ -808,6 +808,7 @@ parent     = "Phase 6 残"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-triple-a 実装スライス（VM の fs host call で host-call triple と flush 点を buffer へ積む）" }
 acceptance = ["AVT-AT-01..05"]
+design_pr  = 527
 order      = 70
 
 [[slice]]
