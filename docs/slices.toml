@@ -822,7 +822,7 @@ impl_pr    = 534
 #   Q2=A の条件: 実装 PR が embedding-api の逸脱一覧に build の拒否の行（延期先つき）を足す。
 [[slice]]
 id         = "vm-engine-run-route"
-title      = "Engine::run / Engine::execute が VmExperimental のとき ExecutionContext で VM を回す経路（既知の差分一覧の KD-1 を消す。embedding-api の E9 の残り）"
+title      = "Engine::run が VmExperimental のとき ExecutionContext で VM を回す経路（既知の差分一覧の KD-1 を消す。embedding-api の E9 の残り）"
 status     = "ready"
 parent     = "VM parity"
 spec_slice = "determinism Slice 6"
