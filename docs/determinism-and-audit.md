@@ -1,6 +1,6 @@
 # Tsumugi 決定性・実行時監査仕様
 
-最終更新: 2026-11-25
+最終更新: 2026-11-26
 
 設計ステータス: **到達目標の確定仕様（§1〜§13）＋ 実装の現在地（下記の逸脱一覧）**
 
@@ -2418,7 +2418,7 @@ issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発�
 
 #### audit-vm-triple-b 実装スライス（`Engine::run_audited` の VM 経路）
 
-> 状態: **未設計**（todo のまま。前提のスライスが無いため ready にしない）。本小節は設計時点（main `295ad0c`）の記録で、現在の逸脱・未実装範囲は冒頭の逸脱一覧が正本である。
+> 状態: **未実装**（設計のみ）。下の「設計時点の事実」から決定記録（PR #535）までは最初の設計 PR（main `295ad0c`、todo のまま）の記録で、ready にする設計は後半の「再設計（main `122fdf6`、todo → ready）」に書く。本小節は設計時点の記録で、現在の逸脱・未実装範囲は冒頭の逸脱一覧が正本である。
 
 設計時点の事実:
 
@@ -2444,6 +2444,51 @@ issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発�
 - **決定記録（判断役が選択（PR #535）。Q1=A・Q2=A）**:
   - **Q1（経路のスライスをこの PR で登録するか）= A**: `vm-engine-run-route`（todo、`parent = "VM parity"`、order 65）を登録し、b の `depends_on` に足す。理由: 「audit-vm-triple のスライス分割」小節の決定記録 Q1=A（PR #527）が、b を VM の `Engine::run` の経路のスライスに依存させ、経路を既知の差分一覧の項目を減らすフェーズのスライスとして別に設計すると決めている。前提の vm-parity-diff-a は done で KD-1 も残っているのに、そのスライスが `slices.toml` に無かった。スライスの一覧と状態の正本は `slices.toml` なので、b の前提を正本に見える形にするのが既存の決定と一貫する（[マニフェスト](manifesto.md) 原則 9）。範囲は KD-1 を消す 1 項目に限り、設計は別の設計 PR に残す（[開発ループ手順書](loop-runbook.md) §6.7、原則 8）。採らなかった案: B（登録しない）は、PR #527 で要るとしたスライスが正本に無いまま残り、b が進めない理由が一覧から読めない。
   - **Q2（b の間に公開 API から VM の監査付き実行に届かないことと、PR #527 の Q2=A の条件の食い違い）= A**: b は crate 内の比較 test（tree と VM の `run_audited` の内部入口に同じ入力を流し、sink の受け取る event 列を `HeapBytes` の `BudgetCharged` を除いて比べる）で確かめる。`tests/vm_parity.rs` への監査の軸の追加は、`ConfigError::AuditSinkWithExperimentalBackend` を外す audit-vm-triple-c の受入基準へ移す。理由: 分割小節は拒否を c で外す理由を「b の間に外すと、backpressure の無い VM 監査が使えてしまう」としており、これは原則 5 に沿う。A はこの割り方を保ったまま同じ入力を tree と VM に流して一致を確かめるので、手順書 §14.1 の趣旨は b でも crate 内で満たせる（原則 5・原則 9）。PR #527 の条件の目的は監査の軸の先送りを落とさないことで、その理由は「facade から観測できる監査の差は b で初めて生じる」だった。b の間は build が拒否するので facade から観測できる差はまだ生じず、差が公開される c に軸を移しても目的は保たれる。公開 API も広げない（原則 8）。**条件**: (1) audit-vm-triple-c の設計 PR は `tests/vm_parity.rs` への監査の軸の追加を受入基準に入れる（PR #527 の Q2=A の条件の移し先。分割小節の追記・c の行・`slices.toml` のコメントにも書いた）。(2) b の設計 PR は crate 内の比較 test を受入基準に入れる。採らなかった案: B（b で拒否を外す）は原則 5 に反しうる。同じ設定・入力で tree は `Yielded`、VM は audit queue の上限を見ずに走り切るという差が公開 API に出て、host の制御が VM で効かない経路を公開することになる（原則 1・原則 3）。C（検査のための `#[doc(hidden)]` の builder の入口）は、検査のためだけに公開 API を足す点で原則 8 に反しうる。backpressure の無い VM 監査に届く点で B と同じ差も持ち込む。
+
+##### 再設計（main `122fdf6`、todo → ready）
+
+前提の 2 本（audit-vm-triple-a・vm-engine-run-route）が done になったので、上の「b の範囲の見込み」を確定し、受入基準を採番して ready にする。上の見込みと決定記録（PR #535）は書き換えず、ここで具体化する。
+
+設計時点（main `122fdf6`）の事実:
+
+- `Engine::run_audited`（`src/embedding.rs`）は、sink 無しなら `run_guarded` → `run_inner` に入り、context が VM の状態（`ExecutionContext.vm`、`VmContextState`）を持てば `execute_program_vm` で VM を回す（vm-engine-run-route、PR #538）。sink 有りの `run_audited_inner` は、Started の append・ack までは backend を見ないが、その後の `run_audited_driver` は `context.evaluator` の `install_execution_state`・`set_audit_queue`・`set_redaction_policy`・`run_slice` だけを回し、VM の状態を見ない。Terminal の組み立ても `context.evaluator` の `take_pending_budget_resource` と `host_effects_may_remain` を読み、panic の捕捉と prepare の失敗の usage も `context.evaluator.budget_usage()` を読む。
+- 配送の `AuditDelivery::flush_events` は `context.evaluator` の `drain_audit_events`・`drain_budget_charges`・`audit_queue_admit`・`audit_queue_release` を、`AuditDelivery::deliver` は sink の `Pending` のときに `context.evaluator` の `record_backpressure_yield`・`checkpoint_cancel`・`checkpoint_deadline`・`record_backpressure_resume` を呼ぶ。VM の context では、これらはどれも実行に使っていない bootstrap の `Evaluator` を指す。
+- `Vm`（`src/vm.rs`）は audit-vm-triple-a で、監査 event の buffer・`operation_id` の counter・`host_effects_may_remain` の flag・redaction policy（既定 `RedactionPolicy::default()`）を持ち、`begin_execution`（clock と token を受け取る入口）で 3 つを 0・空へ戻す。`pub(crate)` の `drain_audit_events` と `host_effects_may_remain` はあるが、accumulator に残る `BudgetCharged` を取り出す入口（tree の `Evaluator::drain_budget_charges`）と redaction policy を差し替える入口（tree の `Evaluator::set_redaction_policy`）は無い。ledger（`self.budget`）は `drain_budget_charges` を持つ。
+- `Vm::control_stop_to_error` は共有の `budget::control_stop_to_error` を呼ぶだけで、tree の `Evaluator::control_stop_to_error` のように畳む前の細粒度の `BudgetResource` を退避しない。そのため VM の `BudgetExceeded` の Terminal を今の写像で組むと、`terminal_outcome_from` が `ErrorKind` から代表値を復元し、例えば `OutputBytes` の超過が `IoLimit` から `InputCalls` に化ける（§7.2 と違い、tree とも違う）。
+- Started の `backend` は `self.config.backend` を写すので、tree は `TreeWalk`、VM は `VmExperimental` になる（§7.1。backend の違いを記録する field で、一致させるものではない）。
+- tree の監査付き経路は `audit_slice_fuel` が未設定なら slice fuel を `u64::MAX` にし、`YieldedHostCall`（VM は build で host function を拒否）と audit drain queue の上限の yield（既定の `max_pending_bytes` は 1 MiB）が起きない限り、`run_slice` は terminal まで 1 回で返り、buffer は terminal の後に 1 回だけ配送される。VM は slice の境界を持たない（`run_repl_chunk` は最後まで回す）。
+- `EngineBuilder::build` は監査 sink と `VmExperimental` の同時設定を `ConfigError::AuditSinkWithExperimentalBackend` で拒否する（撤去は audit-vm-triple-c）。
+
+割り方: 分けない（1 本）。触るのは `run_audited_inner` の VM 分岐と、それが読む VM の入口（buffer・accumulator・flag・redaction policy・細粒度 resource）で、監査の配線の 1 つの仕組みである。Started の前の処理と journal・ack の検証・Terminal の予約 slot は tree の関数をそのまま通し、VM 側は「実行してから buffer を 1 回で配送する」だけになる。backpressure と slice 境界の yield は c に残すので、90 分に収まる。
+
+- **実装範囲**:
+  - **VM 分岐**: `run_audited_inner` で、Started の ack の後、context が VM の状態を持つときは tree の driver の代わりに VM の driver を回す。VM の driver は、`execute_program_vm` と同じ手順（据え直し → pre-cancel → 注入 → 展開・課金 → compile・実行 → 写像 → capability の後始末）で実行し、terminal の後に VM の buffer（host-call triple と flush 点の `BudgetCharged`）→ accumulator に残る `BudgetCharged` の順で配送する（tree の `flush_events` の順。§8 規則3/7/9）。`execute_program_vm` の手順を写さず、同じ関数を分けて呼べる形にしてよい（据え直しと注入の後に redaction policy を差し込めるように）。sink 無しの経路の観測挙動は変えない。
+  - **redaction policy の注入**: engine の `redaction_policy`（既定 `RedactionPolicy::default()`、`audit_redaction_policy_for_test` で差し替わる）を、据え直しの後・実行の前に VM へ渡す（tree の `run_audited_driver` と同じ位置）。このために `Vm` に crate 内の setter を足す。
+  - **配送の共有**: journal への append、host-call triple の §11 容量の確認（`can_reserve_host_call`）、ack の検証（`ack_ok`）、envelope の組み立ては、tree と同じ `AuditDelivery` の関数を通す。`flush_events`・`deliver` が読む evaluator の部分（buffer・accumulator の drain、audit drain queue の計上、backpressure の記録と checkpoint）を、context の backend に応じて tree の `Evaluator` か `Vm` を読む形にする。VM には audit drain queue が無いので、VM の側の計上と解放は何もしない（queue は c）。VM 専用の journal・ack の写しを作らない（片方だけ直る差を作らないため。原則 5・原則 8）。
+  - **sink の `Pending`**: VM の経路で sink が `Pending` を返したら、ticket を cancel し、`AuditFailure::Sink` で fail-closed にする（Started の `Pending` は今の tree と同じく未 ack の扱いで、`Terminal(AuditFailure)` を emergency slot へ append する。host-call event と終了時の `BudgetCharged` と Terminal の `Pending` は `AuditFailed { withheld, failure: Sink }` を返す）。VM は `Yielded`/`Resumed(AuditBackpressure)` を積まない（下の判断の候補 Q1。c で置き換える）。
+  - **Terminal**: `host_effects_may_remain` は VM の flag から、`BudgetExceeded` の resource は VM が退避した細粒度の `BudgetResource` から、`context_committed` と `usage` と error の payload は tree と同じ関数（`terminal_outcome_from`・`outcome_usage`・`audit_error_payload_from`）で決める。このために `Vm` が `BudgetExceeded` の `ControlStop` を error へ写すときに、畳む前の resource を退避し、crate 内で取り出せるようにする（tree の `last_budget_resource`・`take_pending_budget_resource` と同じ意味。読み取ると消費する）。
+  - **mid-run の監査失敗**: 配送の途中で sink が `Failed`・不正 ack を返したら、`AuditFailed { withheld, failure }` を返す。`withheld` は tree の `run_audited_driver` が terminal の slice で使う規則と同じ（実行の outcome を `terminal_outcome_from(&outcome, None)` で写す）にする。VM は配送の前に実行を終えているので、language-state の commit / rollback は実行の結果のままである（tree の terminal の slice の後の失敗と同じ。冒頭の逸脱一覧の「Terminal 配送失敗後に rollback しない」の行の範囲）。
+  - **usage の読み先**: `run_audited_inner` の panic の捕捉と prepare の失敗で返す `InternalFailure` の usage を、`context.evaluator.budget_usage()` から `context.budget_usage()`（VM の context では VM の usage）に直す。tree の値は変わらない。
+  - **crate 内の検査の入口**: 比較 test のために、`#[cfg(test)]` の builder の入口で build の拒否（`AuditSinkWithExperimentalBackend`）を通らずに監査 sink 付きの `VmExperimental` の engine を組めるようにする。`#[cfg(test)]` なので crate の外（`tests/` と公開 API）からは見えない（PR #535 の Q2=A。案 C の `#[doc(hidden)]` の公開入口は採らない）。
+- **範囲外**:
+  - `ConfigError::AuditSinkWithExperimentalBackend` の撤去、`tests/vm_parity.rs` への監査の軸の追加（audit-vm-triple-c。PR #535 の Q2=A の条件 1）。
+  - VM の audit drain queue の byte 計上と、その上限・sink の `Pending` による `Yielded`/`Resumed(AuditBackpressure)`（audit-vm-triple-c）。
+  - `audit_slice_fuel` を設定したときの slice 境界の `Yielded`/`Resumed(SliceFuelExhausted)`。VM の経路は `audit_slice_fuel` を見ず、buffer を terminal の後に 1 回で配送する。tree はこの設定で slice ごとに yield するので、設定したときの event 列は tree と一致しない。b の間は build が拒否するので公開 API からは観測できない。c の設計 PR で、拒否を外す前に、VM のトップレベル境界の yield で揃えるか、VM と `audit_slice_fuel` の同時設定を拒否するかを扱う（c の範囲の「トップレベル境界の `Yielded`/`Resumed`」に含める）。
+  - fs 4 builtin 以外の host call の triple（audit-host-boundary-scope）。`normalize_for_conformance`（未実装範囲の行のまま）。VM の host function（vm-engine-run-route の決定記録 Q2=A のとおり build で拒否）。
+  - 実行の途中の cancel と deadline の位置を tree と揃えること（vm-engine-run-route の範囲外と同じ。受入基準は pre-cancel と、run の開始時点で過ぎている deadline だけを比べる）。
+- **変えないもの**: tree の監査付き経路の event 列と outcome（既存の `tests/audit_*.rs` と crate 内の監査の test が期待値を変えずに緑）。sink 無しの `Engine::run`・`run_audited` の tree・VM の観測挙動。`EngineBuilder::build` の公開の挙動（監査 sink と `VmExperimental` の拒否を含む）。`tests/vm_parity.rs` と既知の差分一覧（KD-2〜KD-4）。CLI・alpha facade。
+- **done PR で行う逸脱一覧の更新**: 冒頭の逸脱一覧の「VM は host-call triple と flush 点の event を内部 buffer へ積むが」の行を、「VM の監査付き実行（`run_audited`）は crate 内では Started・buffer の配送・Terminal を tree と同じ journal・sink の規則で出すが、build が監査 sink と `VmExperimental` の同時設定を `ConfigError::AuditSinkWithExperimentalBackend` で拒否するため公開 API からは使えない。VM の経路は audit drain queue を数えず、sink の `Pending` を `AuditFailure::Sink` の fail-closed にし、`audit_slice_fuel` を見ない（`Yielded`/`Resumed` は tree-only。audit-vm-triple-c で解消予定）。`HeapBytes` の `BudgetCharged` は tree と一致しない（§15.5）」と書き直す（行は c で消す）。未実装範囲の「VM の audit triple 対応（監査 wiring）」の行は、延期先を audit-vm-triple-c に改める。
+- **受入基準**（確かめ方はどれも crate 内の `#[cfg(test)]` の比較 test。PR #535 の Q2=A の条件 2。同じ source・capability・budget・`execution_id`・`FakeClock` を、`TreeWalk` と `VmExperimental` の監査 sink 付きの engine の `run_audited` に流し、sink が受け取った envelope の列と `AuditedOutcome` を比べる。比較から除くのは、`BudgetCharged { resource: HeapBytes }`（残りの順序は保つ。a の決定記録 Q1=A（PR #531））と、Started の `backend`（tree は `TreeWalk`、VM は `VmExperimental` であることを別に assert する）だけである。source は既知の差分一覧の KD-2〜KD-4 の pattern（`for` の反復、REPL の error の入力）に当たらないものにする）:
+  - **AVT-AT-06（event 列の一致）**: fs 4 builtin を allow・deny（capability 未 grant と operation 不足）・host error で呼ぶ source、host call の無い source、import する source（link の課金の `BudgetCharged`）で、sink が受け取る envelope（Started・host-call triple・`BudgetCharged`・Terminal の全 field と sequence と順序）が tree と一致する。同じ context で 2 回続けて `run_audited` した 2 回目も、sequence が 0 から、`operation_id` が 0 から振られて一致する。
+  - **AVT-AT-07（Terminal）**: `Completed`・`RuntimeError`・`BudgetExceeded`（`ErrorKind` から復元する代表値と原本が違う resource。例: 出力 byte の超過で `OutputBytes`）・`Exited`（書き込みの host call の後の `exit`。`context_committed` と `host_effects_may_remain` が `true`）・pre-cancel の `Cancelled`（Started と Terminal だけ）・run の開始時点で過ぎた deadline の `DeadlineExceeded` で、Terminal の全 field（`outcome`・`error`・`usage`・`import_graph_hash`・`context_committed`・`host_effects_may_remain`）と `AuditedOutcome` が tree と一致する。
+  - **AVT-AT-08（fail-closed）**: `ScriptedAuditSink` で、Started の `Failed`（emergency slot の `Terminal(AuditFailure)` と `AuditFailed`、VM は 1 文も実行せず出力も language-state の変化も無い）、host-call event の `Failed`、Terminal の `Failed` の各経路で、sink が受け取る列と `AuditFailed` の `withheld`・`failure` が tree と一致する。VM の経路で sink が `Pending` を返したときは、ticket を cancel して `AuditFailed { failure: AuditFailure::Sink }` を返し、`Yielded`/`Resumed` を出さない（tree とは比べない。下の判断の候補 Q1）。
+  - **AVT-AT-09（redaction policy の注入）**: `audit_redaction_policy_for_test` で既定と違う `policy_id` と policy を渡した engine で、Started の `redaction_policy_id` と host-call event の Path・Body の field が tree と一致する（VM に engine の policy が届く）。
+  - **AVT-AT-10（非破壊）**: 公開の `EngineBuilder::build` は今までどおり監査 sink と `VmExperimental` の同時設定を `ConfigError::AuditSinkWithExperimentalBackend` で拒否する。tree の監査付き経路・sink 無しの tree・VM の経路の既存の test（`tests/audit_*.rs`・`tests/vm_parity.rs`・`tests/differential.rs`・`tests/integration.rs`・golden fixture・crate 内の test）が期待値を変えずに緑で、`KNOWN_DIFFS` は変わらない。確かめ方: `cargo test` と `git diff --stat`（`tests/` の既存ファイルを変えない）。
+- **想定の変更規模**: `src/` 約 170〜320 行（`src/embedding.rs` の `run_audited_inner` の VM 分岐と VM の driver 60〜110、`flush_events`・`deliver` が読む evaluator の部分を backend で分ける 50〜90、usage の読み先 5〜10、`#[cfg(test)]` の builder の入口 10〜20、`src/vm.rs` の redaction policy の setter・accumulator の drain の入口・細粒度 resource の退避と取り出し 40〜90）。test は約 350〜550 行（比較の実行器と recording sink の組み立て 80〜130、AVT-AT-06 の経路 100〜160、AVT-AT-07 の outcome 80〜120、AVT-AT-08 の fail-closed 60〜100、AVT-AT-09 30〜40）。触る仕組みは監査付き実行の VM 経路 1 つ、受入基準は 5 項目。§6.7 のとおり §14.1 の上限は当てない。90 分に収まる根拠: Started の前の処理・journal・ack・Terminal の組み立ては tree の関数をそのまま使い、VM の実行は vm-engine-run-route の手順を呼ぶだけで、足すのは「VM の buffer を読む」分岐と、VM の入口 3 つ（setter・drain・resource）である。比較の実行器は a の `audit_triple_parity` の source と組み立てを流用できる。
+
+判断の候補（この PR に書いたもの）:
+
+- **Q1**: b の間、VM の監査付き経路で sink が `Pending` を返したときの扱い。A（推奨）: ticket を cancel して `AuditFailure::Sink` で fail-closed にし、`Yielded`/`Resumed` を出さない。c で tree と同じ backpressure に置き換える。B: `Yielded`/`Resumed(AuditBackpressure)` を積まずに ticket の ack を待つ（tree と同じ resend と deadline の確認だけ行う）。C: このスライスで VM に poll_index の counter と `Yielded`/`Resumed(AuditBackpressure)` を足し、tree と同じ event 列にする。
 
 #### vm-engine-run-route 実装スライス（`Engine::run` が `VmExperimental` のとき `ExecutionContext` で VM を回す経路）
 
