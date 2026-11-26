@@ -14,14 +14,18 @@
 //!
 //! 解放漏れの検出には確保量ではなく生存量（確保 - 解放）を使う。
 //!
-//! 注意: グローバルアロケータでプロセス全体の確保量を数えるため、測定中は
-//! `MEASURE_LOCK` を保持して他の測定と直列化する。
+//! 確保量・生存量はスレッドごとに数える（`thread_local`）。テストは並列に走るので、
+//! プロセス全体で数えると、同時に走る別のテストの確保が測定区間に混ざって値が上振れする
+//! （Windows ランナーで比の上限を超えて落ちていた）。engine は実行中に別スレッドを
+//! 立てないため、測りたい確保はすべて測定しているスレッドに載る。
+//! 測定の独立は `thread_local` が担う。`MEASURE_LOCK` は無くても結果は変わらないが、
+//! 既存の直列化を変えないために残している。
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 
-/// 測定を直列化するロック（並列テストによる確保量の相互汚染を防ぐ）
+/// 測定を直列化するロック（相互汚染の防止は thread_local のカウンタが担う）
 static MEASURE_LOCK: Mutex<()> = Mutex::new(());
 
 use tsumugi::compiler::Compiler;
@@ -30,30 +34,38 @@ use tsumugi::lexer::Lexer;
 use tsumugi::parser::Parser;
 use tsumugi::vm::Vm;
 
-static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-/// 生存中のバイト数（確保で加算、解放で減算）。解放漏れの検出に使う。
-static LIVE: AtomicIsize = AtomicIsize::new(0);
+thread_local! {
+    /// このスレッドで確保したバイト数。テストは並列に走るので、プロセス全体ではなく
+    /// 測定しているスレッドの確保だけを数える。
+    static ALLOCATED: Cell<usize> = const { Cell::new(0) };
+    /// このスレッドで生存中のバイト数（確保で加算、解放で減算）。解放漏れの検出に使う。
+    static LIVE: Cell<isize> = const { Cell::new(0) };
+}
+
+fn count(allocated: usize, live: isize) {
+    // スレッド終了時の TLS 破棄中は数えない（測定区間の外なので影響しない）
+    let _ = ALLOCATED.try_with(|c| c.set(c.get() + allocated));
+    let _ = LIVE.try_with(|c| c.set(c.get() + live));
+}
 
 /// 確保バイト数と生存バイト数を数えるアロケータ
 struct CountingAllocator;
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
-        LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
+        count(layout.size(), layout.size() as isize);
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        LIVE.fetch_sub(layout.size() as isize, Ordering::Relaxed);
+        count(0, -(layout.size() as isize));
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATED.fetch_add(new_size.saturating_sub(layout.size()), Ordering::Relaxed);
-        LIVE.fetch_add(
+        count(
+            new_size.saturating_sub(layout.size()),
             new_size as isize - layout.size() as isize,
-            Ordering::Relaxed,
         );
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -64,9 +76,9 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 /// クロージャ実行中に確保されたバイト数を返す
 fn allocated_bytes(body: impl FnOnce()) -> usize {
-    let before = ALLOCATED.load(Ordering::Relaxed);
+    let before = ALLOCATED.with(Cell::get);
     body();
-    ALLOCATED.load(Ordering::Relaxed).saturating_sub(before)
+    ALLOCATED.with(Cell::get).saturating_sub(before)
 }
 
 fn for_loop_source(n: usize) -> String {
@@ -121,7 +133,7 @@ fn retained_bytes(source: &str, use_vm: bool) -> usize {
     let tokens = Lexer::new(source).tokenize();
     let program = Parser::new(tokens).parse().expect("パースに失敗");
 
-    let before = LIVE.load(Ordering::Relaxed);
+    let before = LIVE.with(Cell::get);
     if use_vm {
         let chunk = Compiler::new().compile(&program).expect("コンパイルに失敗");
         let mut vm = Vm::new(chunk);
@@ -134,7 +146,7 @@ fn retained_bytes(source: &str, use_vm: bool) -> usize {
             .expect("ツリーウォーク実行に失敗");
         drop(evaluator);
     }
-    LIVE.load(Ordering::Relaxed).saturating_sub(before).max(0) as usize
+    LIVE.with(Cell::get).saturating_sub(before).max(0) as usize
 }
 
 /// 実行フェーズだけの確保量を測る（parse / compile は測定対象外）
@@ -156,20 +168,6 @@ fn execute_bytes(source: &str, use_vm: bool) -> usize {
                 .expect("ツリーウォーク実行に失敗");
         })
     }
-}
-
-/// `execute_bytes` を複数回計測し、最小値を返す。
-///
-/// `execute_bytes` はプロセス全体のグローバル確保量を数えるため、他スレッドや
-/// 遅延初期化の確保がタイミング次第で計測区間に漏れ込み、値が上振れすることがある
-/// （とくに Windows ランナーで顕著）。ノイズは常に「余計に足される」方向にしか
-/// 効かないので、複数回のうち最小値を採ると真の実行コストに収束し、比率判定が安定する。
-fn execute_bytes_min(source: &str, use_vm: bool) -> usize {
-    const SAMPLES: usize = 5;
-    (0..SAMPLES)
-        .map(|_| execute_bytes(source, use_vm))
-        .min()
-        .expect("SAMPLES は 1 以上")
 }
 
 /// 到達しない文でbodyだけを膨らませた関数を、指定回数呼び出すスクリプト
@@ -205,8 +203,8 @@ fn call_allocation_is_independent_of_body_size_in_both_engines() {
 
     for use_vm in [false, true] {
         let mode = if use_vm { "VM" } else { "tree-walk" };
-        let small = execute_bytes_min(&small_source, use_vm);
-        let large = execute_bytes_min(&large_source, use_vm);
+        let small = execute_bytes(&small_source, use_vm);
+        let large = execute_bytes(&large_source, use_vm);
         assert!(small > 0, "{mode}: 確保量が計測できていません");
 
         let ratio = large as f64 / small as f64;
@@ -237,8 +235,8 @@ fn for_loop_allocation_stays_linear_in_both_engines() {
 
     for use_vm in [false, true] {
         let mode = if use_vm { "VM" } else { "tree-walk" };
-        let small = execute_bytes_min(&small_source, use_vm);
-        let large = execute_bytes_min(&large_source, use_vm);
+        let small = execute_bytes(&small_source, use_vm);
+        let large = execute_bytes(&large_source, use_vm);
         assert!(
             small > 0,
             "{mode}: 確保量が計測できていません（アロケータが差し替わっていない可能性）"
@@ -285,8 +283,8 @@ fn recursive_for_allocation_does_not_scale_with_depth_in_both_engines() {
             for use_vm in [false, true] {
                 let mode = if use_vm { "VM" } else { "tree-walk" };
                 let growth = |depth: usize| {
-                    let small = execute_bytes_min(&recursive_for_source(SMALL, depth), use_vm);
-                    let large = execute_bytes_min(&recursive_for_source(LARGE, depth), use_vm);
+                    let small = execute_bytes(&recursive_for_source(SMALL, depth), use_vm);
+                    let large = execute_bytes(&recursive_for_source(LARGE, depth), use_vm);
                     assert!(small > 0, "{mode}: 確保量が計測できていません");
                     large.saturating_sub(small)
                 };
@@ -360,8 +358,8 @@ fn closure_definition_allocation_is_independent_of_visible_bindings_in_both_engi
 
     for use_vm in [false, true] {
         let mode = if use_vm { "VM" } else { "tree-walk" };
-        let few = execute_bytes_min(&few_source, use_vm);
-        let many = execute_bytes_min(&many_source, use_vm);
+        let few = execute_bytes(&few_source, use_vm);
+        let many = execute_bytes(&many_source, use_vm);
         assert!(few > 0, "{mode}: 確保量が計測できていません");
 
         let ratio = many as f64 / few as f64;
@@ -393,8 +391,8 @@ fn call_allocation_is_independent_of_global_count_in_both_engines() {
 
     for use_vm in [false, true] {
         let mode = if use_vm { "VM" } else { "tree-walk" };
-        let few = execute_bytes_min(&few_source, use_vm);
-        let many = execute_bytes_min(&many_source, use_vm);
+        let few = execute_bytes(&few_source, use_vm);
+        let many = execute_bytes(&many_source, use_vm);
         assert!(few > 0, "{mode}: 確保量が計測できていません");
 
         let ratio = many as f64 / few as f64;
@@ -453,8 +451,8 @@ fn collection_read_allocation_stays_linear_in_both_engines() {
     {
         for use_vm in [false, true] {
             let mode = if use_vm { "VM" } else { "tree-walk" };
-            let small = execute_bytes_min(small_source, use_vm);
-            let large = execute_bytes_min(large_source, use_vm);
+            let small = execute_bytes(small_source, use_vm);
+            let large = execute_bytes(large_source, use_vm);
             assert!(small > 0, "{mode}/{label}: 確保量が計測できていません");
 
             let ratio = large as f64 / small as f64;
@@ -512,8 +510,8 @@ fn cow_read_allocation_stays_linear_in_both_engines() {
     {
         for use_vm in [false, true] {
             let mode = if use_vm { "VM" } else { "tree-walk" };
-            let small = execute_bytes_min(small_source, use_vm);
-            let large = execute_bytes_min(large_source, use_vm);
+            let small = execute_bytes(small_source, use_vm);
+            let large = execute_bytes(large_source, use_vm);
             assert!(small > 0, "{mode}/{label}: 確保量が計測できていません");
 
             let ratio = large as f64 / small as f64;
@@ -1085,10 +1083,9 @@ fn push_to_shared_backing_has_no_spike_across_engines() {
 /// 課金しなかったため、保持した空 collection のぶんだけ VM の live heap が tree より小さく
 /// なる既知差があった。`LoadConst` が List/Dict も `track_result` に通すようにして解消した。
 ///
-/// 測定する値は論理 budget 台帳なので engine 内部で決定的だが、engine を実行すると
-/// `#[global_allocator]` の `LIVE`/`ALLOCATED` カウンタを動かす。これが他の実アロケータ
-/// 測定テスト（`retained_bytes` / `execute_bytes` 系）と並列に走るとそれらの測定区間へ
-/// 確保ノイズを漏らすため、`MEASURE_LOCK` を取って直列化する。
+/// 測定する値は論理 budget 台帳なので engine 内部で決定的。`MEASURE_LOCK` は、確保量の
+/// カウンタがプロセス全体で 1 つだった頃に他の実アロケータ測定へ確保ノイズを漏らさないよう
+/// 取っていたもので、カウンタがスレッドごとになった今も直列化を変えないために残している。
 #[test]
 fn empty_collection_literal_live_heap_matches_across_engines() {
     use tsumugi::budget::heap_size;
