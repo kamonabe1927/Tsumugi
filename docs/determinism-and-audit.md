@@ -2375,7 +2375,7 @@ issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発�
 |---|---|---|---|
 | audit-vm-triple-a | VM の中で、tree と同じ event 列（fs 4 builtin の host-call triple と、host call 開始前の `BudgetCharged` の flush）を buffer へ積む。facade の配線はしない | — | ready（下の小節） |
 | audit-vm-triple-b | `Engine::run_audited` の VM 経路: Started・a の buffer の drain・終了時の `BudgetCharged`・Terminal（`host_effects_may_remain` を含む）を tree と同じ journal・sink の規則で出す。redaction policy の注入 | audit-vm-triple-a と、VM の `Engine::run` の経路のスライス（下の小節の決定記録 Q1=A。vm-parity-diff-a の done の後に設計） | todo |
-| audit-vm-triple-c | VM の audit backpressure（audit drain queue の byte 計上と、トップレベル境界での `Yielded`/`Resumed(AuditBackpressure)`）と、`ConfigError::AuditSinkWithExperimentalBackend` の撤去。逸脱一覧の「tree-only」の行を消す | audit-vm-triple-b | todo |
+| audit-vm-triple-c | VM の audit backpressure（audit drain queue の byte 計上と、トップレベル境界での `Yielded`/`Resumed(AuditBackpressure)`）と、`ConfigError::AuditSinkWithExperimentalBackend` の撤去。逸脱一覧の「tree-only」の行を消す。`tests/vm_parity.rs` への監査の軸の追加を受入基準に入れる（audit-vm-triple-b の小節の決定記録 Q2=A の条件 1、PR #535） | audit-vm-triple-b | todo |
 
 割り方の理由:
 
@@ -2383,6 +2383,8 @@ issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発�
 - (1) は facade に触れずに、同じ source を `Evaluator` と `Vm` に流して buffer を比べるだけで確かめられる。先に入れれば、b と c は「drain して配送する」だけになり、event の中身の差（課金の順序・label・body）と配線の差を別の PR で切り分けられる。
 - (3) を (2) から分けるのは、VM に yield の境界を足す変更が VM の実行ループ（`Vm::run`）に触れ、sink が常に `Ack` を返す経路（b）とは確かめ方も壊れ方も違うためである。`ConfigError::AuditSinkWithExperimentalBackend` は、backpressure まで揃って「監査付きの VM 実行が tree と同じ event 列を出す」と言える c で外す（b の間に外すと、backpressure の無い VM 監査が使えてしまう）。
 - b・c は、VM の `Engine::run` の経路のスライスが決まるまで受入基準を採番しない（todo）。a が done になり、その経路のスライスが決まった後の設計 PR で採番して ready にする。その経路のスライスは、vm-parity-diff-a の done の後に既知の差分一覧の項目「VM に `Engine::run` の経路が無い」を減らすフェーズのスライスとして別に設計し、b はそれに依存させる（下の小節の決定記録 Q1=A）。b の設計 PR は、`tests/vm_parity.rs` への監査の軸の追加を受入基準に入れる（同 Q2=A の条件）。
+
+追記（判断役が選択（PR #535）、audit-vm-triple-b の小節の決定記録 Q2=A の条件 1）: 上の「b の設計 PR は、`tests/vm_parity.rs` への監査の軸の追加を受入基準に入れる」（PR #527 の Q2=A の条件）は、移し先を audit-vm-triple-c に改める。c の設計 PR が `tests/vm_parity.rs` への監査の軸の追加を受入基準に入れる。b の間は build が監査 sink と `VmExperimental` の同時設定を拒否し、facade から観測できる監査の差がまだ生じないためである。
 
 #### audit-vm-triple-a 実装スライス（VM の fs host call で host-call triple と flush 点を buffer へ積む）
 
@@ -2434,10 +2436,14 @@ issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発�
   - 受入基準の見込み: tree と VM に同じ source・capability・budget を流し、sink が受け取る event 列（`HeapBytes` の `BudgetCharged` を除く。a の決定記録 Q1=A（PR #531）と同じ除外）が一致すること、`Terminal` の `host_effects_may_remain`、監査失敗の fail-closed、非破壊。どこで確かめるか（`tests/vm_parity.rs` か crate 内の比較 test か）は下の判断の候補 Q2 で決める。
 - 想定の変更規模（見込み）: `src/` 約 150〜300 行（`src/embedding.rs` の `run_audited_inner` の backend 分岐と VM の drain の配線）、tests 約 200〜400 行。§6.7「大きさ」のとおり §14.1 の上限は当てないが、経路のスライスが入った後に 90 分へ収まるかを b の設計 PR で確かめ直す。
 
-判断の候補（この PR に書いた。判断役が選んだら、選んだ内容と理由をここに決定記録として足す）:
+判断の候補（この PR に書いたもの。下の決定記録で選ばれた）:
 
 - **Q1**: 経路のスライスを、この PR で `vm-engine-run-route`（todo）として登録し b の前提にするか。A（推奨）: 登録して b の `depends_on` に足す。B: 登録せず、b を todo のまま PM の次の分割・設計に任せる。
 - **Q2**: b の間は公開 API から VM の監査付き実行に届かないことと、決定記録 Q2=A の条件（`tests/vm_parity.rs` への監査の軸を b で足す）の食い違いをどう扱うか。A（推奨）: b は crate 内の比較 test（tree と VM の `run_audited` の内部入口に同じ入力を流し、sink の受け取る列を比べる）で確かめ、`tests/vm_parity.rs` への監査の軸は拒否を外す c の受入基準へ移す。B: b で `ConfigError::AuditSinkWithExperimentalBackend` を外し、backpressure は c まで VM で起きない（queue の上限を VM では見ない）ことを逸脱一覧に書く。C: 検査のための `#[doc(hidden)]` の builder の入口を足して b の integration test から届かせる。
+
+- **決定記録（判断役が選択（PR #535）。Q1=A・Q2=A）**:
+  - **Q1（経路のスライスをこの PR で登録するか）= A**: `vm-engine-run-route`（todo、`parent = "VM parity"`、order 65）を登録し、b の `depends_on` に足す。理由: 「audit-vm-triple のスライス分割」小節の決定記録 Q1=A（PR #527）が、b を VM の `Engine::run` の経路のスライスに依存させ、経路を既知の差分一覧の項目を減らすフェーズのスライスとして別に設計すると決めている。前提の vm-parity-diff-a は done で KD-1 も残っているのに、そのスライスが `slices.toml` に無かった。スライスの一覧と状態の正本は `slices.toml` なので、b の前提を正本に見える形にするのが既存の決定と一貫する（[マニフェスト](manifesto.md) 原則 9）。範囲は KD-1 を消す 1 項目に限り、設計は別の設計 PR に残す（[開発ループ手順書](loop-runbook.md) §6.7、原則 8）。採らなかった案: B（登録しない）は、PR #527 で要るとしたスライスが正本に無いまま残り、b が進めない理由が一覧から読めない。
+  - **Q2（b の間に公開 API から VM の監査付き実行に届かないことと、PR #527 の Q2=A の条件の食い違い）= A**: b は crate 内の比較 test（tree と VM の `run_audited` の内部入口に同じ入力を流し、sink の受け取る event 列を `HeapBytes` の `BudgetCharged` を除いて比べる）で確かめる。`tests/vm_parity.rs` への監査の軸の追加は、`ConfigError::AuditSinkWithExperimentalBackend` を外す audit-vm-triple-c の受入基準へ移す。理由: 分割小節は拒否を c で外す理由を「b の間に外すと、backpressure の無い VM 監査が使えてしまう」としており、これは原則 5 に沿う。A はこの割り方を保ったまま同じ入力を tree と VM に流して一致を確かめるので、手順書 §14.1 の趣旨は b でも crate 内で満たせる（原則 5・原則 9）。PR #527 の条件の目的は監査の軸の先送りを落とさないことで、その理由は「facade から観測できる監査の差は b で初めて生じる」だった。b の間は build が拒否するので facade から観測できる差はまだ生じず、差が公開される c に軸を移しても目的は保たれる。公開 API も広げない（原則 8）。**条件**: (1) audit-vm-triple-c の設計 PR は `tests/vm_parity.rs` への監査の軸の追加を受入基準に入れる（PR #527 の Q2=A の条件の移し先。分割小節の追記・c の行・`slices.toml` のコメントにも書いた）。(2) b の設計 PR は crate 内の比較 test を受入基準に入れる。採らなかった案: B（b で拒否を外す）は原則 5 に反しうる。同じ設定・入力で tree は `Yielded`、VM は audit queue の上限を見ずに走り切るという差が公開 API に出て、host の制御が VM で効かない経路を公開することになる（原則 1・原則 3）。C（検査のための `#[doc(hidden)]` の builder の入口）は、検査のためだけに公開 API を足す点で原則 8 に反しうる。backpressure の無い VM 監査に届く点で B と同じ差も持ち込む。
 
 ## 15. 受入基準
 
