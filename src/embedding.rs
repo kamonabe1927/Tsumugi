@@ -251,11 +251,16 @@ pub enum ConfigError {
     ExperimentalBackendNotEnabled,
     /// 監査 sink と `VmExperimental` backend を同時に設定した（Phase 6 A-1）。
     ///
-    /// A-1 の run 経路には backend dispatch が無く、常に tree evaluator で実行する。
-    /// この状態で `VmExperimental` label を監査へ載せると、tree 実行を VM 実行として
-    /// 誤報告してしまう（A-1 の tree-only 境界違反）。VM の監査 wiring が入るまで、
-    /// この組み合わせは build 時に拒否する。
+    /// 監査付きの run 経路（A-1）は tree evaluator だけを持ち、VM の監査 wiring が無い
+    /// （`Engine::run` の VM の経路は vm-engine-run-route で sink 無しの経路にだけ入った）。
+    /// VM の監査 wiring が入るまで（audit-vm-triple-b・c）、この組み合わせは build 時に拒否する。
     AuditSinkWithExperimentalBackend,
+    /// 空でない host function registry と `VmExperimental` backend を同時に設定した
+    /// （vm-engine-run-route、決定記録 Q2=A）。
+    ///
+    /// VM には登録 host function を呼ぶ経路が無い。登録した host function が VM で黙って
+    /// 消えないよう、VM に host function が入るまで（E9 の残り）この組み合わせは build 時に拒否する。
+    HostFunctionsWithExperimentalBackend,
     /// 同一 [`CapabilityKind`](crate::capability::CapabilityKind) を二重に設定した
     /// （後勝ちにしない。仕様第3節）。host function grant は別 ID なら複数許可する。
     DuplicateCapability {
@@ -439,7 +444,9 @@ impl EngineBuilder {
     /// `VmExperimental` を選びつつ許可していない場合は
     /// [`ConfigError::ExperimentalBackendNotEnabled`] を返す。監査 sink を `VmExperimental`
     /// backend と同時に設定した場合は [`ConfigError::AuditSinkWithExperimentalBackend`] を返す
-    /// （A-1 の run 経路は tree-only のため。§7.1）。host function registry の validation は
+    /// （A-1 の run 経路は tree-only のため。§7.1）。空でない host function registry を `VmExperimental`
+    /// と同時に設定した場合は [`ConfigError::HostFunctionsWithExperimentalBackend`] を返す（VM に
+    /// host function の経路が無いため）。host function registry の validation は
     /// registry build 時に済んでいるため、ここでは再検証しない。
     pub fn build(self) -> Result<Engine, ConfigError> {
         if self.config.backend == Backend::VmExperimental && !self.allow_experimental_backend {
@@ -449,6 +456,11 @@ impl EngineBuilder {
         // tree 実行を VM として監査報告してしまうため、VM の監査 wiring が入るまで拒否する。
         if self.config.audit_sink.is_some() && self.config.backend == Backend::VmExperimental {
             return Err(ConfigError::AuditSinkWithExperimentalBackend);
+        }
+        // vm-engine-run-route（決定記録 Q2=A）: VM には登録 host function を呼ぶ経路が無いので、
+        // 空でない registry と VmExperimental の組み合わせを拒否する。
+        if self.config.backend == Backend::VmExperimental && !self.host_registry.is_empty() {
+            return Err(ConfigError::HostFunctionsWithExperimentalBackend);
         }
         Ok(Engine {
             id: EngineId::allocate(),
@@ -1890,6 +1902,9 @@ pub enum ContextError {
 pub struct ExecutionContext {
     engine_id: EngineId,
     evaluator: Evaluator,
+    /// `VmExperimental` の engine の context が持つ VM の状態（vm-engine-run-route）。`Some` の
+    /// context は `Engine::run` を VM で実行し、`evaluator` は使わない。`TreeWalk` では `None`。
+    vm: Option<Box<VmContextState>>,
     /// InternalFailure で poison されたか（第10節 規則4）。true の間は実行・状態操作を拒否する。
     poisoned: bool,
     /// 実行中フラグ（第10節 規則: 同 context への再入は許さない）。
@@ -1915,9 +1930,12 @@ impl ExecutionContext {
     /// のものになる。
     pub fn new(engine: &Engine) -> Self {
         let evaluator = Evaluator::new();
+        let vm = (engine.config().backend == Backend::VmExperimental)
+            .then(|| Box::new(VmContextState::new()));
         Self {
             engine_id: engine.id(),
             evaluator,
+            vm,
             poisoned: false,
             running: false,
             #[cfg(test)]
@@ -1935,6 +1953,8 @@ impl ExecutionContext {
     /// ため、resume の忠実性を全境界にわたって固定するテストだけが使う。外部 embedder 向けの
     /// 安定した公開契約ではない（[`EngineBuilder::audit_slice_fuel`] と同じテスト用の内部 surface。
     /// `#[doc(hidden)]` かつ `unstable-bytecode` feature 限定）。
+    ///
+    /// `VmExperimental` の engine の context では何もしない（VM の経路は slice yield を持たない）。
     #[cfg(feature = "unstable-bytecode")]
     #[doc(hidden)]
     pub fn force_yield_at_every_boundary_for_test(&mut self, enabled: bool) {
@@ -1974,6 +1994,9 @@ impl ExecutionContext {
         }
         // 評価状態を作り直して全 user state を捨てる（budget config は new と同じ既定）。
         self.evaluator = Evaluator::new();
+        if self.vm.is_some() {
+            self.vm = Some(Box::new(VmContextState::new()));
+        }
         Ok(())
     }
 
@@ -1988,7 +2011,40 @@ impl ExecutionContext {
 
     /// 現在の予算使用量 snapshot を返す（仕様第6節 `BudgetUsage`）。
     pub fn budget_usage(&self) -> BudgetUsage {
-        self.evaluator.budget_usage()
+        match &self.vm {
+            Some(state) => state.vm.budget_usage(),
+            None => self.evaluator.budget_usage(),
+        }
+    }
+}
+
+/// `VmExperimental` の engine の [`ExecutionContext`] が持つ VM の状態（vm-engine-run-route）。
+///
+/// CLI の VM REPL と同じ部品（REPL の compile 状態・REPL 形の `Vm`・展開済み module の表）を
+/// 1 つの context に持ち、実行をまたいで持ち越す。
+struct VmContextState {
+    compiler: crate::compiler::Compiler,
+    vm: crate::vm::Vm,
+    /// commit した実行が展開した module（`ModuleId` → `SourceHash`）。
+    expanded: std::collections::HashMap<ModuleId, SourceHash>,
+    /// 展開済み module の imported module record の heap token（context の寿命で持つ）。
+    module_tokens: Vec<std::rc::Rc<crate::value::HeapToken>>,
+}
+
+impl VmContextState {
+    fn new() -> Self {
+        Self {
+            compiler: crate::compiler::Compiler::new(),
+            // budget は run が request のものへ据え直す（tree の Evaluator::new と同じ bootstrap 値）。
+            vm: {
+                let mut vm = crate::vm::Vm::new_repl();
+                // rollback した実行でも消費した fuel を usage に残す（tree と同じ。VRR-AT-03）。
+                vm.set_repl_rollback_keeps_fuel(true);
+                vm
+            },
+            expanded: std::collections::HashMap::new(),
+            module_tokens: Vec::new(),
+        }
     }
 }
 
@@ -2257,7 +2313,7 @@ impl Engine {
                 fault_id,
                 safe_message: internal_fault_message(fault_id),
                 // panic 捕捉時点の usage snapshot（counter の read は panic 後も安全）。
-                usage: context.evaluator.budget_usage(),
+                usage: context.budget_usage(),
             },
         }
     }
@@ -2693,7 +2749,120 @@ impl Engine {
             panic!("injected run-boundary panic (test only)");
         }
 
+        // vm-engine-run-route: VmExperimental の engine の context は VM で実行する。
+        if context.vm.is_some() {
+            return self.execute_program_vm(context, &program, root_source_bytes, &graph, request);
+        }
         self.execute_program(context, &program, root_source_bytes, &graph, request)
+    }
+
+    /// VM の状態を持つ context で、再構築済み Program を terminal まで実行する（vm-engine-run-route）。
+    ///
+    /// 順序は tree の [`Self::install_execution_state`] → [`Self::run_transactional`] に合わせる:
+    /// budget・clock・token の据え直し → pre-cancel → 引数・capability・言語 revision の注入 →
+    /// graph からの import の展開と課金 → compile と実行 → outcome の写像 → capability の後始末。
+    /// `Completed`・`Exited` は commit（`Exited` は実行済みの文まで）、それ以外は実行の開始時点へ
+    /// rollback する（§10 規則5）。
+    fn execute_program_vm(
+        &self,
+        context: &mut ExecutionContext,
+        program: &Program,
+        root_source_bytes: u64,
+        graph: &crate::module::GraphModules,
+        request: ExecutionRequest,
+    ) -> ExecutionOutcome {
+        let Some(state) = context.vm.as_deref_mut() else {
+            return internal_failure("VM の状態を持たない実行コンテキストです");
+        };
+        // 1. request の budget・clock・token を据え直す（使用量と peaks を 0 から、live heap は持ち越す）。
+        state
+            .vm
+            .begin_execution(request.budget, request.clock, request.cancellation.clone());
+        // 2. pre-cancel は命令 0 の Cancelled（language-state を変えない）。
+        if request.cancellation.is_cancelled() {
+            return ExecutionOutcome::Cancelled {
+                usage: state.vm.budget_usage(),
+            };
+        }
+        // 3. 引数・capability・言語 revision を注入する。
+        state.vm.set_script_args(request.arguments);
+        state.vm.set_capabilities(request.capabilities);
+        state
+            .vm
+            .set_language_revision(self.config.language_revision);
+
+        let outcome = Self::run_vm_transactional(state, program, root_source_bytes, graph);
+
+        // 7. capability を context に持ち越さない（§10 規則7、tree の clear_capabilities と同じ）。
+        state
+            .vm
+            .set_capabilities(crate::capability::CapabilitySet::empty());
+        outcome
+    }
+
+    /// 展開・課金・compile・実行を 1 つの transaction として回し、outcome へ写す（vm-engine-run-route）。
+    fn run_vm_transactional(
+        state: &mut VmContextState,
+        program: &Program,
+        root_source_bytes: u64,
+        graph: &crate::module::GraphModules,
+    ) -> ExecutionOutcome {
+        use crate::error::ErrorKind;
+        let terminal = |state: &mut VmContextState, error: TsumugiError| {
+            let usage = state.vm.budget_usage();
+            let pending_exit = if error.kind() == Some(ErrorKind::ProcessExit) {
+                state.vm.take_pending_exit()
+            } else {
+                None
+            };
+            terminal_outcome(error, usage, pending_exit)
+        };
+        // 4. link が確かめた graph から、context の展開済みの表に対して import を展開し、root source と
+        //    新しく展開した module を課金する（CLI の VM REPL の expand_for_repl と同じ規則）。
+        let (expanded_program, newly) =
+            match crate::module::expand_from_graph(program, graph, &state.expanded) {
+                Ok(expanded) => expanded,
+                Err(error) => return terminal(state, error),
+            };
+        let program = expanded_program.as_ref().unwrap_or(program);
+        let module_tokens = match state.vm.charge_link_graph(root_source_bytes, &newly) {
+            Ok(tokens) => tokens,
+            Err(error) => return terminal(state, error),
+        };
+        // 5. compile して実行する。失敗した実行は compiler の状態も開始時点へ戻す。
+        let compiler_checkpoint = state.compiler.clone();
+        let result = state
+            .compiler
+            .compile_repl_line(program)
+            .and_then(|chunk| state.vm.run_repl_chunk(chunk));
+        let committed = match &result {
+            Ok(()) => true,
+            Err(error) if error.kind() == Some(ErrorKind::ProcessExit) => {
+                // 実行済みの文まで commit する（決定記録 Q3=A）。compiler の top-level locals を VM が
+                // 残した数へ戻す。
+                let initialized = state.vm.repl_top_level_initialized();
+                state.compiler.truncate_repl_top_level_locals(initialized);
+                true
+            }
+            Err(_) => {
+                state.compiler = compiler_checkpoint;
+                false
+            }
+        };
+        // 展開済み module の表へ足すのは commit したときだけ（tree の module marker と同じ）。
+        if committed {
+            for module in &newly {
+                state.expanded.insert(module.id.clone(), module.source_hash);
+            }
+            state.module_tokens.extend(module_tokens);
+        }
+        // 6. outcome は tree と同じ写像で作る。
+        match result {
+            Ok(()) => ExecutionOutcome::Completed {
+                usage: state.vm.budget_usage(),
+            },
+            Err(error) => terminal(state, error),
+        }
     }
 
     /// 実行前の engine/context 整合検証と、保持 source からの Program 再構築（案 A）。
@@ -3031,13 +3200,30 @@ fn terminal_from_run_error(
     context: &mut ExecutionContext,
     error: TsumugiError,
 ) -> ExecutionOutcome {
-    use crate::error::ErrorKind;
     // usage snapshot は commit / rollback 後（run_slice / begin_execution が確定済み）の値。
     let usage = context.evaluator.budget_usage();
+    let pending_exit = if error.kind() == Some(crate::error::ErrorKind::ProcessExit) {
+        context.evaluator.take_pending_exit()
+    } else {
+        None
+    };
+    terminal_outcome(error, usage, pending_exit)
+}
+
+/// terminal の error を outcome へ写す（tree と VM で共有する写像。vm-engine-run-route）。
+///
+/// `usage` は commit / rollback 後の値、`pending_exit` は `ErrorKind::ProcessExit` のときに backend
+/// から取り出した `exit` のコード。
+fn terminal_outcome(
+    error: TsumugiError,
+    usage: BudgetUsage,
+    pending_exit: Option<u8>,
+) -> ExecutionOutcome {
+    use crate::error::ErrorKind;
     match error.kind() {
         // exit() の structured terminal（C7、REV-023）。commit 済み。
         Some(ErrorKind::ProcessExit) => {
-            let code = context.evaluator.take_pending_exit().unwrap_or(0);
+            let code = pending_exit.unwrap_or(0);
             ExecutionOutcome::Exited { code, usage }
         }
         // 協調 cancel（§8）。catch 不能 terminal。
@@ -6170,6 +6356,123 @@ mod tests {
             .err()
             .expect("colliding name must fail at registry build");
         assert!(matches!(err, ConfigError::DuplicateCallableName { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // vm-engine-run-route（VRR-AT-01・05）
+    // -----------------------------------------------------------------------
+
+    fn vm_engine_builder() -> EngineBuilder {
+        Engine::builder()
+            .config(EngineConfig {
+                backend: Backend::VmExperimental,
+                language_revision: LanguageRevision::CURRENT,
+                audit_sink: None,
+                audit_slice_fuel: None,
+            })
+            .allow_experimental_backend(true)
+    }
+
+    /// VRR-AT-01: `VmExperimental` の engine の context は VM の状態を持ち、`run`・`run_for_repl`・
+    /// `run_audited`（sink 無し）は VM で実行する。`TreeWalk` の engine は今までどおり tree で実行する。
+    #[test]
+    fn vrr_at_01_vm_engine_context_runs_on_vm() {
+        let vm_engine = vm_engine_builder().build().unwrap();
+        let tree_engine = Engine::builder().build().unwrap();
+        let mut tree_ctx = ExecutionContext::new(&tree_engine);
+        assert!(
+            tree_ctx.vm.is_none(),
+            "TreeWalk の context は VM の状態を持たない"
+        );
+        let linked = compile_link(&tree_engine, "m", "let a = 1\n");
+        let outcome = tree_engine.run(&linked, &mut tree_ctx, standard_request());
+        assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
+        assert!(tree_ctx.evaluator.budget_usage().committed.fuel > 0);
+
+        type Runner = fn(&Engine, &LinkedScript, &mut ExecutionContext) -> ExecutionOutcome;
+        let runners: [(&str, Runner); 3] = [
+            ("run", |e, l, c| e.run(l, c, standard_request())),
+            ("run_for_repl", |e, l, c| {
+                e.run_for_repl(l, c, standard_request())
+            }),
+            ("run_audited", |e, l, c| {
+                match e.run_audited(l, c, standard_request()) {
+                    AuditedOutcome::Outcome(outcome) => *outcome,
+                    other => panic!("sink 無しの run_audited は Outcome を返す: {other:?}"),
+                }
+            }),
+        ];
+        for (name, runner) in runners {
+            let mut ctx = ExecutionContext::new(&vm_engine);
+            assert!(
+                ctx.vm.is_some(),
+                "{name}: VmExperimental の context は VM の状態を持つ"
+            );
+            let first = compile_link(&vm_engine, "m", "let a = 41\n");
+            let outcome = runner(&vm_engine, &first, &mut ctx);
+            assert!(
+                matches!(outcome, ExecutionOutcome::Completed { .. }),
+                "{name}: {outcome:?}"
+            );
+            // 実行は VM の台帳に付き、tree の評価器は使わない。
+            let state = ctx.vm.as_ref().unwrap();
+            assert!(state.vm.budget_usage().committed.fuel > 0, "{name}");
+            assert_eq!(ctx.budget_usage(), state.vm.budget_usage(), "{name}");
+            assert_eq!(ctx.evaluator.budget_usage().committed.fuel, 0, "{name}");
+            // 次の実行で前の実行の binding が見える（VM の状態を持ち越す）。
+            let second = compile_link(&vm_engine, "m", "exit(a + 1)\n");
+            let granted = crate::capability::CapabilitySet::builder()
+                .process_exit(crate::capability::ProcessExit::new(
+                    std::num::NonZeroU128::new(1).unwrap(),
+                ))
+                .unwrap()
+                .build();
+            let outcome = vm_engine.run(
+                &second,
+                &mut ctx,
+                standard_request().with_capabilities(granted),
+            );
+            assert!(
+                matches!(outcome, ExecutionOutcome::Exited { code: 42, .. }),
+                "{name}: {outcome:?}"
+            );
+        }
+
+        // clear_user_state は VM の状態も作り直す。
+        let mut ctx = ExecutionContext::new(&vm_engine);
+        let linked = compile_link(&vm_engine, "m", "let a = 1\n");
+        let _ = vm_engine.run(&linked, &mut ctx, standard_request());
+        ctx.clear_user_state().unwrap();
+        assert!(ctx.vm.is_some());
+        let read = compile_link(&vm_engine, "m", "let b = a\n");
+        let outcome = vm_engine.run(&read, &mut ctx, standard_request());
+        assert!(
+            matches!(outcome, ExecutionOutcome::RuntimeError { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    /// VRR-AT-05: `VmExperimental` で空でない registry を設定した build は
+    /// `HostFunctionsWithExperimentalBackend` を返す。空の registry の `VmExperimental` と、registry を
+    /// 設定した `TreeWalk` の build は成功する。
+    #[test]
+    fn vrr_at_05_host_functions_with_experimental_backend_is_rejected() {
+        let err = vm_engine_builder()
+            .host_functions(lookup_registry())
+            .build()
+            .expect_err("空でない registry + VmExperimental は拒否される");
+        assert_eq!(err, ConfigError::HostFunctionsWithExperimentalBackend);
+        vm_engine_builder()
+            .host_functions(HostFunctionRegistry::empty())
+            .build()
+            .expect("空の registry の VmExperimental は build できる");
+        vm_engine_builder()
+            .build()
+            .expect("registry 未設定の VmExperimental は build できる");
+        Engine::builder()
+            .host_functions(lookup_registry())
+            .build()
+            .expect("registry を設定した TreeWalk は build できる");
     }
 }
 
