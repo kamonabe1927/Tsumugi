@@ -27,7 +27,15 @@
 //! `git diff --stat` と `cargo test` で確かめる）。
 //!
 //! capability は stdout だけを grant する（`tests/differential.rs` の `print_capabilities` と同じ範囲）。
-//! capability の要る fixture と CLI の byte 比較は vm-parity-diff-b で扱う（`FIXTURES_FOR_DIFF_B`）。
+//! capability の要る fixture と CLI の byte 比較は vm-parity-diff-b で足した（VPD-AT-07..12）。
+//! capability の要る fixture（`FIXTURES_WITH_CAPABILITY`）は `Mode::Linked` で CLI と同じ組み立て
+//! （`Engine::link` の結果を両 engine で実行する）で流し、同じ軸で比べる（ケース名 `linked/<stem>`）。
+//! すべての fixture を `tsumugi` と `tsumugi --vm` で起動し、stdout・stderr・終了コードを byte で比べる
+//! （`Axis::CliStdout`・`Axis::CliStderr`・`Axis::CliExit`、ケース名 `cli/<stem>`）。CLI の引数・環境変数・
+//! 時間の上限は `tests/integration.rs` と同じ `tests/support/cli_fixture.rs` を使う。
+//!
+//! VPD-AT-12（非破壊）: vm-parity-diff-b も `src/` を変えない。`tests/integration.rs` の CLI の組み立ては
+//! `tests/support/cli_fixture.rs` へ移しただけで、期待は変えていない（`git diff --stat` と `cargo test`）。
 
 use std::num::NonZeroU128;
 use std::sync::{Arc, Mutex};
@@ -41,6 +49,9 @@ use tsumugi::lexer::Lexer;
 use tsumugi::parser::Parser;
 use tsumugi::vm::Vm;
 use tsumugi::{CapabilitySet, Engine, ExecutionContext};
+
+#[path = "support/cli_fixture.rs"]
+mod cli_fixture;
 
 // =============================================================================
 // 実行器
@@ -90,6 +101,10 @@ enum Mode {
     Repl,
     /// `Engine::execute` で 1 つの `ExecutionContext` を使い回す。VM には経路が無い。
     Context,
+    /// capability の要る 1 入力の実行を CLI と同じ組み立てで流す（vm-parity-diff-b）。tree は
+    /// `Engine::compile` → `Engine::link` → `Engine::run`、VM は同じ link の結果を `expand_for_cli` →
+    /// `Compiler` → `Vm::with_budget` → `set_capabilities` → `charge_link_graph` → `run`。
+    Linked(LinkedSetup),
 }
 
 /// 1 入力の観測。
@@ -124,6 +139,9 @@ fn parse_error_step(error: TsumugiError) -> Step {
 }
 
 fn run_tree(mode: Mode, inputs: &[String]) -> Run {
+    if let Mode::Linked(setup) = mode {
+        return run_tree_linked(setup, &inputs[0]);
+    }
     let (capabilities, sink) = capture_capabilities();
     match mode {
         Mode::Single => {
@@ -186,10 +204,14 @@ fn run_tree(mode: Mode, inputs: &[String]) -> Run {
                 .collect();
             Run::Steps(steps)
         }
+        Mode::Linked(_) => unreachable!("先に分けた"),
     }
 }
 
 fn run_vm(mode: Mode, inputs: &[String]) -> Run {
+    if let Mode::Linked(setup) = mode {
+        return run_vm_linked(setup, &inputs[0]);
+    }
     let (capabilities, sink) = capture_capabilities();
     match mode {
         Mode::Single => {
@@ -261,6 +283,7 @@ fn run_vm(mode: Mode, inputs: &[String]) -> Run {
             Run::Steps(steps)
         }
         Mode::Context => Run::NoRoute("Engine::execute / Engine::run に VM の経路が無い"),
+        Mode::Linked(_) => unreachable!("先に分けた"),
     }
 }
 
@@ -277,6 +300,12 @@ enum Axis {
     Counters,
     Peaks,
     Heap,
+    /// CLI の stdout の byte 列（vm-parity-diff-b）。
+    CliStdout,
+    /// CLI の stderr の byte 列（VM は `WARN_VM_EXPERIMENTAL` の 1 行を除いた後）。
+    CliStderr,
+    /// CLI の終了コード。
+    CliExit,
 }
 
 /// 1 つの差。軸ごとに、最初に差の出た入力の値を持つ。
@@ -704,36 +733,6 @@ fn repl_cases() -> Vec<Case> {
 // fixture（VPD-AT-04）
 // -----------------------------------------------------------------------------
 
-/// print だけでは動かないため外す fixture と、外す理由（要る capability）。vm-parity-diff-b の対象。
-/// ここに無い `tests/fixtures/*.tsg` は自動で比べる対象に入る。
-const FIXTURES_FOR_DIFF_B: &[(&str, &str)] = &[
-    ("env_allow", "env"),
-    ("env_protected_windows", "env"),
-    ("error_sandbox", "fs（read_file）"),
-    ("file_io", "env・fs"),
-    ("filesystem", "env・fs"),
-    ("local_utils", "env・clock（now）"),
-    ("string_utils", "env・fs"),
-    ("error_import_before_side_effects", "import・fs"),
-    ("error_import_non_top_level", "import"),
-    ("error_import_not_found", "import"),
-    ("function_id_import", "import"),
-    ("function_id_import_lib", "import（import される側）"),
-    ("import_bad_syntax", "import（import される側）"),
-    ("import_basic", "import"),
-    ("import_circular", "import"),
-    ("import_circular_a", "import（import される側）"),
-    ("import_circular_b", "import（import される側）"),
-    ("import_lib", "import（import される側）"),
-    ("import_nested", "import"),
-    ("import_nested_base", "import（import される側）"),
-    ("import_nested_mid", "import（import される側）"),
-    ("import_static_resolution", "import"),
-    ("runtime_global_failed_import", "import"),
-    ("runtime_global_import", "import"),
-    ("runtime_global_import_lib", "import（import される側）"),
-];
-
 fn fixture_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
@@ -756,7 +755,11 @@ fn fixture_stems() -> Vec<String> {
 fn fixture_cases() -> Vec<Case> {
     fixture_stems()
         .into_iter()
-        .filter(|stem| !FIXTURES_FOR_DIFF_B.iter().any(|(name, _)| name == stem))
+        .filter(|stem| {
+            !FIXTURES_WITH_CAPABILITY
+                .iter()
+                .any(|(name, _, _)| name == stem)
+        })
         .map(|stem| {
             let source = std::fs::read_to_string(fixture_dir().join(format!("{stem}.tsg")))
                 .expect("fixture を読めない");
@@ -768,6 +771,689 @@ fn fixture_cases() -> Vec<Case> {
             }
         })
         .collect()
+}
+
+// -----------------------------------------------------------------------------
+// capability の要る fixture の in-process 比較（vm-parity-diff-b、VPD-AT-07・08）
+// -----------------------------------------------------------------------------
+
+/// capability の流し方で渡す capability の組。CLI の profile と同じ範囲にする（spec の Q1=A）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Profile {
+    /// CLI の `--profile legacy` に当たる組: stdout・env・clock・fs（legacy の host path 翻訳付き、
+    /// `TSUMUGI_SANDBOX` 相当の root 1 つ）。
+    Legacy,
+    /// CLI の `--allow-import-root default=<fixtures>` に当たる組: stdout・fixtures ディレクトリを
+    /// `default` mount にした `FilesystemModuleResolver`。
+    Import,
+}
+
+/// capability の流し方の 1 ケースの設定。`stem` は env の key/value を引く名前。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinkedSetup {
+    stem: &'static str,
+    profile: Profile,
+}
+
+/// print だけでは動かないため capability の流し方（`linked/<stem>`）で比べる fixture と、渡す capability・
+/// 理由。ここに無い `tests/fixtures/*.tsg` は print だけの流し方（`fixture/<stem>`）に自動で入る。
+/// import される側（spec の Q3=A）も単体の root として流す。
+const FIXTURES_WITH_CAPABILITY: &[(&str, Profile, &str)] = &[
+    (
+        "env_allow",
+        Profile::Legacy,
+        "env（allow-list で見える key と見えない key）",
+    ),
+    (
+        "env_protected_windows",
+        Profile::Legacy,
+        "env（TSUMUGI_ の保護された key が読めない）",
+    ),
+    (
+        "error_sandbox",
+        Profile::Legacy,
+        "fs（root の外の read_file の拒否）",
+    ),
+    ("file_io", Profile::Legacy, "env・fs"),
+    ("filesystem", Profile::Legacy, "env・fs"),
+    (
+        "local_utils",
+        Profile::Legacy,
+        "env・clock（now）・fs（path_exists）",
+    ),
+    ("string_utils", Profile::Legacy, "env・fs"),
+    (
+        "error_import_before_side_effects",
+        Profile::Import,
+        "import（解決の失敗が副作用より前）",
+    ),
+    ("error_import_non_top_level", Profile::Import, "import"),
+    ("error_import_not_found", Profile::Import, "import"),
+    ("function_id_import", Profile::Import, "import"),
+    (
+        "function_id_import_lib",
+        Profile::Import,
+        "import（import される側）",
+    ),
+    (
+        "import_bad_syntax",
+        Profile::Import,
+        "import（import される側）",
+    ),
+    ("import_basic", Profile::Import, "import"),
+    ("import_circular", Profile::Import, "import"),
+    (
+        "import_circular_a",
+        Profile::Import,
+        "import（import される側）",
+    ),
+    (
+        "import_circular_b",
+        Profile::Import,
+        "import（import される側）",
+    ),
+    ("import_lib", Profile::Import, "import（import される側）"),
+    ("import_nested", Profile::Import, "import"),
+    (
+        "import_nested_base",
+        Profile::Import,
+        "import（import される側）",
+    ),
+    (
+        "import_nested_mid",
+        Profile::Import,
+        "import（import される側）",
+    ),
+    ("import_static_resolution", Profile::Import, "import"),
+    ("runtime_global_failed_import", Profile::Import, "import"),
+    ("runtime_global_import", Profile::Import, "import"),
+    (
+        "runtime_global_import_lib",
+        Profile::Import,
+        "import（import される側）",
+    ),
+];
+
+/// `env_protected_windows` の専用 test（`tests/integration.rs`）と同じ secret marker と key。
+const SECRET_MARKER: &str = "AUD031_WINDOWS_SECRET_MUST_NOT_LEAK";
+const SECRET_KEYS: &[&str] = &[
+    "TSUMUGI_AUD031_SECRET",
+    "tsumugi_aud031_secret",
+    "TsUmUgI_AuD031_SeCrEt",
+    "TſUMUGI_AUD031_SECRET",
+    "TSUMUGı_AUD031_SECRET",
+];
+
+/// fixture ごとの env の key/value（`tests/integration.rs` の `fixture_envs` と専用 test と同じ key）。
+/// CLI は host の env 全体を snapshot に入れるので、fixture が読む host の key（`PATH`）は固定の値で入れる。
+fn linked_env(stem: &str, dir: &std::path::Path) -> Vec<(String, String)> {
+    let dir = dir.to_str().expect("UTF-8 パス").to_string();
+    let mut entries = vec![
+        (cli_fixture::TEST_DIR_ENV.to_string(), dir),
+        ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+    ];
+    match stem {
+        // `TSUMUGI_ENV_ALLOW=TSG_TEST_ALLOWED,TSUMUGI_*` を通した後の snapshot（SECRET_DB_PASS は入らない）。
+        "env_allow" => entries.push(("TSG_TEST_ALLOWED".into(), "visible_value".into())),
+        // 保護された key を snapshot に入れても `env()` が読めないことを両 engine で比べる。
+        "env_protected_windows" => entries.extend(
+            SECRET_KEYS
+                .iter()
+                .map(|key| (key.to_string(), SECRET_MARKER.to_string())),
+        ),
+        _ => {}
+    }
+    entries
+}
+
+/// CLI の legacy profile が snapshot から外す `TSUMUGI_` の key（`src/cli_capability.rs` の
+/// `tsumugi_is_protected` と同じ規則。Windows は大文字小文字を区別しない）。保護は engine ではなく
+/// CLI が snapshot を組むときに行うので、in-process でも同じ規則で外してから両 engine に渡す。
+fn cli_env_protected(key: &str) -> bool {
+    if cfg!(windows) {
+        key.to_uppercase().starts_with("TSUMUGI_")
+    } else {
+        key.starts_with("TSUMUGI_")
+    }
+}
+
+/// snapshot に入れられない key（CLI が保護する key・形式の検査で落ちるもの）は CLI と同じく入れない。
+fn environment_snapshot(entries: Vec<(String, String)>) -> tsumugi::EnvironmentSnapshot {
+    use tsumugi::{DataClassification, EnvironmentSnapshot, EnvironmentValue};
+    let mut values = Vec::new();
+    for (key, value) in entries {
+        if cli_env_protected(&key) {
+            continue;
+        }
+        let key = if cfg!(windows) {
+            key.to_uppercase()
+        } else {
+            key
+        };
+        let Ok(value) = EnvironmentValue::new(value, DataClassification::Public) else {
+            continue;
+        };
+        if EnvironmentSnapshot::from_entries([(key.clone(), value.clone())]).is_ok() {
+            values.push((key, value));
+        }
+    }
+    EnvironmentSnapshot::from_entries(values).expect("env snapshot")
+}
+
+fn policy(n: u128) -> NonZeroU128 {
+    NonZeroU128::new(n).expect("non-zero")
+}
+
+/// legacy の filesystem。CLI の `TSUMUGI_SANDBOX` に path を 1 つ渡したときと同じ形（`dir` を root にした
+/// `legacy0` と `default` の 2 つの mount、host path 翻訳は `legacy0`）。`local_utils` だけは CLI が
+/// `TSUMUGI_SANDBOX` を渡さない（`tests/support/cli_fixture.rs` の `fixture_envs`）ので、CLI の unrestricted と
+/// 同じく `/` を `default` mount にし、host path 翻訳も `default` にする。
+fn legacy_filesystem(stem: &str, dir: &std::path::Path) -> tsumugi::FilesystemCapability {
+    use tsumugi::{
+        FilesystemCapability, FilesystemRoot, FsOperation, MountName, OsDirectoryHandle,
+        SymlinkPolicy,
+    };
+    let operations: std::collections::BTreeSet<FsOperation> = [
+        FsOperation::Read,
+        FsOperation::Write,
+        FsOperation::Create,
+        FsOperation::Delete,
+        FsOperation::Metadata,
+        FsOperation::List,
+        FsOperation::RecursiveDelete,
+    ]
+    .into_iter()
+    .collect();
+    if stem == "local_utils" && cfg!(unix) {
+        let root = std::path::PathBuf::from("/");
+        let pid = policy(22);
+        let handle = OsDirectoryHandle::new(root.clone(), pid, SymlinkPolicy::FollowWithinRoot);
+        let mount = MountName::new("default").expect("mount");
+        let fs_root = FilesystemRoot::new(
+            mount.clone(),
+            pid,
+            operations,
+            SymlinkPolicy::FollowWithinRoot,
+            Arc::new(handle),
+        )
+        .expect("root");
+        return FilesystemCapability::new_legacy([fs_root], [(mount, root)])
+            .expect("legacy filesystem");
+    }
+    let mut roots = Vec::new();
+    for (index, name) in ["legacy0", "default"].iter().enumerate() {
+        let pid = policy(20 + index as u128);
+        let handle =
+            OsDirectoryHandle::new(dir.to_path_buf(), pid, SymlinkPolicy::FollowWithinRoot);
+        roots.push(
+            FilesystemRoot::new(
+                MountName::new(*name).expect("mount"),
+                pid,
+                operations.clone(),
+                SymlinkPolicy::FollowWithinRoot,
+                Arc::new(handle),
+            )
+            .expect("root"),
+        );
+    }
+    FilesystemCapability::new_legacy(
+        roots,
+        [(MountName::new("legacy0").expect("mount"), dir.to_path_buf())],
+    )
+    .expect("legacy filesystem")
+}
+
+/// 両 engine に渡す capability set を組む。同じ setup と dir からは同じ内容の set ができる。
+fn linked_capabilities(
+    setup: LinkedSetup,
+    dir: &std::path::Path,
+) -> (CapabilitySet, Arc<Mutex<Vec<u8>>>) {
+    use tsumugi::{FilesystemModuleResolver, MountName, OsDirectoryHandle, SymlinkPolicy};
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let mut builder = CapabilitySet::builder()
+        .stdout(Arc::new(CaptureOutput(Arc::clone(&sink))))
+        .expect("stdout grant");
+    match setup.profile {
+        Profile::Legacy => {
+            let clock = tsumugi::capability::FixedClock::new(
+                policy(11),
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+            );
+            builder = builder
+                .legacy_fs_syntax()
+                .environment(environment_snapshot(linked_env(setup.stem, dir)))
+                .expect("env grant")
+                .clock(Arc::new(clock))
+                .expect("clock grant")
+                .filesystem(legacy_filesystem(setup.stem, dir))
+                .expect("fs grant");
+        }
+        Profile::Import => {
+            let pid = policy(7);
+            let handle = OsDirectoryHandle::new(fixture_dir(), pid, SymlinkPolicy::DenyAll);
+            let resolver = FilesystemModuleResolver::new(
+                pid,
+                [(MountName::new("default").expect("mount"), Arc::new(handle))],
+            )
+            .expect("resolver");
+            builder = builder
+                .module_resolver(Arc::new(resolver))
+                .expect("resolver grant");
+        }
+    }
+    (builder.build(), sink)
+}
+
+/// fs を書くケースのディレクトリ。tree と VM は同じ path を使い、engine を流す前に毎回空にする。
+fn linked_dir(stem: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("tsumugi-vm-parity-{}-{stem}", std::process::id()))
+}
+
+fn fresh_dir(stem: &str) -> std::path::PathBuf {
+    let dir = linked_dir(stem);
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).expect("一時ディレクトリの作成に失敗");
+    dir
+}
+
+/// CLI と同じ組み立てで compile → link する。compile・link の error は両 engine に同じ観測
+/// （parse error と同じ扱い）として返す。
+fn link_linked(
+    source: &str,
+    capabilities: &CapabilitySet,
+) -> Result<(tsumugi::EmbeddingEngine, tsumugi::LinkedScript), TsumugiError> {
+    use tsumugi::{
+        CompileOptions, EmbeddingEngine, ExecutionId, LinkRequest, Source, SourceId,
+        SystemMonotonicClock,
+    };
+    let engine = EmbeddingEngine::builder().build().expect("engine");
+    let script = engine
+        .compile(
+            Source::new(SourceId::new("main").expect("id"), source),
+            &CompileOptions {
+                retain_source: true,
+            },
+        )
+        .map_err(|errors| TsumugiError::parse(0, format!("compile: {errors:?}")))?;
+    let clock = SystemMonotonicClock::new();
+    let request = LinkRequest::new(
+        ExecutionId::new(policy(1)),
+        capabilities.clone(),
+        tree_budget(&clock),
+    );
+    let linked = engine
+        .link(&script, request)
+        .map_err(|error| TsumugiError::parse(0, format!("link: {error:?}")))?;
+    Ok((engine, linked))
+}
+
+/// `Engine::run` は budget の deadline を request の clock と同じ domain に求めるので、上限は `config()`
+/// のまま deadline だけをその clock のものにする（ledger は deadline 以外の上限で両 engine 同じ）。
+fn tree_budget(clock: &dyn tsumugi::MonotonicClock) -> BudgetConfig {
+    BudgetConfig {
+        deadline: BudgetConfig::standard(clock).expect("budget").deadline,
+        ..config()
+    }
+}
+
+/// `exit(code)` の terminal を、両 engine で同じ形の error として観測する。
+fn exit_error(code: Option<u8>) -> TsumugiError {
+    TsumugiError::Runtime {
+        line: 0,
+        message: format!("exit({code:?})"),
+        kind: tsumugi::error::ErrorKind::ProcessExit,
+        trace: Vec::new(),
+        message_id: None,
+    }
+}
+
+/// 公開 `ExecutionError` と同じ field（kind・message・line・trace）だけを残す。tree は `Engine::run` が
+/// 返す `ExecutionError` からしか観測できないので、VM の error も同じ field に揃えてから比べる。
+fn public_fields(error: TsumugiError) -> TsumugiError {
+    match error {
+        TsumugiError::Runtime {
+            line,
+            message,
+            kind,
+            trace,
+            ..
+        } => TsumugiError::Runtime {
+            line,
+            message,
+            kind,
+            trace,
+            message_id: None,
+        },
+        TsumugiError::Parse { line, message } => TsumugiError::Runtime {
+            line,
+            message,
+            kind: tsumugi::error::ErrorKind::Internal,
+            trace: Vec::new(),
+            message_id: None,
+        },
+    }
+}
+
+fn from_execution_error(error: tsumugi::ExecutionError) -> TsumugiError {
+    TsumugiError::Runtime {
+        line: error.line.map_or(0, |line| line as usize),
+        message: error.safe_message,
+        kind: error.code,
+        trace: error
+            .trace
+            .into_iter()
+            .map(|frame| tsumugi::error::TraceFrame {
+                name: frame.function,
+                line: frame.line.map_or(0, |line| line as usize),
+            })
+            .collect(),
+        message_id: None,
+    }
+}
+
+fn run_tree_linked(setup: LinkedSetup, source: &str) -> Run {
+    use tsumugi::{EmbeddingContext, EmbeddingOutcome, EmbeddingRequest, MonotonicClock};
+    let dir = fresh_dir(setup.stem);
+    let (capabilities, sink) = linked_capabilities(setup, &dir);
+    let (engine, linked) = match link_linked(source, &capabilities) {
+        Ok(pair) => pair,
+        Err(error) => return Run::Steps(vec![parse_error_step(error)]),
+    };
+    let clock: Arc<dyn MonotonicClock> = Arc::new(tsumugi::SystemMonotonicClock::new());
+    let request = EmbeddingRequest::new(tree_budget(clock.as_ref()), Arc::clone(&clock))
+        .expect("request")
+        .with_capabilities(capabilities);
+    let mut context = EmbeddingContext::new(&engine);
+    let (result, usage) = match engine.run(&linked, &mut context, request) {
+        EmbeddingOutcome::Completed { usage } => (Ok(()), usage),
+        EmbeddingOutcome::Exited { code, usage } => (Err(exit_error(Some(code))), usage),
+        EmbeddingOutcome::RuntimeError { error, usage }
+        | EmbeddingOutcome::BudgetExceeded { error, usage } => {
+            (Err(from_execution_error(error)), usage)
+        }
+        other => (
+            Err(TsumugiError::parse(0, format!("terminal: {other:?}"))),
+            BudgetUsage::default(),
+        ),
+    };
+    Run::Steps(vec![Step {
+        result,
+        output: take_output(&sink),
+        usage,
+    }])
+}
+
+fn run_vm_linked(setup: LinkedSetup, source: &str) -> Run {
+    let dir = fresh_dir(setup.stem);
+    let (capabilities, sink) = linked_capabilities(setup, &dir);
+    let (_engine, linked) = match link_linked(source, &capabilities) {
+        Ok(pair) => pair,
+        Err(error) => return Run::Steps(vec![parse_error_step(error)]),
+    };
+    // `src/main.rs` の `execute_vm_with_path` と同じ組み立て。expand・compile の error は、root
+    // source を課金した台帳の上の terminal として観測する（vm-parity-diff-a の `Mode::Single` と同じ）。
+    let (chunk, expanded, early_error) = match linked.expand_for_cli() {
+        Ok((program, expanded)) => match Compiler::new().compile(&program) {
+            Ok(chunk) => (chunk, expanded, None),
+            Err(error) => (empty_chunk(), expanded, Some(error)),
+        },
+        Err(error) => (empty_chunk(), Vec::new(), Some(error)),
+    };
+    let mut vm = Vm::with_budget(chunk, config());
+    vm.set_capabilities(capabilities);
+    let result = match vm.charge_link_graph(source.len() as u64, &expanded) {
+        Err(error) => Err(error),
+        Ok(_tokens) => match early_error {
+            Some(error) => Err(error),
+            None => vm.run(),
+        },
+    };
+    let result = match result {
+        Err(error) if error.kind() == Some(tsumugi::error::ErrorKind::ProcessExit) => {
+            Err(exit_error(vm.take_pending_exit()))
+        }
+        other => other.map_err(public_fields),
+    };
+    Run::Steps(vec![Step {
+        result,
+        output: take_output(&sink),
+        usage: vm.budget_usage(),
+    }])
+}
+
+fn empty_chunk() -> tsumugi::verifier::VerifiedChunk {
+    Compiler::new()
+        .compile(&parse("").expect("空の source"))
+        .expect("空の chunk")
+}
+
+fn linked_cases() -> Vec<Case> {
+    FIXTURES_WITH_CAPABILITY
+        .iter()
+        .map(|&(stem, profile, _)| Case {
+            name: format!("linked/{stem}"),
+            mode: Mode::Linked(LinkedSetup { stem, profile }),
+            inputs: vec![
+                std::fs::read_to_string(fixture_dir().join(format!("{stem}.tsg")))
+                    .expect("fixture を読めない"),
+            ],
+            baseline: None,
+        })
+        .collect()
+}
+
+// -----------------------------------------------------------------------------
+// CLI の stdout・stderr・終了コードの byte 比較（vm-parity-diff-b、VPD-AT-09）
+// -----------------------------------------------------------------------------
+
+/// CLI の 1 回の起動の観測。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CliRun {
+    stdout: Vec<u8>,
+    /// VM は `WARN_VM_EXPERIMENTAL` の 1 行を除いた後（spec の Q2=A）。
+    stderr: Vec<u8>,
+    exit: Option<i32>,
+}
+
+/// CLI の 1 ケース。引数と環境変数は `tests/integration.rs` と同じ組み立て（`tests/support/cli_fixture.rs`）。
+#[derive(Debug, Clone)]
+struct CliCase {
+    name: String,
+    stem: String,
+    /// `env_protected_windows` の `TSUMUGI_ENV_ALLOW` の有無（専用 test と同じ 2 通り）。
+    allow_all: Option<bool>,
+}
+
+fn cli_cases() -> Vec<CliCase> {
+    let mut cases = Vec::new();
+    for stem in fixture_stems() {
+        if stem == "env_protected_windows" {
+            for (allow_all, label) in [(false, "allow_unset"), (true, "allow_all")] {
+                cases.push(CliCase {
+                    name: format!("cli/{stem}/{label}"),
+                    stem: stem.clone(),
+                    allow_all: Some(allow_all),
+                });
+            }
+        } else {
+            cases.push(CliCase {
+                name: format!("cli/{stem}"),
+                stem,
+                allow_all: None,
+            });
+        }
+    }
+    cases
+}
+
+fn cli_dir(case: &CliCase) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "tsumugi-vm-parity-cli-{}-{}",
+        std::process::id(),
+        case.name.replace('/', "-")
+    ))
+}
+
+fn run_cli(case: &CliCase, use_vm: bool) -> CliRun {
+    use std::process::{Command, Stdio};
+    let stem = case.stem.as_str();
+    // fs を書く fixture のために、tree と VM で同じ path の空のディレクトリを作り直す。
+    let dir = cli_dir(case);
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).expect("一時ディレクトリの作成に失敗");
+    let dir_str = dir.to_str().expect("UTF-8 パス");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tsumugi"));
+    if use_vm {
+        command.arg("--vm");
+    }
+    let custom_legacy = matches!(stem, "env_allow" | "env_protected_windows");
+    if cli_fixture::fixture_needs_legacy(stem) || custom_legacy {
+        command.arg("--profile").arg("legacy");
+    }
+    if cli_fixture::fixture_has_import(stem) {
+        let root = format!("default={}", fixture_dir().to_str().expect("UTF-8 パス"));
+        command.arg("--allow-import-root").arg(root);
+    }
+    command
+        .arg(fixture_dir().join(format!("{stem}.tsg")))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match stem {
+        // `tests/integration.rs` の `env_allow_list` と同じ環境変数。
+        "env_allow" => {
+            command
+                .env("TSUMUGI_ENV_ALLOW", "TSG_TEST_ALLOWED,TSUMUGI_*")
+                .env("TSG_TEST_ALLOWED", "visible_value")
+                .env("SECRET_DB_PASS", "hunter2");
+        }
+        // `run_windows_protected_env_keys` と同じ環境変数（OS を問わず流す）。
+        "env_protected_windows" => {
+            command.env("TSUMUGI_SANDBOX", fixture_dir());
+            for key in SECRET_KEYS {
+                command.env(key, SECRET_MARKER);
+            }
+            if case.allow_all == Some(true) {
+                command.env("TSUMUGI_ENV_ALLOW", "*");
+            } else {
+                command.env_remove("TSUMUGI_ENV_ALLOW");
+            }
+        }
+        _ => {
+            for (key, value) in cli_fixture::fixture_envs(stem, dir_str) {
+                command.env(key, value);
+            }
+        }
+    }
+    let context = format!("{} [{}]", case.name, if use_vm { "vm" } else { "tree" });
+    let child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("{context}: tsumugi の起動に失敗: {error}"));
+    // 時間の上限を超えたら差ではなく test の失敗にする（wait_with_timeout が panic する）。
+    let output =
+        cli_fixture::wait_with_timeout(child, cli_fixture::fixture_timeout(stem), &context);
+    std::fs::remove_dir_all(&dir).ok();
+    let stderr = if use_vm {
+        strip_vm_warning(&output.stderr)
+    } else {
+        output.stderr
+    };
+    CliRun {
+        stdout: output.stdout,
+        stderr,
+        exit: output.status.code(),
+    }
+}
+
+/// VM の stderr から `WARN_VM_EXPERIMENTAL` の最初の 1 行だけを byte のまま除く
+/// （`cli_fixture::stderr_without_vm_warning` と同じ規則。改行の正規化はしない）。
+fn strip_vm_warning(raw: &[u8]) -> Vec<u8> {
+    let warning = cli_fixture::WARN_VM_EXPERIMENTAL.as_bytes();
+    let mut out = Vec::with_capacity(raw.len());
+    let mut removed = false;
+    for line in raw.split_inclusive(|&b| b == b'\n') {
+        let body = line.strip_suffix(b"\n").unwrap_or(line);
+        let body = body.strip_suffix(b"\r").unwrap_or(body);
+        if !removed && body == warning {
+            removed = true;
+            continue;
+        }
+        out.extend_from_slice(line);
+    }
+    out
+}
+
+/// byte 列の差を、長さ・最初に違う位置・その前後（前 40 byte・後 80 byte）で読める形にする。
+fn describe_bytes(tree: &[u8], vm: &[u8]) -> (String, String) {
+    let at = tree
+        .iter()
+        .zip(vm)
+        .position(|(a, b)| a != b)
+        .unwrap_or(tree.len().min(vm.len()));
+    let window = |bytes: &[u8]| {
+        let start = at.saturating_sub(40);
+        let end = (at + 80).min(bytes.len());
+        let start = start.min(end);
+        format!(
+            "{} bytes, 最初の差 @{at}: {:?}",
+            bytes.len(),
+            String::from_utf8_lossy(&bytes[start..end])
+        )
+    };
+    (window(tree), window(vm))
+}
+
+fn compare_cli(name: &str, tree: &CliRun, vm: &CliRun) -> Vec<Diff> {
+    let mut diffs = Vec::new();
+    let mut push = |axis, (tree, vm): (String, String)| {
+        diffs.push(Diff {
+            case: name.to_string(),
+            axis,
+            tree,
+            vm,
+        })
+    };
+    if tree.stdout != vm.stdout {
+        push(Axis::CliStdout, describe_bytes(&tree.stdout, &vm.stdout));
+    }
+    if tree.stderr != vm.stderr {
+        push(Axis::CliStderr, describe_bytes(&tree.stderr, &vm.stderr));
+    }
+    if tree.exit != vm.exit {
+        push(
+            Axis::CliExit,
+            (format!("{:?}", tree.exit), format!("{:?}", vm.exit)),
+        );
+    }
+    diffs
+}
+
+/// CLI の全ケースを流す。起動の数が多いので、ケースを thread に分ける（1 ケースの tree と VM は
+/// 同じ thread で順に流す。同じ path のディレクトリを作り直して使うため）。
+fn cli_diffs(cases: Vec<CliCase>) -> Vec<Diff> {
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let queue = Mutex::new(cases.into_iter());
+    let diffs = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let Some(case) = queue.lock().expect("lock").next() else {
+                        break;
+                    };
+                    let tree = run_cli(&case, false);
+                    let vm = run_cli(&case, true);
+                    diffs
+                        .lock()
+                        .expect("lock")
+                        .extend(compare_cli(&case.name, &tree, &vm));
+                }
+            });
+        }
+    });
+    let mut diffs = diffs.into_inner().expect("lock");
+    diffs.sort_by(|a, b| (&a.case, a.axis as u8).cmp(&(&b.case, b.axis as u8)));
+    diffs
 }
 
 // =============================================================================
@@ -983,7 +1669,7 @@ fn vpd_at_03_repl_continuation_matches_known_diffs() {
 #[test]
 fn vpd_at_04_fixture_selection() {
     let stems = fixture_stems();
-    for (name, reason) in FIXTURES_FOR_DIFF_B {
+    for (name, _, reason) in FIXTURES_WITH_CAPABILITY {
         assert!(
             stems.iter().any(|s| s == name),
             "外す一覧の {name} が tests/fixtures に無い"
@@ -991,7 +1677,7 @@ fn vpd_at_04_fixture_selection() {
         assert!(!reason.is_empty(), "{name} に外す理由が無い");
     }
     let cases = fixture_cases();
-    assert_eq!(cases.len() + FIXTURES_FOR_DIFF_B.len(), stems.len());
+    assert_eq!(cases.len() + FIXTURES_WITH_CAPABILITY.len(), stems.len());
     // print だけの capability で実際に出力が取れている（期待ファイルと一致する）。
     let hello = cases
         .iter()
@@ -1083,5 +1769,184 @@ fn vpd_at_05_gate_requires_exact_match() {
         ids.len(),
         KNOWN_DIFFS.len(),
         "既知の差分一覧の ID が重複している"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// vm-parity-diff-b（VPD-AT-07..12）
+// -----------------------------------------------------------------------------
+
+/// VPD-AT-07・VPD-AT-11: capability の要る fixture のすべてを CLI と同じ入口で両 engine に流し、
+/// vm-parity-diff-a と同じ軸で比べ、差が既知の差分一覧と完全一致する。
+#[test]
+fn vpd_at_07_linked_fixtures_match_known_diffs() {
+    let cases = linked_cases();
+    assert_eq!(cases.len(), FIXTURES_WITH_CAPABILITY.len());
+    // import される側（spec の Q3=A）も単体の root として入る。
+    for helper in [
+        "import_lib",
+        "import_circular_a",
+        "runtime_global_import_lib",
+    ] {
+        assert!(cases.iter().any(|c| c.name == format!("linked/{helper}")));
+    }
+    assert_gate("linked/", linked_cases);
+}
+
+/// VPD-AT-08: 両 engine に同じ内容の capability（env・clock・fs・import resolver・stdout）が渡り、
+/// fs を書くケースは engine ごとに同じ path の空のディレクトリで流れる。
+#[test]
+fn vpd_at_08_linked_capabilities_are_identical() {
+    let setup = LinkedSetup {
+        stem: "vpd_at_08_probe",
+        profile: Profile::Legacy,
+    };
+    let source = [
+        "let dir = env(\"TSG_TEST_DIR\")",
+        "print(env(\"PATH\"))",
+        "print(now())",
+        "let path = path_join(dir, \"probe.txt\")",
+        "print(path_exists(path))",
+        "write_file(path, \"x\")",
+        "print(path_exists(path))",
+        "print(read_file(path))",
+    ]
+    .join("\n");
+    let (tree, vm) = with_stack(move || {
+        let inputs = vec![source];
+        (
+            run_tree(Mode::Linked(setup), &inputs),
+            run_vm(Mode::Linked(setup), &inputs),
+        )
+    });
+    let dir = linked_dir(setup.stem);
+    let expected_prefix = "/usr/bin:/bin\n";
+    for (engine, run) in [("tree", &tree), ("vm", &vm)] {
+        let Run::Steps(steps) = run else {
+            panic!("{engine}: 経路が無い")
+        };
+        assert_eq!(steps[0].result, Ok(()), "{engine}");
+        let out = String::from_utf8_lossy(&steps[0].output).to_string();
+        assert!(out.starts_with(expected_prefix), "{engine}: {out}");
+        // 後に流した engine（VM）からも、前の engine（tree）の書いたファイルは見えない。
+        assert!(out.ends_with("\nfalse\ntrue\nx\n"), "{engine}: {out}");
+    }
+    assert!(
+        compare("probe", &tree, &vm, None).is_empty(),
+        "{:#?}",
+        compare("probe", &tree, &vm, None)
+    );
+    // 両 engine は同じ path のディレクトリを使う（出力に path が出ても一致する）。
+    assert_eq!(dir, linked_dir(setup.stem));
+
+    // import resolver も同じ内容で両 engine に渡る（fixtures ディレクトリの default mount）。
+    let import = LinkedSetup {
+        stem: "vpd_at_08_import",
+        profile: Profile::Import,
+    };
+    let (tree, vm) = with_stack(move || {
+        let inputs = vec!["import \"import_lib.tsg\"\nprint(\"ok\")\n".to_string()];
+        (
+            run_tree(Mode::Linked(import), &inputs),
+            run_vm(Mode::Linked(import), &inputs),
+        )
+    });
+    for run in [&tree, &vm] {
+        let Run::Steps(steps) = run else {
+            panic!("経路が無い")
+        };
+        assert_eq!(steps[0].result, Ok(()));
+        assert!(String::from_utf8_lossy(&steps[0].output).ends_with("ok\n"));
+    }
+}
+
+/// VPD-AT-09・VPD-AT-11: すべての fixture を `tsumugi` と `tsumugi --vm` で流し、stdout・stderr・終了コードを
+/// byte で比べ、差が既知の差分一覧と完全一致する。
+#[test]
+fn vpd_at_09_cli_matches_known_diffs() {
+    let diffs = cli_diffs(cli_cases());
+    let problems = gate(&diffs, KNOWN_DIFFS, "cli/");
+    assert!(
+        problems.is_empty(),
+        "cli/: 既知の差分一覧と実際の差が一致しない（{} 件）\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
+/// VPD-AT-09: わざと差を作った組（tree と VM に違う fixture を渡す）で、3 つの軸それぞれの差を
+/// 「ケース・軸・tree の値・VM の値」で報告する。VM の警告の 1 行だけを除く。
+#[test]
+fn vpd_at_09_cli_compare_reports_each_axis() {
+    let case = |stem: &str| CliCase {
+        name: format!("cli/{stem}"),
+        stem: stem.to_string(),
+        allow_all: None,
+    };
+    let tree = run_cli(&case("hello"), false);
+    let vm = run_cli(&case("error_zero_division"), true);
+    let diffs = compare_cli("probe", &tree, &vm);
+    for axis in [Axis::CliStdout, Axis::CliStderr, Axis::CliExit] {
+        let diff = diffs
+            .iter()
+            .find(|d| d.case == "probe" && d.axis == axis)
+            .unwrap_or_else(|| panic!("{axis:?} の差を報告しない: {diffs:#?}"));
+        assert_ne!(diff.tree, diff.vm, "{diff}");
+    }
+    let stdout = diffs.iter().find(|d| d.axis == Axis::CliStdout).unwrap();
+    assert!(stdout.tree.contains("最初の差 @0"), "{stdout}");
+    // 同じ fixture なら差は出ない（VM の stderr の先頭の警告は除かれている）。
+    let again = run_cli(&case("hello"), true);
+    assert!(compare_cli("same", &tree, &again).is_empty());
+    assert!(!again.stderr.windows(6).any(|w| w == "--vm は".as_bytes()));
+    // 警告は最初の 1 行だけを除く。
+    let warning = format!("{}\n", cli_fixture::WARN_VM_EXPERIMENTAL);
+    let twice = format!("{warning}{warning}rest\n");
+    assert_eq!(
+        strip_vm_warning(twice.as_bytes()),
+        format!("{warning}rest\n").as_bytes()
+    );
+}
+
+/// VPD-AT-10: すべての fixture が in-process の流し方のどちらか 1 つと CLI の比較に入る。
+/// 表の名前は実在のファイルに当たり、表に無い fixture は print だけの流し方と CLI の比較に自動で入る。
+#[test]
+fn vpd_at_10_fixture_distribution() {
+    let stems = fixture_stems();
+    for (name, _, reason) in FIXTURES_WITH_CAPABILITY {
+        assert!(
+            stems.iter().any(|s| s == name),
+            "表の {name} が tests/fixtures に無い"
+        );
+        assert!(!reason.is_empty(), "{name} に理由が無い");
+    }
+    let print_only: Vec<String> = fixture_cases().into_iter().map(|c| c.name).collect();
+    let linked: Vec<String> = linked_cases().into_iter().map(|c| c.name).collect();
+    let cli = cli_cases();
+    for stem in &stems {
+        let in_print = print_only.contains(&format!("fixture/{stem}"));
+        let in_linked = linked.contains(&format!("linked/{stem}"));
+        assert!(
+            in_print ^ in_linked,
+            "{stem} が in-process の流し方のちょうど 1 つに入らない"
+        );
+        assert!(
+            cli.iter().any(|c| &c.stem == stem),
+            "{stem} が CLI の比較に入らない"
+        );
+    }
+    assert_eq!(print_only.len() + linked.len(), stems.len());
+    // CLI は全 fixture（env_protected_windows は allow の有無の 2 ケース）。
+    assert_eq!(cli.len(), stems.len() + 1);
+    let mut names: Vec<&str> = cli.iter().map(|c| c.name.as_str()).collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), cli.len(), "CLI のケースの名前が重複している");
+    // 表に無い名前は print だけの流し方に入る（作り方の確認: 表への所属だけで振り分ける）。
+    assert!(print_only.contains(&"fixture/hello".to_string()));
+    assert!(
+        !FIXTURES_WITH_CAPABILITY
+            .iter()
+            .any(|(n, _, _)| *n == "hello")
     );
 }
