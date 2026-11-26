@@ -825,7 +825,7 @@ impl_pr    = 534
 #   PR #535 の見込みを確定して受入基準を採番した。分けずに 1 本（run_audited_inner の VM 分岐と VM の入口 3 つ）。
 #   見積もり src/ 約 170〜320 行、tests 約 350〜550 行、受入基準 5（AVT-AT-06..10、crate 内の比較 test。PR #535 の Q2=A の条件 2）。
 #   §6.7 のとおり §14.1 の上限は当てない。design_pr は最初の設計 PR #535 からこの PR #539 へ改めた。
-#   判断の候補 Q1（VM の経路で sink が Pending を返したときの扱い）は spec の b の小節と PR に書いた。
+#   判断の候補 Q1（VM の経路で sink が Pending を返したときの扱い）は判断役が Q1=A（fail-closed、AuditFailure::Sink）を選んだ（PR #539）。
 [[slice]]
 id         = "vm-engine-run-route"
 title      = "Engine::run が VmExperimental のとき ExecutionContext で VM を回す経路（既知の差分一覧の KD-1 を消す。embedding-api の E9 の残り）"
