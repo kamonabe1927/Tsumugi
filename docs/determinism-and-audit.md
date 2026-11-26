@@ -2316,6 +2316,48 @@ issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発�
   - **Q3（heap の比べ方）= A**: 同じ engine の中で操作をしたケースと基準のケースの peak・live の差を取り、その差を engine 間で exact に比べる。基準を持たない fixture は向き・符号の比較。理由: [実行予算・協調実行仕様](execution-control.md) §5.3 の A-1 と §15.5 は code artifact の heap 数値を engine 固有でよいとするが、差を取れば code artifact の分が打ち消せる。`tests/cow_copy_journal.rs` が同じ方法で複製を見つけた実績があり、原則 5 を `src/` を変えずに検査できる（原則 8）。採らなかった案: B（COW の複製の回数の内部 counter を足す）は `src/` を変え（VPD-AT-06）、検査のためだけのデータ構造を中核に足す。C（向き・符号だけ）は COW の複製の差（#502・#510・#517）を見逃したままになる（原則 5 に反しうる）。
 - **想定の変更規模**: `src/` 0 行。test は `tests/vm_parity.rs` 約 600〜1000 行（実行器 200〜300、matrix の生成 150〜250、REPL と fixture 150〜250、一覧と gate 100〜200）。触る仕組みは tree/VM の差分テスト 1 つ、受入基準は 6 項目。§6.7 のとおり §14.1 の上限は当てない。
 
+#### vm-parity-diff-b 実装スライス（capability の要る fixture と CLI の stdout・stderr・終了コードの byte 比較）
+
+> 状態: **未実装**（設計のみ）。上の「VM parity フェーズのスライス分割」小節の表の 2 本目。vm-parity-diff-a（PR #528 で done）の実行器・軸・既知の差分一覧の gate を使い、比べる範囲を capability の要る fixture と CLI の観測（stdout・stderr・終了コード）へ広げる。差を直すのはこのスライスの範囲ではない。
+
+設計時点（main `9b1c6d4`）の事実:
+
+- `tests/vm_parity.rs`（1087 行）は、流し方 `Mode::Single`（tree は `Evaluator::run`、VM は `Compiler` + `Vm::with_budget` + `charge_link_graph(root, &[])` + `run`）・`Mode::Repl`・`Mode::Context`（VM は経路なし）を持ち、stdout だけを grant した capability（`capture_capabilities`）で流す。既知の差分一覧 `KNOWN_DIFFS` は KD-1（`Engine::execute` の VM の経路なし）・KD-2/KD-3（`for` の反復の peak heap）・KD-4（REPL の error の入力の fuel）の 4 項目で、gate は流したケースの名前の接頭辞（`scope`）の範囲で「差の出ない項目」を見る。
+- `tests/fixtures/*.tsg` は 94 本で、print だけで流せない 25 本を `FIXTURES_FOR_DIFF_B` に理由付きで持つ。内訳は env 2（`env_allow`・`env_protected_windows`）、fs・env・clock 5（`error_sandbox`・`file_io`・`filesystem`・`local_utils`・`string_utils`）、import の root 9、import される側 9（`tests/integration.rs` の `HELPER_FIXTURES` と同じ）。stdin（`input`）を使う fixture は無い。
+- `tests/integration.rs` は全 fixture を CLI の tree と `--vm` で流すが、比べる相手は期待ファイル（`.expected`・`.expected_err`・`.expected_out`。`.vm` は 0 本）で、tree と VM を直接は比べない。CLI の組み立ては fixture 名から決める: `fixture_needs_legacy`（`--profile legacy`）・`fixture_has_import`（`--allow-import-root default=<fixtures>`）・`fixture_envs`（`TSG_TEST_DIR`・`TSUMUGI_SANDBOX`・`TSUMUGI_ENV_ALLOW`・`TSUMUGI_MAX_STEPS`）・`fixture_timeout`。VM の stderr の先頭の experimental の警告（`WARN_VM_EXPERIMENTAL`）は `stderr_without_vm_warning` で 1 行だけ除いてから比べる（警告そのものは `tests/cli_vm_warning.rs`）。`CUSTOM_FIXTURES`（`env_allow`・`env_protected_windows`・`error_stack_overflow`）は専用の test で流し、`env_protected_windows` は Windows でだけ流れる。
+- CLI の tree は `Engine::link` → `Engine::run`（`src/main.rs`）、CLI の VM は同じ `Engine::link`（capability の gate）→ `LinkedScript::expand_for_cli` → `Compiler` → `Vm::with_budget` → `set_capabilities` → `charge_link_graph(root, &expanded)` → `run`（`execute_vm_with_path`）である。`tests/differential.rs` の `link_import_graph` / `run_tree_import_graph` / `run_vm_import_graph` が in-process で同じ組み立てを持つ。`Evaluator` は単独では import を解決しない。
+- CLI の legacy profile の capability set を組む `build_legacy_capabilities` は binary の中（`src/cli_capability.rs`、`mod cli_capability` は `src/main.rs`）にあり、integration test からは呼べない。公開 API には `CapabilitySet::builder().legacy_fs_syntax()`・`FilesystemCapability::new_legacy`・`EnvironmentSnapshot::from_entries`・`FixedClock`・`FilesystemModuleResolver` がある。
+
+- **実装範囲**:
+  - **capability の要る fixture の in-process 比較**: `FIXTURES_FOR_DIFF_B` のうち import される側を除く 16 本（env 2・fs/env/clock 5・import の root 9）を、新しい流し方（例 `Mode::Linked`。名前は実装 PR で決めてよい）で tree と VM に流し、vm-parity-diff-a と同じ軸（error・出力・fuel・budget の counter と peaks・heap）で比べる。heap は基準のケースを持たないので向きの比較にとどめる（vm-parity-diff-a の Q3=A）。
+    - tree と VM の入口は Q1（判断の候補）で決める。推奨案（A）は CLI と同じ組み立てで、tree は `Engine::compile` → `Engine::link` → `Engine::run`、VM は同じ `LinkedScript` を `expand_for_cli` で展開して `Compiler` → `Vm::with_budget(config())` → `set_capabilities` → `charge_link_graph(root, &expanded)` → `run` とする（`tests/differential.rs` の `run_tree_import_graph` / `run_vm_import_graph` と同じ。共有したいなら `tests/support/` に移してよい）。link の error は両 engine に同じ観測（parse error と同じ扱い）として返す。上限は vm-parity-diff-a の `config()` を両方に渡す。
+    - capability は、公開 API で両 engine に同じ set を組んで渡す: stdout は vm-parity-diff-a の capture、env は fixture ごとに `tests/integration.rs` と同じ key/value の `EnvironmentSnapshot`（`TSG_TEST_DIR` など。`env_protected_windows` は専用 test と同じ secret marker の key を入れ、`env()` が読めないことを両 engine で比べる）、clock は両方に同じ `FixedClock`、fs は legacy の host path 翻訳付き（`legacy_fs_syntax` と `FilesystemCapability::new_legacy`）で `TSUMUGI_SANDBOX` 相当の root を 1 つ、import は fixtures ディレクトリを `default` mount にした `FilesystemModuleResolver`。どの fixture に何を渡すかは fixture 名の表で持ち、表に理由を書く。
+    - fs を書く fixture は、engine ごとに空のディレクトリで流す。出力に path が出ても一致するよう、tree と VM は同じ path のディレクトリを使い、tree の実行の後に消して作り直してから VM を流す。
+  - **CLI の byte 比較**: Q3（判断の候補）で決める範囲の fixture を、`tsumugi` と `tsumugi --vm` で流し、stdout の byte 列・stderr の byte 列・終了コードを比べる。CLI の引数・環境変数・時間の上限は `tests/integration.rs` の `fixture_needs_legacy`・`fixture_has_import`・`fixture_envs`・`fixture_timeout` と同じにする（`tests/support/` に移して両方から使ってよい。`tests/integration.rs` の期待は変えない）。`CUSTOM_FIXTURES` の `env_allow`・`env_protected_windows` は、それぞれの専用 test と同じ環境変数で流す（`env_protected_windows` は `TSUMUGI_ENV_ALLOW` の有無の 2 通りを別のケースにし、OS を問わず流す。tree と VM の比較は OS に依らないため）。fs を書く fixture は in-process と同じく同じ path のディレクトリを作り直して流す。時間の上限を超えたら差ではなく test の失敗にする。
+    - VM の stderr の先頭の experimental の警告の扱いは Q2（判断の候補）で決める。推奨案（A）は、`tests/integration.rs` の `stderr_without_vm_warning` と同じく、VM の stderr から `WARN_VM_EXPERIMENTAL` の 1 行だけを除いてから byte で比べる。
+    - 軸は CLI の stdout・stderr・終了コードの 3 つを足す（例 `Axis::CliStdout`・`Axis::CliStderr`・`Axis::CliExit`）。ケースの名前は `cli/<stem>`（`env_protected_windows` は `cli/env_protected_windows/<allow の有無>` のように分ける）、in-process の新しいケースは `linked/<stem>` とする。差は vm-parity-diff-a と同じ「ケース・軸・tree の値・VM の値」で報告し、byte 列は差の最初の位置と前後が読める形で出す。
+  - **fixture の振り分け**: すべての `tests/fixtures/*.tsg` が、in-process では print だけの流し方（`fixture/<stem>`）・capability の流し方（`linked/<stem>`）・import される側（Q3 で決める扱い）のどれか 1 つに入り、CLI では Q3 の範囲に入ることを test で確かめる。`FIXTURES_FOR_DIFF_B` は役目に合わせて名前を変えてよい（例 `FIXTURES_WITH_CAPABILITY`）。fixture のファイルを足したとき、どの表にも無ければ print だけの流し方と CLI の比較に自動で入る（vm-parity-diff-a の VPD-AT-04 の作り方を保つ）。
+  - **既知の差分一覧**: 新しく流すケースで出た差を `KNOWN_DIFFS` に `KD-5` 以降として足す（同じ原因の差は名前の pattern で 1 項目にまとめてよい。vm-parity-diff-a と同じ）。gate の「差の出ない項目」の検査は `linked/` と `cli/` の範囲にも当てる。今ある KD-1〜KD-4 は変えない。PR 本文に足した項目の一覧（ID・軸・説明・件数）を書く。
+- **変えないもの**: `src/` の挙動（このスライスは test と spec だけを足す）。既存の test の期待値（`tests/integration.rs`・`tests/differential.rs`・golden fixture・vm-parity-diff-a の各ケースと KD-1〜KD-4）。fixture のファイル。
+- **範囲外**:
+  - 差を直すこと。見つけた差は一覧に入れ、後続のフェーズのスライスで直す。
+  - 新しい fixture を足すこと（stdin の `input` を使う fixture は今 1 本も無く、このスライスでは作らない）。CLI の source を stdin から読む経路（`tsumugi -`）と、CLI の対話 REPL の byte 比較（REPL 継続は vm-parity-diff-a の in-process の比較で見ている）。
+  - limit 境界（各上限の N と N−1）の網羅、pause/resume・cancel・host pending、監査の軸（audit-vm-triple-b、上の「audit-vm-triple のスライス分割」小節の Q2=A の条件）、fuzz。
+  - CLI の legacy profile の capability set を組む関数（`build_legacy_capabilities`）を library へ出すこと。in-process の比較は公開 API で同じ内容の set を組み、CLI が実際に組む set は CLI の byte 比較で見る。
+- **done PR で行う逸脱一覧の更新**: 冒頭の未実装範囲の「VM 適合 gate のうち audit 以外の残り」の行から「capability の要る fixture と CLI の stdout・stderr・終了コードの byte 比較（vm-parity-diff-b）」を消し、既知の差分一覧の項目の数と中身をこの PR で足した項目に合わせて書き直す。
+- **受入基準**:
+  - **VPD-AT-07（capability の要る fixture）**: import される側を除く capability の要る fixture（設計時点で 16 本）のすべてを、Q1 で決めた入口で tree と VM に流し、vm-parity-diff-a と同じ軸で比べて gate にかける。確かめ方: test。
+  - **VPD-AT-08（capability の渡し方）**: 両 engine に同じ内容の capability（env・clock・fs・import resolver・stdout）が渡り、fs を書く fixture は engine ごとに同じ path の空のディレクトリで流れる。確かめ方: 同じ流し方で、env の値・`now()`・ファイルの書き込みと `path_exists` を出す小さい source を両 engine で流し、出力が一致し、後に流した engine から前の engine の書いたファイルが見えないことを確かめる test。
+  - **VPD-AT-09（CLI の byte 比較）**: Q3 で決めた範囲の fixture のすべてを `tsumugi` と `tsumugi --vm` で `tests/integration.rs` と同じ引数・環境変数で流し、stdout・stderr（Q2 で決めた扱いの後）・終了コードを byte で比べて gate にかける。差は「ケース・軸・tree の値・VM の値」で報告する。確かめ方: test と、わざと差を作った組（tree と VM に違う fixture を渡す、など）で 3 つの軸それぞれの差を報告することを確かめる test。
+  - **VPD-AT-10（fixture の振り分け）**: すべての `tests/fixtures/*.tsg` が in-process の流し方のどれか 1 つと CLI の比較に入り（import される側は Q3 で決めた扱い）、どの表にも無い新しい fixture は print だけの流し方と CLI の比較に自動で入る。確かめ方: 一覧の作り方を確かめる test（表の名前が実在のファイルに当たること、振り分けが重ならず漏れないこと）。
+  - **VPD-AT-11（既知の差分一覧の更新）**: 新しく流したケースの差がすべて一覧の項目に当たり、`linked/`・`cli/` の範囲でも差の出ない項目が残っていれば落ちる。KD-1〜KD-4 は変わらない。確かめ方: test と、PR 本文の足した項目の一覧（ID・軸・説明・件数）。
+  - **VPD-AT-12（非破壊）**: `src/` を変えない。既存の test が期待を変えずに緑（`tests/support/` へ移した関数を使う形にした test も、期待は同じ）。確かめ方: `git diff --stat` と `cargo test`。
+- **判断の候補**（この設計 PR で判断役が選ぶ。選んだ内容と理由はこの下に決定記録として書く）:
+  - Q1: capability の要る fixture の in-process の入口（推奨 A: CLI と同じ `Engine::link` → `Engine::run` / `expand_for_cli` → `Vm`）。
+  - Q2: CLI の VM の stderr の experimental の警告の扱い（推奨 A: その 1 行だけを除いて比べる）。
+  - Q3: import される側の 9 本の扱い（推奨 A: 単体の root としても in-process と CLI の両方で流す）。
+- **想定の変更規模**: `src/` 0 行。test は `tests/vm_parity.rs` に約 450〜750 行（capability の流し方と capability の表 150〜250、CLI の実行器と 3 軸の比較 150〜250、振り分けと gate の拡張 50〜100、VPD-AT-08・09 の確かめの test 100〜150）。`tests/integration.rs` の CLI の組み立てを `tests/support/` へ移すなら、その移動の分（約 100 行、期待は変えない）。触る仕組みは tree/VM の差分テスト 1 つ、受入基準は 6 項目。§6.7 のとおり §14.1 の上限は当てない。割り方の理由: 実行器・軸・gate は vm-parity-diff-a にあり、このスライスは流し方を 2 つ（capability の in-process・CLI）足すだけである。CLI の 94 本 × 2 の起動は `tests/integration.rs` が毎回流している量と同じで、一覧の初期化（差を見て項目にする）を含めても 1 回の実装（§14.3 の 90 分）に収まる見込みである。これ以上分けると、CLI の比較だけのスライスが in-process の比較と同じ fixture の表を別々に持つことになる。
+
 #### audit-vm-triple のスライス分割
 
 > 状態: 設計のみ（本小節と次の小節は設計時点の記録）。現在の逸脱・未実装範囲は冒頭の逸脱一覧が正本である。

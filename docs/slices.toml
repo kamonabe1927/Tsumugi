@@ -765,7 +765,9 @@ order      = 60
 #   b は capability の要る fixture と CLI の byte 比較。理由は spec の「VM parity フェーズのスライス分割」小節に書いた（90 分に収める）。
 # vm-parity-diff-a: 見積もり src/ 0 行、tests/ 約 600〜1000 行、受入基準 6（VPD-AT-01..06）。§6.7 のとおり §14.1 の上限は当てない。
 #   判断の候補 Q1〜Q3（Engine::run の context の扱い・差の出なくなった項目の扱い・heap の比べ方）は判断役が Q1=A・Q2=A・Q3=A を選んだ（PR #526）。spec の小節の決定記録に書いた。
-# vm-parity-diff-b: a に依存するため todo。a が done になったら設計 PR で受入基準を採番して ready にする。
+# vm-parity-diff-b: a が done（PR #528）になったので設計して ready にした。見積もり src/ 0 行、tests/ 約 450〜750 行、
+#   受入基準 6（VPD-AT-07..12）。§6.7 のとおり §14.1 の上限は当てない。判断の候補 Q1〜Q3（capability の要る fixture の
+#   in-process の入口・CLI の VM の experimental の警告の扱い・import される側の fixture の扱い）は設計 PR で判断役が選ぶ。
 # order は loop-runbook §8 の「優先」の既定（今あるすべての ready・todo より前）で 27・31。0〜52 に空きが無いので、この PR の中で付け直した。
 #   done のスライスの order は変えず、todo・blocked・ready どうしの相対順を保つよう、それぞれを 2 つ後ろの todo・blocked・ready の値へ、
 #   最後の 2 つを空いている 53・54 へ送った: fix-closure-capture-chain-stack 27 → 32、fix-run-foreign-engine-mismatch 31 → 34、
@@ -789,9 +791,11 @@ impl_pr    = 528
 [[slice]]
 id         = "vm-parity-diff-b"
 title      = "差分テストを capability の要る fixture と CLI の stdout・stderr・終了コードの byte 比較へ広げる"
-status     = "todo"
+status     = "ready"
 parent     = "VM parity"
 spec_slice = "determinism Slice 6"
+spec       = { doc = "docs/determinism-and-audit.md", section = "vm-parity-diff-b 実装スライス（capability の要る fixture と CLI の stdout・stderr・終了コードの byte 比較）" }
+acceptance = ["VPD-AT-07..12"]
 depends_on = ["vm-parity-diff-a"]
 order      = 31
 
