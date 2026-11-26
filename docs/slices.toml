@@ -860,7 +860,7 @@ spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-triple-b 実装スライス（`Engine::run_audited` の VM 経路）" }
 acceptance = ["AVT-AT-06..10"]
 design_pr  = 539
-impl_pr    = 0
+impl_pr    = 542
 depends_on = ["audit-vm-triple-a", "vm-engine-run-route"]
 order      = 71
 
