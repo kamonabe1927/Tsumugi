@@ -2418,7 +2418,7 @@ issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発�
 
 #### audit-vm-triple-b 実装スライス（`Engine::run_audited` の VM 経路）
 
-> 状態: **未実装**（設計のみ）。下の「設計時点の事実」から決定記録（PR #535）までは最初の設計 PR（main `295ad0c`、todo のまま）の記録で、ready にする設計は後半の「再設計（main `122fdf6`、todo → ready）」に書く。本小節は設計時点の記録で、現在の逸脱・未実装範囲は冒頭の逸脱一覧が正本である。
+> 状態: **未実装**（設計のみ）。下の「設計時点の事実」から決定記録（PR #535）までは最初の設計 PR（main `295ad0c`、todo のまま）の記録で、ready にする設計は後半の「再設計（main `122fdf6`、todo → ready。PR #539）」に書く。本小節は設計時点の記録で、現在の逸脱・未実装範囲は冒頭の逸脱一覧が正本である。
 
 設計時点の事実:
 
@@ -2445,7 +2445,7 @@ issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発�
   - **Q1（経路のスライスをこの PR で登録するか）= A**: `vm-engine-run-route`（todo、`parent = "VM parity"`、order 65）を登録し、b の `depends_on` に足す。理由: 「audit-vm-triple のスライス分割」小節の決定記録 Q1=A（PR #527）が、b を VM の `Engine::run` の経路のスライスに依存させ、経路を既知の差分一覧の項目を減らすフェーズのスライスとして別に設計すると決めている。前提の vm-parity-diff-a は done で KD-1 も残っているのに、そのスライスが `slices.toml` に無かった。スライスの一覧と状態の正本は `slices.toml` なので、b の前提を正本に見える形にするのが既存の決定と一貫する（[マニフェスト](manifesto.md) 原則 9）。範囲は KD-1 を消す 1 項目に限り、設計は別の設計 PR に残す（[開発ループ手順書](loop-runbook.md) §6.7、原則 8）。採らなかった案: B（登録しない）は、PR #527 で要るとしたスライスが正本に無いまま残り、b が進めない理由が一覧から読めない。
   - **Q2（b の間に公開 API から VM の監査付き実行に届かないことと、PR #527 の Q2=A の条件の食い違い）= A**: b は crate 内の比較 test（tree と VM の `run_audited` の内部入口に同じ入力を流し、sink の受け取る event 列を `HeapBytes` の `BudgetCharged` を除いて比べる）で確かめる。`tests/vm_parity.rs` への監査の軸の追加は、`ConfigError::AuditSinkWithExperimentalBackend` を外す audit-vm-triple-c の受入基準へ移す。理由: 分割小節は拒否を c で外す理由を「b の間に外すと、backpressure の無い VM 監査が使えてしまう」としており、これは原則 5 に沿う。A はこの割り方を保ったまま同じ入力を tree と VM に流して一致を確かめるので、手順書 §14.1 の趣旨は b でも crate 内で満たせる（原則 5・原則 9）。PR #527 の条件の目的は監査の軸の先送りを落とさないことで、その理由は「facade から観測できる監査の差は b で初めて生じる」だった。b の間は build が拒否するので facade から観測できる差はまだ生じず、差が公開される c に軸を移しても目的は保たれる。公開 API も広げない（原則 8）。**条件**: (1) audit-vm-triple-c の設計 PR は `tests/vm_parity.rs` への監査の軸の追加を受入基準に入れる（PR #527 の Q2=A の条件の移し先。分割小節の追記・c の行・`slices.toml` のコメントにも書いた）。(2) b の設計 PR は crate 内の比較 test を受入基準に入れる。採らなかった案: B（b で拒否を外す）は原則 5 に反しうる。同じ設定・入力で tree は `Yielded`、VM は audit queue の上限を見ずに走り切るという差が公開 API に出て、host の制御が VM で効かない経路を公開することになる（原則 1・原則 3）。C（検査のための `#[doc(hidden)]` の builder の入口）は、検査のためだけに公開 API を足す点で原則 8 に反しうる。backpressure の無い VM 監査に届く点で B と同じ差も持ち込む。
 
-##### 再設計（main `122fdf6`、todo → ready）
+##### 再設計（main `122fdf6`、todo → ready。PR #539）
 
 前提の 2 本（audit-vm-triple-a・vm-engine-run-route）が done になったので、上の「b の範囲の見込み」を確定し、受入基準を採番して ready にする。上の見込みと決定記録（PR #535）は書き換えず、ここで具体化する。
 
@@ -2486,7 +2486,7 @@ issue #525（kamonabe、仕分け「受け入れ」、「優先」）と[開発�
   - **AVT-AT-10（非破壊）**: 公開の `EngineBuilder::build` は今までどおり監査 sink と `VmExperimental` の同時設定を `ConfigError::AuditSinkWithExperimentalBackend` で拒否する。tree の監査付き経路・sink 無しの tree・VM の経路の既存の test（`tests/audit_*.rs`・`tests/vm_parity.rs`・`tests/differential.rs`・`tests/integration.rs`・golden fixture・crate 内の test）が期待値を変えずに緑で、`KNOWN_DIFFS` は変わらない。確かめ方: `cargo test` と `git diff --stat`（`tests/` の既存ファイルを変えない）。
 - **想定の変更規模**: `src/` 約 170〜320 行（`src/embedding.rs` の `run_audited_inner` の VM 分岐と VM の driver 60〜110、`flush_events`・`deliver` が読む evaluator の部分を backend で分ける 50〜90、usage の読み先 5〜10、`#[cfg(test)]` の builder の入口 10〜20、`src/vm.rs` の redaction policy の setter・accumulator の drain の入口・細粒度 resource の退避と取り出し 40〜90）。test は約 350〜550 行（比較の実行器と recording sink の組み立て 80〜130、AVT-AT-06 の経路 100〜160、AVT-AT-07 の outcome 80〜120、AVT-AT-08 の fail-closed 60〜100、AVT-AT-09 30〜40）。触る仕組みは監査付き実行の VM 経路 1 つ、受入基準は 5 項目。§6.7 のとおり §14.1 の上限は当てない。90 分に収まる根拠: Started の前の処理・journal・ack・Terminal の組み立ては tree の関数をそのまま使い、VM の実行は vm-engine-run-route の手順を呼ぶだけで、足すのは「VM の buffer を読む」分岐と、VM の入口 3 つ（setter・drain・resource）である。比較の実行器は a の `audit_triple_parity` の source と組み立てを流用できる。
 
-判断の候補（この PR に書いたもの）:
+判断の候補（PR #539 に書いたもの）:
 
 - **Q1**: b の間、VM の監査付き経路で sink が `Pending` を返したときの扱い。A（推奨）: ticket を cancel して `AuditFailure::Sink` で fail-closed にし、`Yielded`/`Resumed` を出さない。c で tree と同じ backpressure に置き換える。B: `Yielded`/`Resumed(AuditBackpressure)` を積まずに ticket の ack を待つ（tree と同じ resend と deadline の確認だけ行う）。C: このスライスで VM に poll_index の counter と `Yielded`/`Resumed(AuditBackpressure)` を足し、tree と同じ event 列にする。
 
