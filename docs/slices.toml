@@ -796,6 +796,7 @@ parent     = "VM parity"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "vm-parity-diff-b 実装スライス（capability の要る fixture と CLI の stdout・stderr・終了コードの byte 比較）" }
 acceptance = ["VPD-AT-07..12"]
+design_pr  = 533
 depends_on = ["vm-parity-diff-a"]
 order      = 31
 
