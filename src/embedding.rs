@@ -8821,15 +8821,24 @@ let y = 2
             other => panic!("terminal-fail: {other:?}"),
         }
 
-        // VM の Pending（tree とは比べない。決定記録 Q1=A（PR #539））。
-        let mut vm = side_with(
+        // VM の Pending（tree とは比べない。決定記録 Q1=A（PR #539））。Started だけ Ack し、次の
+        // submit で Pending を返して completer を手元に残す sink で、VM が ticket を cancel したことを
+        // completer から確かめる。
+        let sink = Arc::new(PendingOnceSink::default());
+        let engine = engine_for(
             Backend::VmExperimental,
-            Some(vec![
-                ScriptedResponse::AckCorrect,
-                ScriptedResponse::PendingThenAck { pending_times: 1 },
-            ]),
+            Arc::clone(&sink) as Arc<dyn AuditSink>,
             None,
         );
+        let mut vm = Side {
+            ctx: ExecutionContext::new(&engine),
+            engine,
+            recorded: {
+                let read = Arc::clone(&sink);
+                Box::new(move || read.received())
+            },
+            dir: temp_dir("vm"),
+        };
         let (envs, out) = run(&mut vm, &source, 821, &Arc::new(FakeClock::new()));
         match &out {
             AuditedOutcome::AuditFailed { failure, .. } => {
@@ -8837,6 +8846,12 @@ let y = 2
             }
             other => panic!("vm-pending: {other:?}"),
         }
+        let completer = sink.completer.lock().expect("lock").take();
+        assert!(
+            completer.expect("Pending を 1 回返した").is_cancelled(),
+            "vm-pending: VM は Pending の ticket を cancel する"
+        );
+        assert_eq!(sink.submits.lock().expect("lock").len(), 2, "再送しない");
         assert!(
             !envs.iter().any(|e| matches!(
                 e.event,
@@ -8844,6 +8859,43 @@ let y = 2
             )),
             "vm-pending: Yielded/Resumed を出さない: {envs:#?}"
         );
+    }
+
+    /// 最初の submit（Started）を Ack し、2 回目の submit で `Pending` を返して completer を保持し、
+    /// 3 回目以降は Ack する test 用の sink（AVT-AT-08 の VM の Pending で ticket の cancel を確かめる）。
+    #[derive(Default)]
+    struct PendingOnceSink {
+        submits: std::sync::Mutex<Vec<AuditEnvelope>>,
+        completer: std::sync::Mutex<Option<crate::audit::AuditCompleter>>,
+    }
+
+    impl PendingOnceSink {
+        /// submit された envelope（Ack したかどうかに依らず）。
+        fn received(&self) -> Vec<AuditEnvelope> {
+            self.submits.lock().expect("lock").clone()
+        }
+    }
+
+    impl AuditSink for PendingOnceSink {
+        fn submit(
+            &self,
+            batch: Arc<[AuditEnvelope]>,
+            _waker: crate::audit::AuditWaker,
+        ) -> crate::audit::AuditSubmit {
+            let last = batch.last().expect("non-empty batch");
+            let ack = crate::audit::AuditAck {
+                execution_id: last.execution_id,
+                through_sequence: last.sequence,
+            };
+            let mut submits = self.submits.lock().expect("lock");
+            submits.extend(batch.iter().cloned());
+            if submits.len() == 2 {
+                let (ticket, completer) = crate::audit::new_audit_ticket();
+                *self.completer.lock().expect("lock") = Some(completer);
+                return crate::audit::AuditSubmit::Pending(ticket);
+            }
+            crate::audit::AuditSubmit::Ack(ack)
+        }
     }
 
     /// AVT-AT-09: 既定と違う `policy_id` と policy を注入した engine で、Started の `redaction_policy_id` と
