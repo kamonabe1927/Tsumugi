@@ -810,6 +810,18 @@ impl_pr    = 534
 #   b の設計 PR は tests/vm_parity.rs への監査の軸の追加を受入基準に入れる（Q2=A の条件）。
 # c: VM の audit backpressure と ConfigError::AuditSinkWithExperimentalBackend の撤去。b に依存するため todo。
 # order は元の 70 を a に、b・c は空いている 71・72。
+# b の設計 PR（docs/audit-vm-triple-b）: 前提の経路のスライスが slices.toml に無く ready の条件 3 を満たさないため b は todo のまま。
+#   Q1=A（PR #527）の具体化として経路のスライス vm-engine-run-route（todo、order は b より前で空いている 65）を登録し、b の depends_on に足した。
+#   判断の候補 Q1（この登録）・Q2（b の間に公開 API から VM の監査付き実行に届かないことと Q2=A の条件の食い違い）は spec の b の小節と PR に書いた。
+[[slice]]
+id         = "vm-engine-run-route"
+title      = "Engine::run / Engine::execute が VmExperimental のとき ExecutionContext で VM を回す経路（既知の差分一覧の KD-1 を消す。embedding-api の E9 の残り）"
+status     = "todo"
+parent     = "VM parity"
+spec_slice = "determinism Slice 6"
+depends_on = ["vm-parity-diff-a"]
+order      = 65
+
 [[slice]]
 id         = "audit-vm-triple-a"
 title      = "VM の fs host call で host-call triple と host call 開始前の BudgetCharged の flush を tree と同じ順序・中身で buffer へ積む"
@@ -828,7 +840,8 @@ title      = "Engine::run_audited の VM 経路（Started・VM の buffer の dr
 status     = "todo"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 6"
-depends_on = ["audit-vm-triple-a"]
+spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-triple-b 実装スライス（`Engine::run_audited` の VM 経路）" }
+depends_on = ["audit-vm-triple-a", "vm-engine-run-route"]
 order      = 71
 
 [[slice]]
