@@ -2,7 +2,7 @@
 //!
 //! 仕様: `docs/determinism-and-audit.md`「vm-parity-diff-a 実装スライス」、開発ループ手順書 §6.7。
 //!
-//! 1 つのケース（単発の source、REPL の入力の列、または `Engine::execute` の `ExecutionContext` を
+//! 1 つのケース（単発の source、REPL の入力の列、または埋め込み API の `Engine::run` で `EmbeddingContext` を
 //! 使い回す入力の列）を tree と VM で流し、入力ごとに次の軸で比べる。
 //!
 //! - **値**: 各ケースは観測したい値を `print` で出す。値は出力の比較で比べる。
@@ -17,7 +17,17 @@
 //!   中で「ケース − 基準」の `live_heap_bytes`・`peak_heap_bytes`・`reserved_heap_bytes` の差を取り、
 //!   その差を engine 間で exact に比べる（code artifact の分は差で打ち消す。`tests/cow_copy_journal.rs`
 //!   と同じ方法）。基準を持たないケースは、`tests/differential.rs` と同じ向き（> 0 か）の比較にとどめる。
-//! - **経路**（`Axis::Route`）: 片方の engine に実行の経路が無い（`Engine::execute` の VM）こと。
+//! - **経路**（`Axis::Route`）: 片方の engine に実行の経路が無いこと（vm-engine-run-route で `Mode::Context`
+//!   の VM に経路ができ、今は経路の欠けを一覧に持たない）。
+//!
+//! vm-engine-run-route（VRR-AT-02..04）: `Mode::Context` は tree・VM とも埋め込み API の `Engine::run`
+//! （`TreeWalk` と `VmExperimental` の engine）で流す。context の継続・transaction・制御と注入のケースは
+//! `context/<名前>`（`context_cases`）。
+//!
+//! VRR-AT-06（非破壊）: alpha facade（`src/engine.rs`）と CLI（`src/main.rs`）は触らない。この file で変えた
+//! 既存の期待は、KD-1 と `Mode::Context` の経路なしを前提にした 2 か所（VPD-AT-01 の自己検査の `route`
+//! のケースと、`vpd_at_02_matrix_covers_every_combination` の KD-1 の存在の assert）だけで、KD-2〜KD-4 は変えない
+//! （`cargo test` と `git diff --stat`）。
 //!
 //! 差は「ケース・軸・tree の値・VM の値」で報告し、`KNOWN_DIFFS`（既知の差分一覧）と完全一致させる。
 //! 一覧に無い差が出ても、一覧の項目に当たる差が 1 件も出なくても test が落ちる（spec の Q2=A）。
@@ -40,6 +50,7 @@
 use std::num::NonZeroU128;
 use std::sync::{Arc, Mutex};
 
+use tsumugi::CapabilitySet;
 use tsumugi::budget::{BudgetConfig, BudgetCounters, BudgetUsage};
 use tsumugi::capability::{AdapterError, Output};
 use tsumugi::compiler::Compiler;
@@ -48,7 +59,6 @@ use tsumugi::eval::Evaluator;
 use tsumugi::lexer::Lexer;
 use tsumugi::parser::Parser;
 use tsumugi::vm::Vm;
-use tsumugi::{CapabilitySet, Engine, ExecutionContext};
 
 #[path = "support/cli_fixture.rs"]
 mod cli_fixture;
@@ -99,12 +109,33 @@ enum Mode {
     Single,
     /// REPL の 1 session（tree は `run_repl_submission`、VM は `compile_repl_line` / `run_repl_chunk`）。
     Repl,
-    /// `Engine::execute` で 1 つの `ExecutionContext` を使い回す。VM には経路が無い。
-    Context,
+    /// 埋め込み API の `Engine::run` で 1 つの `EmbeddingContext` を使い回す（vm-engine-run-route）。
+    /// tree は `TreeWalk`、VM は `VmExperimental` の engine で流す。入力ごとに `compile` → `link` →
+    /// `run`。`ContextSetup` は request の作り方（budget・cancel・deadline・capability・引数・resolver）。
+    Context(ContextSetup),
     /// capability の要る 1 入力の実行を CLI と同じ組み立てで流す（vm-parity-diff-b）。tree は
     /// `Engine::compile` → `Engine::link` → `Engine::run`、VM は同じ link の結果を `expand_for_cli` →
     /// `Compiler` → `Vm::with_budget` → `set_capabilities` → `charge_link_graph` → `run`。
     Linked(LinkedSetup),
+}
+
+/// `Mode::Context` の request の作り方（vm-engine-run-route の `context/` のケース）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextSetup {
+    /// どの入力も `config()` の budget・stdout の capability で流す。
+    Plain,
+    /// `input` 番目の入力だけ fuel の上限を `fuel` にする。
+    Fuel { input: usize, fuel: u64 },
+    /// `input` 番目の入力を cancel 済みの token で流す（pre-cancel）。
+    PreCancel { input: usize },
+    /// `input` 番目の入力は request を作った後に `FakeClock` を deadline まで進めてから流す。
+    Deadline { input: usize },
+    /// `input` 番目の入力を empty の capability で流す（capability を持ち越さないこと）。
+    NoCapability { input: usize },
+    /// `input` 番目の入力に引数 `["alpha", "beta"]` を渡す。
+    Arguments { input: usize },
+    /// fixtures ディレクトリを `default` mount にした resolver を grant する（`linked/` と同じ組み立て）。
+    Import,
 }
 
 /// 1 入力の観測。
@@ -143,6 +174,10 @@ fn run_tree(mode: Mode, inputs: &[String]) -> Run {
         return run_tree_linked(setup, &inputs[0]);
     }
     let (capabilities, sink) = capture_capabilities();
+    let capabilities = match mode {
+        Mode::Context(_) => CapabilitySet::empty(),
+        _ => capabilities,
+    };
     match mode {
         Mode::Single => {
             let source = &inputs[0];
@@ -184,26 +219,7 @@ fn run_tree(mode: Mode, inputs: &[String]) -> Run {
                 .collect();
             Run::Steps(steps)
         }
-        Mode::Context => {
-            let engine = Engine::new();
-            let mut context = ExecutionContext::new();
-            context.set_capabilities(capabilities);
-            let steps = inputs
-                .iter()
-                .map(|source| {
-                    let result = match engine.compile(source) {
-                        Ok(script) => engine.execute(&script, &mut context).map(|_| ()),
-                        Err(mut errors) => Err(errors.remove(0)),
-                    };
-                    Step {
-                        result,
-                        output: take_output(&sink),
-                        usage: context.budget_usage(),
-                    }
-                })
-                .collect();
-            Run::Steps(steps)
-        }
+        Mode::Context(setup) => run_context(tsumugi::Backend::TreeWalk, setup, inputs, sink),
         Mode::Linked(_) => unreachable!("先に分けた"),
     }
 }
@@ -213,6 +229,10 @@ fn run_vm(mode: Mode, inputs: &[String]) -> Run {
         return run_vm_linked(setup, &inputs[0]);
     }
     let (capabilities, sink) = capture_capabilities();
+    let capabilities = match mode {
+        Mode::Context(_) => CapabilitySet::empty(),
+        _ => capabilities,
+    };
     match mode {
         Mode::Single => {
             let source = &inputs[0];
@@ -282,8 +302,173 @@ fn run_vm(mode: Mode, inputs: &[String]) -> Run {
                 .collect();
             Run::Steps(steps)
         }
-        Mode::Context => Run::NoRoute("Engine::execute / Engine::run に VM の経路が無い"),
+        Mode::Context(setup) => run_context(tsumugi::Backend::VmExperimental, setup, inputs, sink),
         Mode::Linked(_) => unreachable!("先に分けた"),
+    }
+}
+
+/// `Mode::Context` を `backend` の埋め込み API で流す（vm-engine-run-route）。tree と VM で同じ組み立て
+/// （`Engine::builder()` → `retain_source` 付きの `compile` → `link` → `EmbeddingContext` で `run`）にし、
+/// 違うのは engine の backend だけにする。
+fn run_context(
+    backend: tsumugi::Backend,
+    setup: ContextSetup,
+    inputs: &[String],
+    sink: Arc<Mutex<Vec<u8>>>,
+) -> Run {
+    use tsumugi::{
+        CompileOptions, EmbeddingContext, EmbeddingEngine, EmbeddingRequest, EngineConfig,
+        ExecutionId, FakeClock, LanguageRevision, LinkRequest, MonotonicClock, Source, SourceId,
+    };
+    let engine = EmbeddingEngine::builder()
+        .config(EngineConfig {
+            backend,
+            language_revision: LanguageRevision::CURRENT,
+            audit_sink: None,
+            audit_slice_fuel: None,
+        })
+        .allow_experimental_backend(true)
+        .build()
+        .expect("engine");
+    let mut context = EmbeddingContext::new(&engine);
+    let capabilities = |granted: bool| {
+        let mut builder = CapabilitySet::builder();
+        if granted {
+            builder = builder
+                .stdout(Arc::new(CaptureOutput(Arc::clone(&sink))))
+                .expect("stdout grant")
+                .process_exit(tsumugi::capability::ProcessExit::new(policy(3)))
+                .expect("exit grant");
+        }
+        if setup == ContextSetup::Import {
+            use tsumugi::{FilesystemModuleResolver, MountName, OsDirectoryHandle, SymlinkPolicy};
+            let pid = policy(7);
+            let handle = OsDirectoryHandle::new(fixture_dir(), pid, SymlinkPolicy::DenyAll);
+            let resolver = FilesystemModuleResolver::new(
+                pid,
+                [(MountName::new("default").expect("mount"), Arc::new(handle))],
+            )
+            .expect("resolver");
+            builder = builder
+                .module_resolver(Arc::new(resolver))
+                .expect("resolver grant");
+        }
+        builder.build()
+    };
+    let steps = inputs
+        .iter()
+        .enumerate()
+        .map(|(i, source)| {
+            let script = match engine.compile(
+                Source::new(SourceId::new("main").expect("id"), source),
+                &CompileOptions {
+                    retain_source: true,
+                },
+            ) {
+                Ok(script) => script,
+                Err(errors) => {
+                    return parse_error_step(TsumugiError::parse(
+                        0,
+                        format!("compile: {errors:?}"),
+                    ));
+                }
+            };
+            let fake = Arc::new(FakeClock::new());
+            let clock: Arc<dyn MonotonicClock> = Arc::clone(&fake) as Arc<dyn MonotonicClock>;
+            let mut budget = tree_budget(clock.as_ref());
+            if let ContextSetup::Fuel { input, fuel } = setup
+                && input == i
+            {
+                budget.total_fuel = fuel;
+            }
+            let link_request = LinkRequest::new(
+                ExecutionId::new(policy(1)),
+                capabilities(true),
+                tree_budget(clock.as_ref()),
+            );
+            let linked = match engine.link(&script, link_request) {
+                Ok(linked) => linked,
+                Err(error) => {
+                    return parse_error_step(TsumugiError::parse(0, format!("link: {error:?}")));
+                }
+            };
+            let granted = setup != ContextSetup::NoCapability { input: i };
+            let mut request = EmbeddingRequest::new(budget, Arc::clone(&clock))
+                .expect("request")
+                .with_capabilities(capabilities(granted));
+            if setup == (ContextSetup::Arguments { input: i }) {
+                request = request.with_arguments(vec!["alpha".into(), "beta".into()]);
+            }
+            if setup == (ContextSetup::PreCancel { input: i }) {
+                let token = tsumugi::CancellationToken::new();
+                token.cancel();
+                request = request.cancellation(token);
+            }
+            if setup == (ContextSetup::Deadline { input: i }) {
+                // request の作成後に deadline を過ぎるまで進める。
+                fake.advance(u64::MAX / 2);
+            }
+            let (result, usage) = context_outcome(engine.run(&linked, &mut context, request));
+            Step {
+                result,
+                output: take_output(&sink),
+                usage,
+            }
+        })
+        .collect();
+    Run::Steps(steps)
+}
+
+/// `Engine::run` の outcome を `Step` の形へ写す。`Completed` は `Ok`、それ以外は variant 名を message の
+/// 先頭に付けた error（`ExecutionError` を持つ variant はその kind・message・line・trace）にする。
+fn context_outcome(outcome: tsumugi::EmbeddingOutcome) -> (Result<(), TsumugiError>, BudgetUsage) {
+    use tsumugi::EmbeddingOutcome;
+    let tagged = |variant: &str, error: TsumugiError| match error {
+        TsumugiError::Runtime {
+            line,
+            message,
+            kind,
+            trace,
+            message_id,
+        } => TsumugiError::Runtime {
+            line,
+            message: format!("{variant}: {message}"),
+            kind,
+            trace,
+            message_id,
+        },
+        other => other,
+    };
+    let plain = |variant: &str, kind| TsumugiError::Runtime {
+        line: 0,
+        message: variant.to_string(),
+        kind,
+        trace: Vec::new(),
+        message_id: None,
+    };
+    use tsumugi::error::ErrorKind;
+    match outcome {
+        EmbeddingOutcome::Completed { usage } => (Ok(()), usage),
+        EmbeddingOutcome::Exited { code, usage } => (Err(exit_error(Some(code))), usage),
+        EmbeddingOutcome::RuntimeError { error, usage } => (
+            Err(tagged("RuntimeError", from_execution_error(error))),
+            usage,
+        ),
+        EmbeddingOutcome::BudgetExceeded { error, usage } => (
+            Err(tagged("BudgetExceeded", from_execution_error(error))),
+            usage,
+        ),
+        EmbeddingOutcome::Cancelled { usage } => {
+            (Err(plain("Cancelled", ErrorKind::Cancelled)), usage)
+        }
+        EmbeddingOutcome::DeadlineExceeded { usage } => (
+            Err(plain("DeadlineExceeded", ErrorKind::DeadlineExceeded)),
+            usage,
+        ),
+        other => (
+            Err(TsumugiError::parse(0, format!("terminal: {other:?}"))),
+            BudgetUsage::default(),
+        ),
     }
 }
 
@@ -640,7 +825,7 @@ fn matrix_inputs(
             let mode = if place == "repl_prev" {
                 Mode::Repl
             } else {
-                Mode::Context
+                Mode::Context(ContextSetup::Plain)
             };
             lines.extend(body);
             lines.extend(tail);
@@ -724,6 +909,125 @@ fn repl_cases() -> Vec<Case> {
                 "fn f()\n  continue\nend\nprint(a)\n",
                 "print(undefined_name)\n",
                 "print(a + 1)\n",
+            ],
+        ),
+    ]
+}
+
+// -----------------------------------------------------------------------------
+// 埋め込み API の context の継続（vm-engine-run-route、VRR-AT-03・04）
+// -----------------------------------------------------------------------------
+
+fn context_cases() -> Vec<Case> {
+    let case = |name: &str, setup: ContextSetup, inputs: &[&str]| Case {
+        name: format!("context/{name}"),
+        mode: Mode::Context(setup),
+        inputs: inputs.iter().map(|s| s.to_string()).collect(),
+        baseline: None,
+    };
+    vec![
+        // VRR-AT-03: RuntimeError は rollback し、次の実行で前の値が戻っている。
+        case(
+            "runtime_error_rollback",
+            ContextSetup::Plain,
+            &[
+                "let a = 1\nlet xs = [1]\n",
+                "push(xs, 2)\na = 5\nprint(\"before\")\nlet b = 1 / 0\n",
+                "print(a)\nprint(xs)\n",
+                "print(b)\n",
+            ],
+        ),
+        // VRR-AT-03: exit(3) は Exited { code: 3 } で commit し、次の実行でその実行の binding が残る。
+        case(
+            "exit_commit",
+            ContextSetup::Plain,
+            &[
+                "let x = 0\nlet ys = [0]\n",
+                "x = 7\npush(ys, 1)\nlet kept = \"k\"\nprint(\"before\")\nexit(3)\nprint(\"after\")\n",
+                "print(x)\nprint(ys)\nprint(kept)\n",
+            ],
+        ),
+        // VRR-AT-03（決定記録 Q3=A の条件 1）: exit の後の let は次の実行で未定義の名前。
+        case(
+            "exit_boundary_after_let",
+            ContextSetup::Plain,
+            &[
+                "let a = 1\nexit(3)\nlet b = 2\n",
+                "print(a)\n",
+                "print(b)\n",
+                "let b = a + 1\nprint(b)\n",
+            ],
+        ),
+        // VRR-AT-03: 関数の中の exit。exit までに実行した top-level の binding だけが残る。
+        case(
+            "exit_in_function",
+            ContextSetup::Plain,
+            &[
+                "let a = 1\nfn f()\n  let inner = 5\n  a = 2\n  exit(4)\nend\nlet c = f()\nlet d = 2\n",
+                "print(a)\n",
+                "print(c)\n",
+                "print(inner)\n",
+                "print(d)\n",
+                "let e = a + 10\nprint(e)\n",
+            ],
+        ),
+        // VRR-AT-03: block の中の exit。block の中の local は残さない。
+        case(
+            "exit_in_block",
+            ContextSetup::Plain,
+            &[
+                "let a = 1\nif true\n  let blk = 2\n  a = 10\n  exit(5)\nend\nlet z = 3\n",
+                "print(a)\n",
+                "print(blk)\n",
+                "print(z)\n",
+                "let w = a + 1\nprint(w)\n",
+            ],
+        ),
+        // VRR-AT-03: fuel の上限を小さくした実行の BudgetExceeded と rollback。
+        case(
+            "budget_exceeded_rollback",
+            ContextSetup::Fuel { input: 1, fuel: 50 },
+            &[
+                "let n = 0\n",
+                "n = 100\nwhile true\n  n = n + 1\nend\n",
+                "print(n)\n",
+            ],
+        ),
+        // VRR-AT-04: pre-cancel の Cancelled（usage を含む）。language-state を変えない。
+        case(
+            "pre_cancel",
+            ContextSetup::PreCancel { input: 1 },
+            &["let a = [1, 2, 3]\n", "a = 2\nprint(a)\n", "print(a)\n"],
+        ),
+        // VRR-AT-04: run の開始時点で過ぎた deadline の DeadlineExceeded。
+        case(
+            "deadline_exceeded",
+            ContextSetup::Deadline { input: 1 },
+            &["let a = [1, 2, 3]\n", "a = 2\nprint(a)\n", "print(a)\n"],
+        ),
+        // VRR-AT-04: capability を持ち越さない（2 回目は empty の capability で print が拒否される）。
+        case(
+            "capability_not_carried",
+            ContextSetup::NoCapability { input: 1 },
+            &[
+                "let a = 1\nprint(\"one\")\n",
+                "a = 2\nprint(\"two\")\n",
+                "print(a)\n",
+            ],
+        ),
+        // VRR-AT-04: ExecutionRequest::with_arguments の引数を args() で読む。
+        case(
+            "arguments",
+            ContextSetup::Arguments { input: 0 },
+            &["print(args())\n", "print(args())\n"],
+        ),
+        // VRR-AT-04: 同じ module を import する実行を 2 回続けたときの 2 回目の import の課金と値。
+        case(
+            "import_twice",
+            ContextSetup::Import,
+            &[
+                "import \"import_lib.tsg\"\nprint(add(1, 2))\n",
+                "import \"import_lib.tsg\"\nprint(greet(\"x\"))\nprint(LIB_VERSION)\n",
             ],
         ),
     ]
@@ -1511,12 +1815,6 @@ impl KnownDiff {
 /// 差を直すスライスは、同じ PR でその項目を消す。0 件になったらフェーズの終わり（手順書 §6.7）。
 const KNOWN_DIFFS: &[KnownDiff] = &[
     KnownDiff {
-        id: "KD-1",
-        axis: Axis::Route,
-        pattern: "matrix/context_prev/*",
-        description: "Engine::execute / Engine::run の ExecutionContext に VM の経路が無い（VmExperimental でも tree で実行する。embedding-api の逸脱一覧、延期先 E9 の残り）",
-    },
-    KnownDiff {
         id: "KD-2",
         axis: Axis::Heap,
         pattern: "matrix/*/for_list_*",
@@ -1599,12 +1897,13 @@ fn vpd_at_01_compare_reports_each_axis() {
         let mut diffs = compare("probe", &tree, &vm, Some((&tree_base, &vm_base)));
         // 同じ source なら差は出ない。
         assert!(compare("same", &tree, &run_tree(Mode::Single, &tree_src), None).is_empty());
-        // 経路の欠け。
+        // 経路の欠け（vm-engine-run-route で `Mode::Context` の VM にも経路ができたので、経路なしは
+        // 合成した `Run::NoRoute` で作る。後のスライスで経路の欠けを一覧へ載せられるよう軸は残す）。
         let inputs = vec!["print(1)\n".to_string()];
         diffs.extend(compare(
             "route",
-            &run_tree(Mode::Context, &inputs),
-            &run_vm(Mode::Context, &inputs),
+            &run_tree(Mode::Context(ContextSetup::Plain), &inputs),
+            &Run::NoRoute("合成した経路の欠け"),
             None,
         ));
         diffs
@@ -1647,16 +1946,24 @@ fn vpd_at_02_matrix_covers_every_combination() {
         assert_eq!(baseline.len(), case.inputs.len(), "{}", case.name);
         assert_ne!(baseline, &case.inputs, "{}", case.name);
     }
-    // `Engine::execute` の context の置き場所は、VM 側が経路なしとして既知の差分一覧の 1 項目に当たる。
+    // context の置き場所は、tree・VM とも `Engine::run` で流す（vm-engine-run-route で KD-1 を消した）。
     assert!(
-        KNOWN_DIFFS
+        cases
             .iter()
-            .any(|k| k.axis == Axis::Route && k.pattern == "matrix/context_prev/*"),
-        "context の置き場所の経路なしが一覧に無い"
+            .filter(|c| c.name.starts_with("matrix/context_prev/"))
+            .all(|c| c.mode == Mode::Context(ContextSetup::Plain))
+    );
+    assert!(
+        !KNOWN_DIFFS
+            .iter()
+            .any(|k| k.axis == Axis::Route
+                && glob_match(k.pattern, "matrix/context_prev/push/unique")),
+        "context の置き場所の経路なしが一覧に残っている"
     );
 }
 
 /// VPD-AT-02・05: matrix の全ケースを全軸で比べ、差が既知の差分一覧と完全一致する。
+/// VRR-AT-02: `matrix/context_prev/*` は tree・VM とも `Engine::run` で流し、KD-1 の無い一覧で gate が通る。
 #[test]
 fn vpd_at_02_matrix_matches_known_diffs() {
     assert_gate("matrix/", matrix_cases);
@@ -1787,6 +2094,140 @@ fn vpd_at_05_gate_requires_exact_match() {
         KNOWN_DIFFS.len(),
         "既知の差分一覧の ID が重複している"
     );
+}
+
+// -----------------------------------------------------------------------------
+// vm-engine-run-route（VRR-AT-02..04）
+// -----------------------------------------------------------------------------
+
+/// VRR-AT-03・04: context のケースを入力ごとに全軸で比べ、差が既知の差分一覧と完全一致する。
+#[test]
+fn vrr_at_03_04_context_cases_match_known_diffs() {
+    assert_gate("context/", context_cases);
+}
+
+/// VRR-AT-03・04: context のケースが期待どおりの terminal を観測している（両 engine で一致するだけでなく、
+/// 各ケースが狙いの outcome を出している）。
+#[test]
+fn vrr_at_03_04_context_cases_observe_intended_outcomes() {
+    let observed = with_stack(|| {
+        context_cases()
+            .into_iter()
+            .map(|case| (case.name.clone(), run_vm(case.mode, &case.inputs)))
+            .collect::<Vec<_>>()
+    });
+    let steps = |name: &str| -> Vec<Step> {
+        match &observed.iter().find(|(n, _)| n == name).expect(name).1 {
+            Run::Steps(steps) => steps.clone(),
+            Run::NoRoute(reason) => panic!("{name}: 経路なし {reason}"),
+        }
+    };
+    let out = |step: &Step| String::from_utf8_lossy(&step.output).into_owned();
+    let message = |step: &Step| match &step.result {
+        Err(TsumugiError::Runtime { message, kind, .. }) => format!("{kind:?}: {message}"),
+        other => format!("{other:?}"),
+    };
+
+    let s = steps("context/runtime_error_rollback");
+    assert!(
+        message(&s[1]).starts_with("DivisionByZero: RuntimeError")
+            || message(&s[1]).contains("RuntimeError"),
+        "{}",
+        message(&s[1])
+    );
+    assert_eq!(out(&s[2]), "1\n[1]\n");
+    assert!(
+        message(&s[3]).contains("RuntimeError"),
+        "{}",
+        message(&s[3])
+    );
+
+    let s = steps("context/exit_commit");
+    assert_eq!(s[1].result, Err(exit_error(Some(3))));
+    assert_eq!(out(&s[1]), "before\n");
+    assert_eq!(out(&s[2]), "7\n[0, 1]\nk\n");
+
+    let s = steps("context/exit_boundary_after_let");
+    assert_eq!(s[0].result, Err(exit_error(Some(3))));
+    assert_eq!(out(&s[1]), "1\n");
+    assert!(
+        message(&s[2]).contains("RuntimeError"),
+        "{}",
+        message(&s[2])
+    );
+    assert_eq!(out(&s[3]), "2\n");
+
+    let s = steps("context/exit_in_function");
+    assert_eq!(s[0].result, Err(exit_error(Some(4))));
+    assert_eq!(out(&s[1]), "2\n");
+    for i in [2, 3, 4] {
+        assert!(
+            message(&s[i]).contains("RuntimeError"),
+            "{i}: {}",
+            message(&s[i])
+        );
+    }
+    assert_eq!(out(&s[5]), "12\n");
+
+    let s = steps("context/exit_in_block");
+    assert_eq!(s[0].result, Err(exit_error(Some(5))));
+    assert_eq!(out(&s[1]), "10\n");
+    assert!(
+        message(&s[2]).contains("RuntimeError"),
+        "{}",
+        message(&s[2])
+    );
+    assert!(
+        message(&s[3]).contains("RuntimeError"),
+        "{}",
+        message(&s[3])
+    );
+    assert_eq!(out(&s[4]), "11\n");
+
+    let s = steps("context/budget_exceeded_rollback");
+    assert!(
+        message(&s[1]).contains("BudgetExceeded"),
+        "{}",
+        message(&s[1])
+    );
+    assert_eq!(out(&s[2]), "0\n");
+
+    for name in ["context/pre_cancel", "context/deadline_exceeded"] {
+        let s = steps(name);
+        let tag = if name.ends_with("pre_cancel") {
+            "Cancelled"
+        } else {
+            "DeadlineExceeded"
+        };
+        assert!(message(&s[1]).contains(tag), "{name}: {}", message(&s[1]));
+        assert_eq!(out(&s[1]), "", "{name}");
+        assert_eq!(out(&s[2]), "[1, 2, 3]\n", "{name}");
+    }
+    let s = steps("context/pre_cancel");
+    assert_eq!(s[1].usage.committed.fuel, 0);
+
+    let s = steps("context/capability_not_carried");
+    assert_eq!(out(&s[0]), "one\n");
+    assert!(
+        message(&s[1]).contains("RuntimeError"),
+        "{}",
+        message(&s[1])
+    );
+    assert_eq!(out(&s[1]), "");
+    assert_eq!(out(&s[2]), "1\n");
+
+    let s = steps("context/arguments");
+    assert_eq!(out(&s[0]), "[\"alpha\", \"beta\"]\n");
+    assert_eq!(out(&s[1]), "[]\n");
+
+    let s = steps("context/import_twice");
+    assert_eq!(s[0].result, Ok(()));
+    assert_eq!(s[1].result, Ok(()));
+    assert_eq!(out(&s[0]), "3\n");
+    assert_eq!(out(&s[1]), "hello, x\n1\n");
+    // 2 回目は展開済みの module を課金しない（root source だけ）。
+    assert!(s[0].usage.committed.import_count >= 1, "{:?}", s[0].usage);
+    assert_eq!(s[1].usage.committed.import_count, 0, "{:?}", s[1].usage);
 }
 
 // -----------------------------------------------------------------------------

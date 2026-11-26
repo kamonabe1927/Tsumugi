@@ -106,6 +106,16 @@ pub struct Vm {
     /// REPL実行中だけ有効な、変更済みstack slotのrollback journal。
     repl_stack_checkpoint: Option<ReplStackCheckpoint>,
 
+    /// REPL の入力で、top-level の scope で初期化済み（`RegisterGlobal` を実行済み）の local の数。
+    /// `exit` で終わった入力の「実行済みの文まで」の commit が、stack と compiler の top-level
+    /// locals をこの数へ切り詰めるのに使う（vm-engine-run-route、決定記録 Q3=A）。
+    repl_top_level_initialized: usize,
+
+    /// REPL の入力の rollback で committed fuel を入力の開始時点へ戻さないか（vm-engine-run-route）。
+    /// 埋め込み API の run 経路は tree と同じく、rollback した実行でも消費した fuel を usage に残す
+    /// （VRR-AT-03）。CLI の VM REPL は既定の false のまま（既知の差分一覧の KD-4）。
+    repl_rollback_keeps_fuel: bool,
+
     /// 実行済みtop-level宣言の名前からstack slotへの対応。
     /// 値自体はstack/locals_cellsをsource of truthとし、bindingを複製しない。
     globals: HashMap<String, usize>,
@@ -220,6 +230,8 @@ impl Vm {
             frames: vec![frame],
             stack: Vec::with_capacity(256),
             repl_stack_checkpoint: None,
+            repl_top_level_initialized: 0,
+            repl_rollback_keeps_fuel: false,
             globals: HashMap::new(),
             budget: BudgetLedger::with_config(config),
             try_handlers: Vec::new(),
@@ -256,6 +268,8 @@ impl Vm {
             frames: Vec::new(),
             stack: Vec::with_capacity(256),
             repl_stack_checkpoint: None,
+            repl_top_level_initialized: 0,
+            repl_rollback_keeps_fuel: false,
             globals: HashMap::new(),
             budget: BudgetLedger::with_config(config),
             try_handlers: Vec::new(),
@@ -305,6 +319,18 @@ impl Vm {
     /// terminal で記録済み `exit` コードを取り出す（C7、REV-023）。CLI が実際の exit code へ写す。
     pub fn take_pending_exit(&mut self) -> Option<u8> {
         self.pending_exit.take()
+    }
+
+    /// REPL の入力の rollback で committed fuel を戻さないようにする（埋め込み API の run 経路だけが
+    /// true にする。vm-engine-run-route）。
+    pub(crate) fn set_repl_rollback_keeps_fuel(&mut self, keep: bool) {
+        self.repl_rollback_keeps_fuel = keep;
+    }
+
+    /// REPL の入力で初期化済みの top-level local の数（`exit` で終わった入力の commit の境界）。
+    /// 埋め込み API の run 経路が compiler の top-level locals をこの数へ戻すのに使う。
+    pub(crate) fn repl_top_level_initialized(&self) -> usize {
+        self.repl_top_level_initialized
     }
 
     /// step（fuel）上限を明示的に設定する。
@@ -482,10 +508,34 @@ impl Vm {
     /// chunk token を先に release してから、台帳の使用量を 0 から数え直す（live heap は持ち越す）。
     /// `config` は submission ごとに作って渡す。VM REPL は clock を持たない。
     pub fn begin_repl_submission(&mut self, config: BudgetConfig) {
-        self.chunk_tokens.clear();
         let cancellation = self.budget.cancellation_token();
+        self.begin_submission_with(config, None, cancellation);
+    }
+
+    /// 埋め込み API の run 経路の入口（vm-engine-run-route）。request の budget・deadline clock・
+    /// cancellation token を ledger へ据え直す（tree の `Evaluator::rearm_budget_for_repl` と同じ意味:
+    /// 使用量と peaks を 0 から数え直し、live heap は持ち越す。token は継承せず置き換える）。
+    /// CLI が使う [`Self::begin_repl_submission`] の挙動は変えない。
+    pub(crate) fn begin_execution(
+        &mut self,
+        config: BudgetConfig,
+        clock: std::sync::Arc<dyn crate::budget::MonotonicClock>,
+        cancellation: crate::budget::CancellationToken,
+    ) {
+        self.begin_submission_with(config, Some(clock), cancellation);
+    }
+
+    /// submission / execution の開始で台帳を据え直す（[`Self::begin_repl_submission`] と
+    /// [`Self::begin_execution`] の共通部分）。
+    fn begin_submission_with(
+        &mut self,
+        config: BudgetConfig,
+        clock: Option<std::sync::Arc<dyn crate::budget::MonotonicClock>>,
+        cancellation: crate::budget::CancellationToken,
+    ) {
+        self.chunk_tokens.clear();
         self.budget
-            .begin_repl_submission(config, None, cancellation);
+            .begin_repl_submission(config, clock, cancellation);
         // host-call 監査（audit-vm-triple-a）も submission 境界で戻す（tree の
         // `rearm_budget_for_repl` と同じ: operation_id を 0 へ巻き戻し、前 submission の event を
         // 持ち越さない）。
@@ -540,6 +590,7 @@ impl Vm {
         debug_assert!(self.repl_stack_checkpoint.is_none());
         // 新しい transaction 開始時に保留 heap 超過をクリアする（REV-015 PR-d）。
         self.pending_heap_stop = None;
+        self.repl_top_level_initialized = self.stack.len();
         self.repl_stack_checkpoint = Some(ReplStackCheckpoint {
             stack_len: self.stack.len(),
             originals: HashMap::new(),
@@ -600,6 +651,25 @@ impl Vm {
                 self.repl_stack_checkpoint = None;
                 Ok(())
             }
+            Err(error) if error.kind() == Some(crate::error::ErrorKind::ProcessExit) => {
+                // `exit` は commit（embedding-api §10 規則5）。rollback せず、「実行済みの文まで」を
+                // 残す（vm-engine-run-route、決定記録 Q3=A）。frame を top-level の 1 つへ、stack を
+                // 初期化済みの top-level local の数へ、try handler を空へ切り詰める。block の中の
+                // local と、`exit` の呼び出し途中の一時値・callee frame は残さない。`exit` までに
+                // 実行した global・cell の書き換えと fuel は残す。CLI の VM REPL は `exit` で session
+                // を終えるので、CLI の観測挙動は変わらない。
+                self.repl_stack_checkpoint = None;
+                let initialized = self.repl_top_level_initialized;
+                self.frames.truncate(1);
+                if let Some(frame) = self.frames.first_mut() {
+                    for cell in frame.locals_cells.iter_mut().skip(initialized) {
+                        *cell = None;
+                    }
+                }
+                self.stack.truncate(initialized);
+                self.try_handlers.clear();
+                Err(error)
+            }
             Err(error) => {
                 let stack_checkpoint = self.repl_stack_checkpoint.take();
                 self.frames = frames_checkpoint;
@@ -608,7 +678,9 @@ impl Vm {
                 }
                 self.globals = globals_checkpoint;
                 self.try_handlers = handlers_checkpoint;
-                self.budget.restore_fuel(steps_checkpoint);
+                if !self.repl_rollback_keeps_fuel {
+                    self.budget.restore_fuel(steps_checkpoint);
+                }
                 Err(error)
             }
         }
@@ -1281,6 +1353,7 @@ impl Vm {
             ));
         }
         self.globals.insert(name, slot);
+        self.repl_top_level_initialized = self.repl_top_level_initialized.max(stack_index + 1);
         Ok(())
     }
 

@@ -209,6 +209,15 @@ impl Compiler {
         result
     }
 
+    /// REPL の top-level locals を `count` 個へ戻す（vm-engine-run-route、決定記録 Q3=A）。
+    ///
+    /// `exit` で終わった入力を「実行済みの文まで」commit するとき、VM が切り詰めた stack と
+    /// 同じ数へ compiler の top-level locals を揃える。`exit` の後の `let` は次の入力で未定義の
+    /// 名前になる（tree と同じ）。
+    pub(crate) fn truncate_repl_top_level_locals(&mut self, count: usize) {
+        self.locals.truncate(count);
+    }
+
     /// 文をコンパイル
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), TsumugiError> {
         // statement へ入る（§4.1、F-2c Q3 = A 規則 1）。ブロックは数えない。
