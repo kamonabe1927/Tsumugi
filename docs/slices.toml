@@ -854,12 +854,13 @@ order      = 70
 [[slice]]
 id         = "audit-vm-triple-b"
 title      = "Engine::run_audited の VM 経路（Started・VM の buffer の drain・Terminal を tree と同じ journal・sink の規則で出す）"
-status     = "ready"
+status     = "done"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-triple-b 実装スライス（`Engine::run_audited` の VM 経路）" }
 acceptance = ["AVT-AT-06..10"]
 design_pr  = 539
+impl_pr    = 0
 depends_on = ["audit-vm-triple-a", "vm-engine-run-route"]
 order      = 71
 
