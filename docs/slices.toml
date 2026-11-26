@@ -791,7 +791,7 @@ impl_pr    = 528
 [[slice]]
 id         = "vm-parity-diff-b"
 title      = "差分テストを capability の要る fixture と CLI の stdout・stderr・終了コードの byte 比較へ広げる"
-status     = "ready"
+status     = "done"
 parent     = "VM parity"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "vm-parity-diff-b 実装スライス（capability の要る fixture と CLI の stdout・stderr・終了コードの byte 比較）" }
@@ -799,6 +799,7 @@ acceptance = ["VPD-AT-07..12"]
 design_pr  = 533
 depends_on = ["vm-parity-diff-a"]
 order      = 31
+impl_pr    = 534
 
 # audit-vm-triple（VM の audit triple 対応）は §6.7 のフェーズのスライスとして 90 分に収めるため a・b・c に分けた
 # （spec「audit-vm-triple のスライス分割」小節に理由）。元の id は置き換えて残さない。
