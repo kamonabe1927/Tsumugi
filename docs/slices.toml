@@ -827,6 +827,7 @@ parent     = "VM parity"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "vm-engine-run-route 実装スライス（`Engine::run` が `VmExperimental` のとき `ExecutionContext` で VM を回す経路）" }
 acceptance = ["VRR-AT-01..06"]
+design_pr  = 537
 depends_on = ["vm-parity-diff-a"]
 order      = 65
 
