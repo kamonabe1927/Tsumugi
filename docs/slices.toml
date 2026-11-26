@@ -817,8 +817,9 @@ impl_pr    = 534
 #   判断役が Q1=A・Q2=A を選んだ（PR #535）。Q2=A の条件: (1) c の設計 PR が tests/vm_parity.rs への監査の軸を受入基準に入れる、(2) b の設計 PR が crate 内の比較 test を受入基準に入れる。
 # vm-engine-run-route の設計 PR: 分けずに 1 本（KD-1 は context の継続・transaction・outcome の写像が揃わないと消えないため。
 #   CLI の VM 経路・Engine::compile の backend compile・VM の host function・監査・alpha facade は範囲外へ出した）。
-#   見積もり src/ 約 250〜450 行、tests 約 300〜500 行、受入基準 6（VRR-AT-01..06）。§6.7 のとおり §14.1 の上限は当てない。
+#   見積もり src/ 約 280〜510 行、tests 約 330〜550 行、受入基準 6（VRR-AT-01..06）。§6.7 のとおり §14.1 の上限は当てない。
 #   判断の候補 Q1（alpha facade に VM の経路を作るか）・Q2（VmExperimental の host function の扱い）は判断役が Q1=A・Q2=A を選んだ（PR #537）。
+#   レビューの指摘から足した Q3（VM の Exited の commit の境界）は Q3=A（実行済みの文まで commit。PR #537）。
 #   Q2=A の条件: 実装 PR が embedding-api の逸脱一覧に build の拒否の行（延期先つき）を足す。
 [[slice]]
 id         = "vm-engine-run-route"
