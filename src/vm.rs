@@ -203,6 +203,12 @@ pub struct Vm {
     /// host-call payload の redaction policy（Phase 6 R-1、§9.1）。既定は tree と同じ
     /// `RedactionPolicy::default()`。
     redaction_policy: crate::audit::RedactionPolicy,
+
+    /// 直近に `BudgetExceeded` の `ControlStop` を error へ写した際の、畳む前の細粒度の
+    /// [`crate::budget::BudgetResource`]（audit-vm-triple-b。tree の `Evaluator::last_budget_resource`
+    /// と同じ意味）。監査付き実行の Terminal が §7.2 どおりの resource を載せるために使う。
+    /// `Cell` なのは `control_stop_to_error` が ledger と共に共有参照で呼ばれるため。
+    last_budget_resource: std::cell::Cell<Option<crate::budget::BudgetResource>>,
 }
 
 impl Vm {
@@ -252,6 +258,7 @@ impl Vm {
             next_host_operation_id: 0,
             host_effects_may_remain: false,
             redaction_policy: crate::audit::RedactionPolicy::default(),
+            last_budget_resource: std::cell::Cell::new(None),
         }
     }
 
@@ -290,6 +297,7 @@ impl Vm {
             next_host_operation_id: 0,
             host_effects_may_remain: false,
             redaction_policy: crate::audit::RedactionPolicy::default(),
+            last_budget_resource: std::cell::Cell::new(None),
         }
     }
 
@@ -385,20 +393,43 @@ impl Vm {
         let mut record_tokens = Vec::with_capacity(expanded.len());
         self.budget
             .charge_source(root_source_bytes, ExecutionPhase::Link)
-            .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, 0))?;
+            .map_err(|stop| {
+                Self::control_stop_to_error(&self.budget, &self.last_budget_resource, stop, 0)
+            })?;
         for module in expanded {
             self.budget
                 .charge_source(module.byte_len, ExecutionPhase::Link)
-                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, module.line))?;
+                .map_err(|stop| {
+                    Self::control_stop_to_error(
+                        &self.budget,
+                        &self.last_budget_resource,
+                        stop,
+                        module.line,
+                    )
+                })?;
             self.budget
                 .charge_import(module.byte_len, ExecutionPhase::Link)
-                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, module.line))?;
+                .map_err(|stop| {
+                    Self::control_stop_to_error(
+                        &self.budget,
+                        &self.last_budget_resource,
+                        stop,
+                        module.line,
+                    )
+                })?;
             let token = Value::new_heap_token(
                 crate::budget::heap_size::imported_module_record(module.id.as_str().len() as u64),
                 &self.budget.heap_handle(),
                 ExecutionPhase::Link,
             )
-            .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, module.line))?;
+            .map_err(|stop| {
+                Self::control_stop_to_error(
+                    &self.budget,
+                    &self.last_budget_resource,
+                    stop,
+                    module.line,
+                )
+            })?;
             record_tokens.push(token);
         }
         Ok(record_tokens)
@@ -437,7 +468,9 @@ impl Vm {
         );
         let token =
             Value::new_heap_token(bytes, &self.budget.heap_handle(), ExecutionPhase::Compile)
-                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, 0))?;
+                .map_err(|stop| {
+                    Self::control_stop_to_error(&self.budget, &self.last_budget_resource, stop, 0)
+                })?;
         // retained-code token の side-table へ `Weak` を登録する（A-1、§5.3）。同 key への
         // 再挿入は常に新 `Weak` で上書きする（get-or-insert ではない）。dead entry（upgrade
         // 失敗）が raw-pointer ABA で残っていてもこの上書きで差し替わる。strong は `tokens`
@@ -542,22 +575,37 @@ impl Vm {
         self.next_host_operation_id = 0;
         self.audit_events.clear();
         self.host_effects_may_remain = false;
+        self.last_budget_resource.set(None);
     }
 
     /// 蓄積済みの host-call 監査 event を temporal 順のまま drain して返す（audit-vm-triple-a。
     /// tree の `Evaluator::drain_audit_events` と同じ意味）。返した後は buffer を空にする。
-    // 監査付き実行の VM 経路（audit-vm-triple-b）が使う。今は crate 内 test だけが呼ぶ。
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn drain_audit_events(&mut self) -> Vec<crate::audit::AuditEvent> {
         std::mem::take(&mut self.audit_events)
     }
 
     /// この execution で外部効果が残りうる host call（`Committed` / `Unknown`）を積んだか
     /// （tree の `Evaluator::host_effects_may_remain` と同じ意味）。
-    // 監査付き実行の VM 経路（audit-vm-triple-b）が使う。今は crate 内 test だけが呼ぶ。
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn host_effects_may_remain(&self) -> bool {
         self.host_effects_may_remain
+    }
+
+    /// accumulator に残る `BudgetCharged` を drain して返す（audit-vm-triple-b。tree の
+    /// `Evaluator::drain_budget_charges` と同じ意味）。監査付き実行が buffer の後に配送する。
+    pub(crate) fn drain_budget_charges(&mut self) -> Vec<crate::audit::AuditEvent> {
+        self.budget.drain_budget_charges()
+    }
+
+    /// この実行の host-call redaction policy を設定する（audit-vm-triple-b、§9.1。tree の
+    /// `Evaluator::set_redaction_policy` と同じ意味）。監査付き実行が据え直しの後・実行の前に注入する。
+    pub(crate) fn set_redaction_policy(&mut self, policy: crate::audit::RedactionPolicy) {
+        self.redaction_policy = policy;
+    }
+
+    /// 直近に写した `BudgetExceeded` の細粒度 resource を取り出す（audit-vm-triple-b、§7.2。tree の
+    /// `Evaluator::take_pending_budget_resource` と同じ意味）。読み取ると消費する。
+    pub(crate) fn take_pending_budget_resource(&self) -> Option<crate::budget::BudgetResource> {
+        self.last_budget_resource.take()
     }
 
     /// 監査 event 1 件を buffer へ積む（tree の `Evaluator::push_audit_event` と同じ flag 規則）。
@@ -867,7 +915,12 @@ impl Vm {
     /// `pending_heap_stop` に退避される。fuel を課金しない命令でも次の命令で必ず表に出す。
     fn surface_pending_heap_stop(&mut self, line: usize) -> Result<(), TsumugiError> {
         match self.pending_heap_stop.take() {
-            Some(stop) => Err(Self::control_stop_to_error(&self.budget, stop, line)),
+            Some(stop) => Err(Self::control_stop_to_error(
+                &self.budget,
+                &self.last_budget_resource,
+                stop,
+                line,
+            )),
             None => Ok(()),
         }
     }
@@ -914,14 +967,18 @@ impl Vm {
         self.surface_pending_heap_stop(line)?;
         self.budget
             .charge_fuel(FuelSchedule::cost(kind), ExecutionPhase::Run)
-            .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
+            .map_err(|stop| {
+                Self::control_stop_to_error(&self.budget, &self.last_budget_resource, stop, line)
+            })
     }
 
     /// collection 要素数の per-item 検査（REV-015 Slice 1）。
     fn check_collection(&mut self, size: usize, line: usize) -> Result<(), TsumugiError> {
         self.budget
             .check_collection_elements(size as u64, ExecutionPhase::Run)
-            .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
+            .map_err(|stop| {
+                Self::control_stop_to_error(&self.budget, &self.last_budget_resource, stop, line)
+            })
     }
 
     /// budget の [`ControlStop`] を既存の [`TsumugiError`] へ写像する（Slice 1/2 互換）。
@@ -930,11 +987,18 @@ impl Vm {
     /// Slice 1/2 で発生し得るのは fuel（= step）・collection・string 超過。cancel /
     /// deadline は ledger の charge 経路にまだ配線しておらず（Slice 4）、
     /// 到達した場合も安全側で step 上限として扱う。
+    ///
+    /// 監査（§7.2、audit-vm-triple-b）: 畳む前の細粒度 resource を `last` へ退避する（tree の
+    /// `Evaluator::control_stop_to_error` と同じ）。
     fn control_stop_to_error(
         budget: &BudgetLedger,
+        last: &std::cell::Cell<Option<crate::budget::BudgetResource>>,
         stop: ControlStop,
         line: usize,
     ) -> TsumugiError {
+        if let ControlStop::BudgetExceeded(exceeded) = &stop {
+            last.set(Some(exceeded.resource));
+        }
         crate::budget::control_stop_to_error(stop, budget.usage().committed.fuel, line)
     }
 
@@ -1148,7 +1212,9 @@ impl Vm {
         let value = std::mem::replace(&mut self.stack[at], Value::Null);
         let cell =
             crate::value::Value::new_cell(value, &self.budget.heap_handle(), ExecutionPhase::Run)
-                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                .map_err(|stop| {
+                Self::control_stop_to_error(&self.budget, &self.last_budget_resource, stop, line)
+            })?;
         if let Some(checkpoint) = self.repl_stack_checkpoint.as_mut() {
             checkpoint.created_cells.insert(Rc::as_ptr(&cell) as usize);
         }
@@ -1374,7 +1440,14 @@ impl Vm {
                 let value = if matches!(value, Value::Str(_) | Value::List(_) | Value::Dict(_)) {
                     self.budget
                         .track_result(value, ExecutionPhase::Run)
-                        .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?
+                        .map_err(|stop| {
+                            Self::control_stop_to_error(
+                                &self.budget,
+                                &self.last_budget_resource,
+                                stop,
+                                line,
+                            )
+                        })?
                 } else {
                     value
                 };
@@ -1397,7 +1470,14 @@ impl Vm {
                 let result = self
                     .budget
                     .track_result(result, ExecutionPhase::Run)
-                    .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                    .map_err(|stop| {
+                        Self::control_stop_to_error(
+                            &self.budget,
+                            &self.last_budget_resource,
+                            stop,
+                            line,
+                        )
+                    })?;
                 self.stack.push(result);
             }
             OpCode::Sub => {
@@ -1432,7 +1512,14 @@ impl Vm {
                 let equal = self
                     .budget
                     .values_equal(&left, &right, ExecutionPhase::Run)
-                    .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                    .map_err(|stop| {
+                        Self::control_stop_to_error(
+                            &self.budget,
+                            &self.last_budget_resource,
+                            stop,
+                            line,
+                        )
+                    })?;
                 self.stack.push(Value::Bool(equal));
             }
             OpCode::NotEq => {
@@ -1441,7 +1528,14 @@ impl Vm {
                 let equal = self
                     .budget
                     .values_equal(&left, &right, ExecutionPhase::Run)
-                    .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                    .map_err(|stop| {
+                        Self::control_stop_to_error(
+                            &self.budget,
+                            &self.last_budget_resource,
+                            stop,
+                            line,
+                        )
+                    })?;
                 self.stack.push(Value::Bool(!equal));
             }
             OpCode::Lt => {
@@ -1635,7 +1729,14 @@ impl Vm {
                     &self.budget.heap_handle(),
                     ExecutionPhase::Run,
                 )
-                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                .map_err(|stop| {
+                    Self::control_stop_to_error(
+                        &self.budget,
+                        &self.last_budget_resource,
+                        stop,
+                        line,
+                    )
+                })?;
                 // closure が retain する prototype chunk subtree（自分の chunk ＋ transitive な
                 // 子孫 prototype chunk）の retained-code token を side-table から一括で引き、
                 // `Rc::clone` した強参照を `VmFn` へ移譲する（A-1、REV-015 Slice 6、§5.3）。
@@ -1727,10 +1828,17 @@ impl Vm {
                 // 各複合ノードの fuel と per-item byte 上限で共有 DAG の指数を materialize 前に止める。
                 let mut output: Vec<String> = Vec::with_capacity(values.len());
                 for v in &values {
-                    let rendered = self
-                        .budget
-                        .render_display(v, ExecutionPhase::Run)
-                        .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                    let rendered =
+                        self.budget
+                            .render_display(v, ExecutionPhase::Run)
+                            .map_err(|stop| {
+                                Self::control_stop_to_error(
+                                    &self.budget,
+                                    &self.last_budget_resource,
+                                    stop,
+                                    line,
+                                )
+                            })?;
                     output.push(rendered);
                 }
                 let payload = output.join(" ");
@@ -1743,7 +1851,14 @@ impl Vm {
                         crate::builtin_core::print_charge_bytes(&payload),
                         ExecutionPhase::Run,
                     )
-                    .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                    .map_err(|stop| {
+                        Self::control_stop_to_error(
+                            &self.budget,
+                            &self.last_budget_resource,
+                            stop,
+                            line,
+                        )
+                    })?;
                 // C4（CAP-AT-08）: Stdout authority を consult してから adapter へ write する。
                 // tree engine（builtin.rs の print）と同じ共有ロジックを通す。
                 crate::builtin_core::resolve_print(self.capabilities.stdout(), &payload, line)?;
@@ -1825,7 +1940,14 @@ impl Vm {
                 let result =
                     collection.list_push_tracked(value, &mut self.budget, ExecutionPhase::Run);
                 self.stack[idx] = collection;
-                result.map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                result.map_err(|stop| {
+                    Self::control_stop_to_error(
+                        &self.budget,
+                        &self.last_budget_resource,
+                        stop,
+                        line,
+                    )
+                })?;
             }
             OpCode::DictInsert => {
                 let value = self.pop(line)?;
@@ -1868,7 +1990,14 @@ impl Vm {
                     ExecutionPhase::Run,
                 );
                 self.stack[idx] = collection;
-                result.map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                result.map_err(|stop| {
+                    Self::control_stop_to_error(
+                        &self.budget,
+                        &self.last_budget_resource,
+                        stop,
+                        line,
+                    )
+                })?;
             }
             OpCode::SetIndex(target) => {
                 let value = self.pop(line)?;
@@ -1896,7 +2025,14 @@ impl Vm {
                             &mut self.budget,
                             ExecutionPhase::Run,
                         )
-                        .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?,
+                        .map_err(|stop| {
+                            Self::control_stop_to_error(
+                                &self.budget,
+                                &self.last_budget_resource,
+                                stop,
+                                line,
+                            )
+                        })?,
                     ),
                     Value::Str(ref s) => Value::List(
                         Value::new_iter_str_list(
@@ -1905,7 +2041,14 @@ impl Vm {
                             &mut self.budget,
                             ExecutionPhase::Run,
                         )
-                        .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?,
+                        .map_err(|stop| {
+                            Self::control_stop_to_error(
+                                &self.budget,
+                                &self.last_budget_resource,
+                                stop,
+                                line,
+                            )
+                        })?,
                     ),
                     _ => {
                         return Err(TsumugiError::not_iterable(line, &value));
@@ -1948,14 +2091,28 @@ impl Vm {
                     let rendered = self
                         .budget
                         .render_display(&val, ExecutionPhase::Run)
-                        .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                        .map_err(|stop| {
+                            Self::control_stop_to_error(
+                                &self.budget,
+                                &self.last_budget_resource,
+                                stop,
+                                line,
+                            )
+                        })?;
                     result.push_str(&rendered);
                 }
                 // f-string の生成 body も dispatch を経由しないため課金する（REV-015 Slice 2）。
                 let value = self
                     .budget
                     .track_result(Value::str_constant(result), ExecutionPhase::Run)
-                    .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                    .map_err(|stop| {
+                        Self::control_stop_to_error(
+                            &self.budget,
+                            &self.last_budget_resource,
+                            stop,
+                            line,
+                        )
+                    })?;
                 self.stack.push(value);
             }
             OpCode::ReturnValue | OpCode::Return => {
@@ -2247,7 +2404,14 @@ impl Vm {
                         &mut self.budget,
                         ExecutionPhase::Run,
                     )
-                    .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
+                    .map_err(|stop| {
+                        Self::control_stop_to_error(
+                            &self.budget,
+                            &self.last_budget_resource,
+                            stop,
+                            line,
+                        )
+                    })
             }
             BindingStorage::Stack(stack_index) => {
                 if stack_index >= self.stack.len() {
@@ -2264,7 +2428,14 @@ impl Vm {
                     ExecutionPhase::Run,
                 );
                 self.stack[stack_index] = slot;
-                result.map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
+                result.map_err(|stop| {
+                    Self::control_stop_to_error(
+                        &self.budget,
+                        &self.last_budget_resource,
+                        stop,
+                        line,
+                    )
+                })
             }
         }
     }
@@ -2278,7 +2449,14 @@ impl Vm {
                 self.checkpoint_cell(&cell);
                 cell.borrow_mut()
                     .list_pop_tracked(&mut self.budget, ExecutionPhase::Run)
-                    .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
+                    .map_err(|stop| {
+                        Self::control_stop_to_error(
+                            &self.budget,
+                            &self.last_budget_resource,
+                            stop,
+                            line,
+                        )
+                    })
             }
             BindingStorage::Stack(stack_index) => {
                 if stack_index >= self.stack.len() {
@@ -2288,7 +2466,14 @@ impl Vm {
                 let mut slot = std::mem::replace(&mut self.stack[stack_index], Value::Null);
                 let result = slot.list_pop_tracked(&mut self.budget, ExecutionPhase::Run);
                 self.stack[stack_index] = slot;
-                result.map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
+                result.map_err(|stop| {
+                    Self::control_stop_to_error(
+                        &self.budget,
+                        &self.last_budget_resource,
+                        stop,
+                        line,
+                    )
+                })
             }
         }
     }
@@ -2317,13 +2502,27 @@ impl Vm {
             // write/append の非 Str 内容は予算付きで 1 回だけ描画してから request を課金する
             // （tree engine の builtin.rs と同じ順序、issue #356）。
             crate::builtin_core::render_fs_content_budgeted(name, &mut args, &mut self.budget)
-                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                .map_err(|stop| {
+                    Self::control_stop_to_error(
+                        &self.budget,
+                        &self.last_budget_resource,
+                        stop,
+                        line,
+                    )
+                })?;
             let request_bytes = crate::builtin_core::host_call_request_bytes(name, &args);
             // host call attempt（§4.1、F-2c Q1 = A）は回数の課金の直前。
             self.charge(ChargeKind::HostCallAttempt, line)?;
             self.budget
                 .charge_host_call_request(request_bytes, ExecutionPhase::Run)
-                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                .map_err(|stop| {
+                    Self::control_stop_to_error(
+                        &self.budget,
+                        &self.last_budget_resource,
+                        stop,
+                        line,
+                    )
+                })?;
             request_bytes
         } else {
             0
@@ -2422,7 +2621,12 @@ impl Vm {
                         self.budget
                             .charge_elements(count, ExecutionPhase::Run)
                             .map_err(|stop| {
-                                Self::control_stop_to_error(&self.budget, stop, line)
+                                Self::control_stop_to_error(
+                                    &self.budget,
+                                    &self.last_budget_resource,
+                                    stop,
+                                    line,
+                                )
                             })?;
                     }
                     crate::builtin_core::dispatch(name, &args, max_collection, line)?
@@ -2436,14 +2640,28 @@ impl Vm {
                 let response_bytes = crate::builtin_core::host_call_response_bytes(name, &result);
                 self.budget
                     .charge_host_response_bytes(response_bytes, ExecutionPhase::Run)
-                    .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                    .map_err(|stop| {
+                        Self::control_stop_to_error(
+                            &self.budget,
+                            &self.last_budget_resource,
+                            stop,
+                            line,
+                        )
+                    })?;
             }
             // builtin が生成した untracked collection を tracked 化しつつ heap 課金し、
             // 新規 String body も課金する（REV-015 案A / Slice 2）。
             let tracked = self
                 .budget
                 .track_result(result, ExecutionPhase::Run)
-                .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                .map_err(|stop| {
+                    Self::control_stop_to_error(
+                        &self.budget,
+                        &self.last_budget_resource,
+                        stop,
+                        line,
+                    )
+                })?;
             return Ok(tracked);
         }
 
@@ -2465,7 +2683,14 @@ impl Vm {
                 };
                 self.budget
                     .charge_input(payload_bytes, ExecutionPhase::Run)
-                    .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
+                    .map_err(|stop| {
+                        Self::control_stop_to_error(
+                            &self.budget,
+                            &self.last_budget_resource,
+                            stop,
+                            line,
+                        )
+                    })?;
                 Ok(value)
             }
             "env" => {
@@ -2486,7 +2711,14 @@ impl Vm {
                 // env が生成した untracked String body を tracked 化しつつ heap 課金する。
                 self.budget
                     .track_result(value, ExecutionPhase::Run)
-                    .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
+                    .map_err(|stop| {
+                        Self::control_stop_to_error(
+                            &self.budget,
+                            &self.last_budget_resource,
+                            stop,
+                            line,
+                        )
+                    })
             }
             "now" => {
                 // C3（CAP-AT-06）: Clock authority を consult する。system clock へは触れない。
@@ -2530,8 +2762,14 @@ impl Vm {
                     .map(|arg| Value::str_constant(arg.clone()))
                     .collect();
                 self.check_collection(argv.len(), line)?;
-                Value::new_list(argv, &mut self.budget, ExecutionPhase::Run)
-                    .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
+                Value::new_list(argv, &mut self.budget, ExecutionPhase::Run).map_err(|stop| {
+                    Self::control_stop_to_error(
+                        &self.budget,
+                        &self.last_budget_resource,
+                        stop,
+                        line,
+                    )
+                })
             }
             "map" => {
                 crate::builtin_core::check_arity(name, &args, 2, line)?;
@@ -2545,8 +2783,14 @@ impl Vm {
                         result.push(value);
                     }
                     Value::check_elements_depth(result.iter(), line)?;
-                    Value::new_list(result, &mut self.budget, ExecutionPhase::Run)
-                        .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
+                    Value::new_list(result, &mut self.budget, ExecutionPhase::Run).map_err(|stop| {
+                        Self::control_stop_to_error(
+                            &self.budget,
+                            &self.last_budget_resource,
+                            stop,
+                            line,
+                        )
+                    })
                 } else {
                     Err(TsumugiError::builtin_arg_type(
                         line, "map", 1, "List", &args[0],
@@ -2566,8 +2810,14 @@ impl Vm {
                             result.push(item.clone());
                         }
                     }
-                    Value::new_list(result, &mut self.budget, ExecutionPhase::Run)
-                        .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))
+                    Value::new_list(result, &mut self.budget, ExecutionPhase::Run).map_err(|stop| {
+                        Self::control_stop_to_error(
+                            &self.budget,
+                            &self.last_budget_resource,
+                            stop,
+                            line,
+                        )
+                    })
                 } else {
                     Err(TsumugiError::builtin_arg_type(
                         line, "filter", 1, "List", &args[0],

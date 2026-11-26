@@ -449,12 +449,29 @@ impl EngineBuilder {
     /// host function の経路が無いため）。host function registry の validation は
     /// registry build 時に済んでいるため、ここでは再検証しない。
     pub fn build(self) -> Result<Engine, ConfigError> {
+        self.build_checked(true)
+    }
+
+    /// **crate 内 test 専用**: 監査 sink と `VmExperimental` の同時設定の拒否
+    /// （[`ConfigError::AuditSinkWithExperimentalBackend`]）だけを通らずに build する
+    /// （audit-vm-triple-b、決定記録 Q2=A（PR #535））。tree と VM の監査付き実行を crate 内の比較
+    /// test で比べるためだけに置く。`#[cfg(test)]` なので crate の外と公開 API からは見えない。
+    #[cfg(test)]
+    pub(crate) fn build_allowing_audit_sink_with_vm_for_test(self) -> Result<Engine, ConfigError> {
+        self.build_checked(false)
+    }
+
+    /// [`Self::build`] の本体。`reject_audit_vm` が `false` なのは crate 内 test の入口だけである。
+    fn build_checked(self, reject_audit_vm: bool) -> Result<Engine, ConfigError> {
         if self.config.backend == Backend::VmExperimental && !self.allow_experimental_backend {
             return Err(ConfigError::ExperimentalBackendNotEnabled);
         }
-        // Phase 6 A-1: 監査 sink は tree-only の run 経路だけが対象。VmExperimental と組むと
-        // tree 実行を VM として監査報告してしまうため、VM の監査 wiring が入るまで拒否する。
-        if self.config.audit_sink.is_some() && self.config.backend == Backend::VmExperimental {
+        // Phase 6 A-1: 監査 sink と VmExperimental の組み合わせは、VM の監査 backpressure
+        // （audit-vm-triple-c）が入るまで拒否する。
+        if reject_audit_vm
+            && self.config.audit_sink.is_some()
+            && self.config.backend == Backend::VmExperimental
+        {
             return Err(ConfigError::AuditSinkWithExperimentalBackend);
         }
         // vm-engine-run-route（決定記録 Q2=A）: VM には登録 host function を呼ぶ経路が無いので、
@@ -2016,6 +2033,23 @@ impl ExecutionContext {
             None => self.evaluator.budget_usage(),
         }
     }
+
+    /// 実行に使った backend（VM の状態があれば VM、無ければ tree）が退避した `BudgetExceeded` の
+    /// 細粒度 resource を取り出す（監査 Terminal 用、§7.2。audit-vm-triple-b）。読み取ると消費する。
+    fn take_pending_budget_resource(&self) -> Option<crate::budget::BudgetResource> {
+        match &self.vm {
+            Some(state) => state.vm.take_pending_budget_resource(),
+            None => self.evaluator.take_pending_budget_resource(),
+        }
+    }
+
+    /// 実行に使った backend の `host_effects_may_remain`（監査 Terminal 用。audit-vm-triple-b）。
+    fn host_effects_may_remain(&self) -> bool {
+        match &self.vm {
+            Some(state) => state.vm.host_effects_may_remain(),
+            None => self.evaluator.host_effects_may_remain(),
+        }
+    }
 }
 
 /// `VmExperimental` の engine の [`ExecutionContext`] が持つ VM の状態（vm-engine-run-route）。
@@ -2368,7 +2402,7 @@ impl Engine {
                     return AuditedOutcome::Outcome(Box::new(ExecutionOutcome::InternalFailure {
                         fault_id,
                         safe_message: internal_fault_message(fault_id),
-                        usage: context.evaluator.budget_usage(),
+                        usage: context.budget_usage(),
                     }));
                 }
             };
@@ -2517,6 +2551,19 @@ impl Engine {
             if context.panic_in_run_for_test {
                 panic!("injected run-boundary panic (test only)");
             }
+            // audit-vm-triple-b: VM の状態を持つ context は VM の driver で回す（buffer を terminal の後に
+            // 1 回で配送する）。journal・ack・Terminal の組み立ては tree と同じ関数を通す。
+            if context.vm.is_some() {
+                return self.run_audited_driver_vm(
+                    context,
+                    &program,
+                    root_source_bytes,
+                    &graph,
+                    request,
+                    &mut journal,
+                    &mut delivery,
+                );
+            }
             self.run_audited_driver(
                 context,
                 &program,
@@ -2531,7 +2578,7 @@ impl Engine {
             Err(fault_id) => AuditDrive::Terminal(Box::new(ExecutionOutcome::InternalFailure {
                 fault_id,
                 safe_message: internal_fault_message(fault_id),
-                usage: context.evaluator.budget_usage(),
+                usage: context.budget_usage(),
             })),
         };
 
@@ -2556,7 +2603,7 @@ impl Engine {
         // control_stop_to_error は細粒度 resource を粗い ErrorKind へ縮約するため、原本が無いと
         // String/Source/I-O 系が代表値へ化ける）。原本が無い場合のみ ErrorKind から復元する。
         let exceeded_resource = if matches!(outcome, ExecutionOutcome::BudgetExceeded { .. }) {
-            context.evaluator.take_pending_budget_resource()
+            context.take_pending_budget_resource()
         } else {
             None
         };
@@ -2571,7 +2618,7 @@ impl Engine {
             usage: outcome_usage(&outcome),
             import_graph_hash: Some(import_graph_hash),
             context_committed,
-            host_effects_may_remain: context.evaluator.host_effects_may_remain(),
+            host_effects_may_remain: context.host_effects_may_remain(),
         };
         let terminal_envelope = delivery.envelope(journal.next_sequence(), terminal_event);
         let audited = match journal.append_terminal(&terminal_envelope) {
@@ -2727,6 +2774,51 @@ impl Engine {
         AuditDrive::Terminal(Box::new(outcome))
     }
 
+    /// 監査付きの VM の driver（audit-vm-triple-b）。
+    ///
+    /// sink 無しの [`Self::execute_program_vm`] と同じ手順（据え直し → pre-cancel → 注入 → 展開・課金 →
+    /// compile・実行 → 写像 → capability の後始末）で実行し、注入の後・実行の前に engine の redaction
+    /// policy を VM へ渡す（tree の [`Self::run_audited_driver`] と同じ位置）。VM は slice の境界を
+    /// 持たないので、terminal の後に VM の buffer（host-call triple と flush 点の `BudgetCharged`）→
+    /// accumulator に残る `BudgetCharged` の順で 1 回だけ配送する（[`AuditDelivery::flush_events`]、
+    /// §8 規則3/7/9）。`audit_slice_fuel` は見ない。配送の途中で監査が失敗したら、実行の outcome を
+    /// `terminal_outcome_from(&outcome, None)` で写した `withheld` を添えて `Failed` を返す（tree の
+    /// terminal の slice の後の失敗と同じ規則）。
+    #[allow(clippy::too_many_arguments)]
+    fn run_audited_driver_vm(
+        &self,
+        context: &mut ExecutionContext,
+        program: &Program,
+        root_source_bytes: u64,
+        graph: &crate::module::GraphModules,
+        request: ExecutionRequest,
+        journal: &mut crate::audit::AuditJournal,
+        delivery: &mut AuditDelivery,
+    ) -> AuditDrive {
+        let Some(state) = context.vm.as_deref_mut() else {
+            return AuditDrive::Terminal(Box::new(internal_failure(
+                "VM の状態を持たない実行コンテキストです",
+            )));
+        };
+        // pre-cancel: script work 0。begin_execution が buffer を空にしているので flush 不要。
+        if let Err(pre_cancel) = self.install_vm_execution_state(state, request) {
+            return AuditDrive::Terminal(pre_cancel);
+        }
+        // Phase 6 R-1: host-call payload 構築へ注入 redaction policy を渡す（§9.1）。
+        state.vm.set_redaction_policy(self.redaction_policy.clone());
+        let outcome = Self::run_vm_transactional(state, program, root_source_bytes, graph);
+        state
+            .vm
+            .set_capabilities(crate::capability::CapabilitySet::empty());
+        if let Err(failure) = delivery.flush_events(context, journal) {
+            return AuditDrive::Failed {
+                withheld: crate::audit::terminal_outcome_from(&outcome, None),
+                failure,
+            };
+        }
+        AuditDrive::Terminal(Box::new(outcome))
+    }
+
     /// [`Self::run`] の本体（precondition guard の後）。ここから返る InternalFailure は
     /// すべて呼び出し元が context を poison する（第10節 規則4）。
     fn run_inner(
@@ -2774,22 +2866,9 @@ impl Engine {
         let Some(state) = context.vm.as_deref_mut() else {
             return internal_failure("VM の状態を持たない実行コンテキストです");
         };
-        // 1. request の budget・clock・token を据え直す（使用量と peaks を 0 から、live heap は持ち越す）。
-        state
-            .vm
-            .begin_execution(request.budget, request.clock, request.cancellation.clone());
-        // 2. pre-cancel は命令 0 の Cancelled（language-state を変えない）。
-        if request.cancellation.is_cancelled() {
-            return ExecutionOutcome::Cancelled {
-                usage: state.vm.budget_usage(),
-            };
+        if let Err(pre_cancel) = self.install_vm_execution_state(state, request) {
+            return *pre_cancel;
         }
-        // 3. 引数・capability・言語 revision を注入する。
-        state.vm.set_script_args(request.arguments);
-        state.vm.set_capabilities(request.capabilities);
-        state
-            .vm
-            .set_language_revision(self.config.language_revision);
 
         let outcome = Self::run_vm_transactional(state, program, root_source_bytes, graph);
 
@@ -2798,6 +2877,33 @@ impl Engine {
             .vm
             .set_capabilities(crate::capability::CapabilitySet::empty());
         outcome
+    }
+
+    /// VM の実行前の据え直しと注入（[`Self::execute_program_vm`] の手順 1〜3。監査付きの
+    /// [`Self::run_audited_driver_vm`] と共有する。audit-vm-triple-b）。`Err` は pre-cancel の
+    /// `Cancelled`（命令 0、language-state を変えない）。
+    fn install_vm_execution_state(
+        &self,
+        state: &mut VmContextState,
+        request: ExecutionRequest,
+    ) -> Result<(), Box<ExecutionOutcome>> {
+        // 1. request の budget・clock・token を据え直す（使用量と peaks を 0 から、live heap は持ち越す）。
+        state
+            .vm
+            .begin_execution(request.budget, request.clock, request.cancellation.clone());
+        // 2. pre-cancel は命令 0 の Cancelled（language-state を変えない）。
+        if request.cancellation.is_cancelled() {
+            return Err(Box::new(ExecutionOutcome::Cancelled {
+                usage: state.vm.budget_usage(),
+            }));
+        }
+        // 3. 引数・capability・言語 revision を注入する。
+        state.vm.set_script_args(request.arguments);
+        state.vm.set_capabilities(request.capabilities);
+        state
+            .vm
+            .set_language_revision(self.config.language_revision);
+        Ok(())
     }
 
     /// 展開・課金・compile・実行を 1 つの transaction として回し、outcome へ写す（vm-engine-run-route）。
@@ -3447,6 +3553,12 @@ impl AuditDelivery {
                 }
             }
             AuditSubmit::Failed(_) => Err(AuditFailure::Sink),
+            AuditSubmit::Pending(ticket) if context.vm.is_some() => {
+                // audit-vm-triple-b（決定記録 Q1=A、PR #539）: VM の経路は backpressure の
+                // Yielded/Resumed を持たない（audit-vm-triple-c）。ticket を cancel して fail-closed にする。
+                ticket.cancel();
+                Err(AuditFailure::Sink)
+            }
             AuditSubmit::Pending(ticket) => {
                 // backpressure 突入（§10.2）。順序厳守（§4.6 linearization）:
                 // 1) Yielded(AuditBackpressure) を評価器の単一 poll_index カウンタで記録。
@@ -3535,14 +3647,25 @@ impl AuditDelivery {
 
         loop {
             // host-call triple・Yielded/Resumed・slice 境界の BudgetCharged（temporal 順）。
-            let events = context.evaluator.drain_audit_events();
             // accumulator に残る BudgetCharged（§7.3 / §8 規則7、per-slice flush）。accumulator から
             // 直接 drain した分はここで audit drain queue へ計上し直す（B-2: 確定済み分は accumulator
             // 側の合計で数えていたが、drain でそこから外れるため。ack 時に他の event と同様に外す）。
-            let charges = context.evaluator.drain_budget_charges();
-            for charge in &charges {
-                context.evaluator.audit_queue_admit(charge);
-            }
+            // audit-vm-triple-b: VM の状態を持つ context は VM の buffer と accumulator を読む。VM には
+            // audit drain queue が無いので計上も解放もしない（queue は audit-vm-triple-c）。
+            let (events, charges) = match context.vm.as_deref_mut() {
+                Some(state) => (
+                    state.vm.drain_audit_events(),
+                    state.vm.drain_budget_charges(),
+                ),
+                None => {
+                    let events = context.evaluator.drain_audit_events();
+                    let charges = context.evaluator.drain_budget_charges();
+                    for charge in &charges {
+                        context.evaluator.audit_queue_admit(charge);
+                    }
+                    (events, charges)
+                }
+            };
 
             // backpressure deliver が評価器へ新しい Yielded/Resumed を積んだ場合に備え、全 buffer が
             // 空になるまで繰り返す。この pass で何も drain できなければ終了。
@@ -3563,7 +3686,9 @@ impl AuditDelivery {
                     Arc::from(vec![self.envelope(appended_seq, event.clone())]);
                 self.deliver(context, &batch, appended_seq)?;
                 // sink の ack を得たので audit drain queue から外す（B-2: in-flight は ack まで残る）。
-                context.evaluator.audit_queue_release(&event);
+                if context.vm.is_none() {
+                    context.evaluator.audit_queue_release(&event);
+                }
             }
         }
         // 全 buffer を deliver し終えたので audit drain queue は 0 に戻っている（B-2、§10.2）。
@@ -7999,6 +8124,900 @@ mod lcb_tests {
         assert!(
             live_closure - live_direct > heap_size::tree_function(0),
             "closure の retained code（§5.3 A-1）の分も含む: {live_closure} vs {live_direct}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// audit-vm-triple-b（AVT-AT-06〜10）: `Engine::run_audited` の VM 経路を tree と比べる crate 内の
+// 比較 test（決定記録 Q2=A（PR #535）の条件 2）。同じ source・capability・budget・`execution_id`・
+// `FakeClock` を `TreeWalk` と `VmExperimental` の監査 sink 付きの engine に流し、sink が受け取った
+// envelope の列と `AuditedOutcome` を比べる。比較から除くのは `BudgetCharged { resource: HeapBytes }`
+// （残りの順序は保つ。audit-vm-triple-a の決定記録 Q1=A（PR #531））と Started の `backend` だけである。
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod audit_vm_triple_b_tests {
+    use super::*;
+    use crate::audit::{
+        AuditEnvelope, AuditEvent, AuditFailure, AuditSink, InMemoryAuditSink, RedactionMode,
+        RedactionPolicy, ScriptedAuditSink, ScriptedResponse, TerminalOutcome,
+    };
+    use crate::budget::{BudgetConfig, BudgetResource, CancellationToken, FakeClock};
+    use crate::capability::{
+        AdapterError, CapabilityCallContext, CapabilitySet, DataClassification,
+        FilesystemCapability, FilesystemRoot, FsOperation, ModuleChunk, ModuleResolver,
+        ModuleSource, MountName, OsDirectoryHandle, ResolveRequest, ResolvedModule, SymlinkPolicy,
+    };
+    use std::collections::BTreeSet;
+    use std::num::{NonZeroU128, NonZeroUsize};
+
+    /// filesystem の grant の形（allow・deny（未 grant・operation 不足）の経路を作る）。
+    #[derive(Clone, Copy, Debug)]
+    enum Grant {
+        None,
+        ReadOnly,
+        ReadWrite,
+    }
+
+    /// 1 回の run の入力（tree と VM に同じものを流す）。
+    #[derive(Clone)]
+    struct Input {
+        source: &'static str,
+        grant: Grant,
+        /// ProcessExit を grant するか。
+        exit: bool,
+        /// import の module（正規化済み specifier → source）。空なら resolver を grant しない。
+        modules: &'static [(&'static str, &'static str)],
+        /// budget の書き換え。
+        tweak: fn(&mut BudgetConfig),
+        /// 実行前に cancel 済みの token を載せるか。
+        pre_cancel: bool,
+        /// run の開始時点で deadline を過ぎた clock にするか。
+        deadline_passed: bool,
+    }
+
+    fn no_tweak(_: &mut BudgetConfig) {}
+
+    fn input(source: &'static str, grant: Grant) -> Input {
+        Input {
+            source,
+            grant,
+            exit: false,
+            modules: &[],
+            tweak: no_tweak,
+            pre_cancel: false,
+            deadline_passed: false,
+        }
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!("tsg-avtb-{}-{}-{}", tag, std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        path
+    }
+
+    /// in-memory な module source（resolver が返す）。
+    struct InMemorySource {
+        bytes: Vec<u8>,
+        offset: usize,
+    }
+    impl ModuleSource for InMemorySource {
+        fn read_chunk(
+            &mut self,
+            _context: &mut CapabilityCallContext<'_>,
+            max_bytes: NonZeroUsize,
+        ) -> Result<ModuleChunk, AdapterError> {
+            if self.offset >= self.bytes.len() {
+                return Ok(ModuleChunk::Eof);
+            }
+            let end = (self.offset + max_bytes.get()).min(self.bytes.len());
+            let chunk = self.bytes[self.offset..end].to_vec();
+            self.offset = end;
+            Ok(ModuleChunk::Bytes(chunk))
+        }
+    }
+
+    struct StaticResolver(&'static [(&'static str, &'static str)]);
+    impl ModuleResolver for StaticResolver {
+        fn policy_id(&self) -> NonZeroU128 {
+            NonZeroU128::new(97).expect("non-zero")
+        }
+        fn knows_mount(&self, mount: &str) -> bool {
+            mount == "default"
+        }
+        fn resolve(
+            &self,
+            _context: &mut CapabilityCallContext<'_>,
+            request: ResolveRequest<'_>,
+        ) -> Result<ResolvedModule, AdapterError> {
+            let text = self
+                .0
+                .iter()
+                .find(|(spec, _)| *spec == request.specifier)
+                .map(|(_, text)| *text)
+                .ok_or_else(|| AdapterError::Host("not found".to_string()))?;
+            Ok(ResolvedModule {
+                id: ModuleId::new(request.specifier)
+                    .map_err(|e| AdapterError::Host(format!("bad id: {e:?}")))?,
+                source: Box::new(InMemorySource {
+                    bytes: text.as_bytes().to_vec(),
+                    offset: 0,
+                }),
+                classification: DataClassification::Public,
+            })
+        }
+    }
+
+    fn capabilities(input: &Input, base: &std::path::Path) -> CapabilitySet {
+        let mut builder = CapabilitySet::builder();
+        let ops: Option<BTreeSet<FsOperation>> = match input.grant {
+            Grant::None => None,
+            Grant::ReadOnly => Some([FsOperation::Read].into_iter().collect()),
+            Grant::ReadWrite => Some(
+                [FsOperation::Read, FsOperation::Write, FsOperation::Create]
+                    .into_iter()
+                    .collect(),
+            ),
+        };
+        if let Some(ops) = ops {
+            let pid = NonZeroU128::new(1).expect("non-zero");
+            let mount = MountName::new("data").expect("mount");
+            let handle = OsDirectoryHandle::new(base.to_path_buf(), pid, SymlinkPolicy::DenyAll);
+            let root =
+                FilesystemRoot::new(mount, pid, ops, SymlinkPolicy::DenyAll, Arc::new(handle))
+                    .expect("root");
+            let fs = FilesystemCapability::new(vec![root]).expect("fs");
+            builder = builder.filesystem(fs).expect("grant filesystem");
+        }
+        if input.exit {
+            builder = builder
+                .process_exit(crate::capability::ProcessExit::new(
+                    NonZeroU128::new(2).expect("non-zero"),
+                ))
+                .expect("grant exit");
+        }
+        if !input.modules.is_empty() {
+            builder = builder
+                .module_resolver(Arc::new(StaticResolver(input.modules)))
+                .expect("grant resolver");
+        }
+        builder.build()
+    }
+
+    /// sink が受け取った envelope の snapshot を読む関数。
+    type Recorded = Box<dyn Fn() -> Vec<AuditEnvelope>>;
+
+    /// 片方の backend の engine・sink・context・一時 dir。
+    struct Side {
+        engine: Engine,
+        recorded: Recorded,
+        ctx: ExecutionContext,
+        dir: std::path::PathBuf,
+    }
+
+    impl Drop for Side {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn engine_for(
+        backend: Backend,
+        sink: Arc<dyn AuditSink>,
+        policy: Option<RedactionPolicy>,
+    ) -> Engine {
+        let mut builder = Engine::builder()
+            .config(EngineConfig {
+                backend,
+                language_revision: LanguageRevision::CURRENT,
+                audit_sink: None,
+                audit_slice_fuel: None,
+            })
+            .allow_experimental_backend(true)
+            .audit_sink(sink);
+        if let Some(policy) = policy {
+            builder = builder.audit_redaction_policy_for_test(policy);
+        }
+        builder
+            .build_allowing_audit_sink_with_vm_for_test()
+            .expect("build")
+    }
+
+    fn side_with(
+        backend: Backend,
+        plan: Option<Vec<ScriptedResponse>>,
+        policy: Option<RedactionPolicy>,
+    ) -> Side {
+        let (sink, recorded): (Arc<dyn AuditSink>, Recorded) = match plan {
+            None => {
+                let sink = Arc::new(InMemoryAuditSink::new());
+                let read = Arc::clone(&sink);
+                (sink, Box::new(move || read.snapshot()))
+            }
+            Some(plan) => {
+                let sink = Arc::new(ScriptedAuditSink::new(plan));
+                let read = Arc::clone(&sink);
+                (sink, Box::new(move || read.snapshot()))
+            }
+        };
+        let engine = engine_for(backend, Arc::clone(&sink), policy);
+        let ctx = ExecutionContext::new(&engine);
+        let tag = match backend {
+            Backend::TreeWalk => "tree",
+            Backend::VmExperimental => "vm",
+        };
+        Side {
+            engine,
+            recorded,
+            ctx,
+            dir: temp_dir(tag),
+        }
+    }
+
+    fn side(backend: Backend) -> Side {
+        side_with(backend, None, None)
+    }
+
+    fn link_for(side: &Side, input: &Input) -> LinkedScript {
+        let script = side
+            .engine
+            .compile(
+                Source::new(SourceId::new("root").expect("id"), input.source),
+                &CompileOptions {
+                    retain_source: true,
+                },
+            )
+            .expect("compile");
+        let clock = FakeClock::new();
+        let budget = BudgetConfig::standard(&clock).expect("standard budget");
+        let request = LinkRequest::new(
+            ExecutionId::new(NonZeroU128::new(1).expect("non-zero")),
+            capabilities(input, &side.dir),
+            budget,
+        );
+        side.engine.link(&script, request).expect("link")
+    }
+
+    fn request_for(
+        side: &Side,
+        input: &Input,
+        id: u128,
+        clock: &Arc<FakeClock>,
+    ) -> ExecutionRequest {
+        let mut budget = BudgetConfig::standard(clock.as_ref()).expect("standard budget");
+        (input.tweak)(&mut budget);
+        let mut request = ExecutionRequest::new(
+            budget,
+            Arc::clone(clock) as Arc<dyn crate::budget::MonotonicClock>,
+        )
+        .expect("同 domain")
+        .with_capabilities(capabilities(input, &side.dir))
+        .with_execution_id(ExecutionId::new(NonZeroU128::new(id).expect("non-zero")));
+        if input.pre_cancel {
+            let token = CancellationToken::new();
+            token.cancel();
+            request = request.cancellation(token);
+        }
+        if input.deadline_passed {
+            clock.set(budget.deadline.as_nanos());
+        }
+        request
+    }
+
+    /// 1 回 run し、この run で sink が新しく受け取った envelope と outcome を返す。
+    fn run(
+        side: &mut Side,
+        input: &Input,
+        id: u128,
+        clock: &Arc<FakeClock>,
+    ) -> (Vec<AuditEnvelope>, AuditedOutcome) {
+        let linked = link_for(side, input);
+        let request = request_for(side, input, id, clock);
+        let before = (side.recorded)().len();
+        let outcome = side.engine.run_audited(&linked, &mut side.ctx, request);
+        let after = (side.recorded)();
+        (after[before..].to_vec(), outcome)
+    }
+
+    /// heap の数値（`live_heap_bytes`・`reserved_heap_bytes`・`peak_heap_bytes`）を 0 に揃える。
+    ///
+    /// absolute heap は engine 固有の artifact・frame 構造で決まり backend 間で一致しない（§15.5・
+    /// audit-vm-triple-a の決定記録 Q1=A（PR #531））。heap 以外の counter と peaks は exact に比べる。
+    fn mask_heap(usage: &mut BudgetUsage) {
+        usage.live_heap_bytes = 0;
+        usage.reserved_heap_bytes = 0;
+        usage.peak_heap_bytes = 0;
+    }
+
+    fn is_heap_charge(env: &AuditEnvelope) -> bool {
+        matches!(
+            env.event,
+            AuditEvent::BudgetCharged {
+                resource: BudgetResource::HeapBytes,
+                ..
+            }
+        )
+    }
+
+    /// 比較の対象にする envelope 列。
+    ///
+    /// - `HeapBytes` の `BudgetCharged` を除き、残りの順序は保つ（PR #531 の Q1=A）。除いた分だけ後ろの
+    ///   sequence がずれるので、各 envelope の sequence から「それより前に除いた heap の event の数」を引く
+    ///   （heap の event が無い run では元の sequence そのもので、sink が受け取らなかった sequence の
+    ///   gap もそのまま残る）。
+    /// - Started の `backend` を `TreeWalk` に揃える（値は `backend` と一致することをここで assert する）。
+    /// - Terminal の `usage` の heap の数値を揃える（[`mask_heap`]）。
+    fn comparable(envelopes: &[AuditEnvelope], backend: Backend) -> Vec<AuditEnvelope> {
+        let heap_seqs: Vec<u64> = envelopes
+            .iter()
+            .filter(|env| is_heap_charge(env))
+            .map(|env| env.sequence)
+            .collect();
+        envelopes
+            .iter()
+            .filter(|env| !is_heap_charge(env))
+            .cloned()
+            .map(|mut env| {
+                let removed_before = heap_seqs.iter().filter(|&&seq| seq < env.sequence).count();
+                env.sequence -= removed_before as u64;
+                match &mut env.event {
+                    AuditEvent::ExecutionStarted {
+                        backend: started, ..
+                    } => {
+                        assert_eq!(*started, backend, "Started の backend");
+                        *started = Backend::TreeWalk;
+                    }
+                    AuditEvent::Terminal { usage, .. } => mask_heap(usage),
+                    _ => {}
+                }
+                env
+            })
+            .collect()
+    }
+
+    /// `AuditedOutcome` の比較用の表現（usage の heap の数値だけを揃える）。
+    fn comparable_outcome(outcome: &AuditedOutcome) -> String {
+        match outcome {
+            AuditedOutcome::Outcome(outcome) => {
+                let mut outcome = (**outcome).clone();
+                match &mut outcome {
+                    ExecutionOutcome::Completed { usage }
+                    | ExecutionOutcome::Exited { usage, .. }
+                    | ExecutionOutcome::RuntimeError { usage, .. }
+                    | ExecutionOutcome::BudgetExceeded { usage, .. }
+                    | ExecutionOutcome::DeadlineExceeded { usage }
+                    | ExecutionOutcome::Cancelled { usage }
+                    | ExecutionOutcome::InternalFailure { usage, .. } => mask_heap(usage),
+                }
+                format!("Outcome({outcome:?})")
+            }
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// tree と VM で同じ入力を 1 回ずつ run し、比較の対象の列と outcome が一致することを確かめる。
+    fn assert_parity_on(
+        case: &str,
+        tree: &mut Side,
+        vm: &mut Side,
+        input: &Input,
+        id: u128,
+    ) -> (Vec<AuditEnvelope>, AuditedOutcome) {
+        // tree と VM で同じ FakeClock を使う（budget の deadline の clock_id も一致させる）。
+        let clock = Arc::new(FakeClock::new());
+        let (tree_envs, tree_out) = run(tree, input, id, &clock);
+        if input.deadline_passed {
+            clock.set(0);
+        }
+        let (vm_envs, vm_out) = run(vm, input, id, &clock);
+        let tree_cmp = comparable(&tree_envs, Backend::TreeWalk);
+        let vm_cmp = comparable(&vm_envs, Backend::VmExperimental);
+        assert_eq!(
+            tree_cmp.len(),
+            vm_cmp.len(),
+            "case {case}: 件数\ntree: {tree_cmp:#?}\nvm: {vm_cmp:#?}"
+        );
+        for (i, (t, v)) in tree_cmp.iter().zip(&vm_cmp).enumerate() {
+            assert_eq!(t, v, "case {case}: envelope {i}");
+        }
+        assert_eq!(
+            comparable_outcome(&tree_out),
+            comparable_outcome(&vm_out),
+            "case {case}: AuditedOutcome"
+        );
+        (tree_cmp, tree_out)
+    }
+
+    fn assert_parity(case: &str, input: &Input) -> (Vec<AuditEnvelope>, AuditedOutcome) {
+        let mut tree = side(Backend::TreeWalk);
+        let mut vm = side(Backend::VmExperimental);
+        assert_parity_on(case, &mut tree, &mut vm, input, 501)
+    }
+
+    const ALLOW_SOURCE: &str = "let i = 0\nwhile i < 3\n    i = i + 1\nend\n\
+    write_file(\"@data/a.txt\", \"hello\")\n\
+    append_file(\"@data/a.txt\", 12)\n\
+    let c = read_file(\"@data/a.txt\")\n\
+    let ls = read_lines(\"@data/a.txt\")\n";
+
+    const ALL_CAUGHT_SOURCE: &str = "let n = 0\n\
+    try\n    read_file(\"@data/missing.txt\")\ncatch e\n    n = n + 1\nend\n\
+    try\n    read_lines(\"@data/missing.txt\")\ncatch e\n    n = n + 1\nend\n\
+    try\n    write_file(\"@data/w.txt\", \"x\")\ncatch e\n    n = n + 1\nend\n\
+    try\n    append_file(\"@data/w.txt\", [1, 2])\ncatch e\n    n = n + 1\nend\n";
+
+    fn host_call_count(envs: &[AuditEnvelope]) -> usize {
+        envs.iter()
+            .filter(|e| matches!(e.event, AuditEvent::HostCallStarted { .. }))
+            .count()
+    }
+
+    fn terminal_of(envs: &[AuditEnvelope]) -> &AuditEvent {
+        let last = envs.last().expect("Terminal");
+        assert!(
+            matches!(last.event, AuditEvent::Terminal { .. }),
+            "末尾は Terminal: {last:?}"
+        );
+        &last.event
+    }
+
+    /// AVT-AT-06: fs 4 builtin の allow・deny（未 grant・operation 不足）・host error、host call の無い
+    /// source、import する source で、sink が受け取る envelope（全 field・sequence・順序）が tree と一致する。
+    #[test]
+    fn avt_at_06_event_sequences_match_tree() {
+        let (envs, _) = assert_parity("allow", &input(ALLOW_SOURCE, Grant::ReadWrite));
+        assert_eq!(host_call_count(&envs), 4, "allow");
+        let (envs, _) = assert_parity("ungranted", &input(ALL_CAUGHT_SOURCE, Grant::None));
+        assert_eq!(host_call_count(&envs), 4, "ungranted");
+        let (envs, _) = assert_parity("read-only", &input(ALL_CAUGHT_SOURCE, Grant::ReadOnly));
+        assert_eq!(host_call_count(&envs), 4, "read-only");
+        let (envs, _) = assert_parity(
+            "uncaught-host-error",
+            &input("read_file(\"@data/missing.txt\")\n", Grant::ReadWrite),
+        );
+        assert_eq!(host_call_count(&envs), 1, "uncaught-host-error");
+        let (envs, _) = assert_parity(
+            "no-host-call",
+            &input("let x = 1 + 2\nlet s = \"a\" + \"b\"\n", Grant::None),
+        );
+        assert_eq!(host_call_count(&envs), 0, "no-host-call");
+
+        // import（link の課金の BudgetCharged を含む）。
+        let mut import = input("import \"m\"\nlet y = 1\n", Grant::None);
+        import.modules = &[("@default/m", "let a = 1\n")];
+        let (envs, _) = assert_parity("import", &import);
+        assert!(
+            envs.iter().any(|e| matches!(
+                e.event,
+                AuditEvent::BudgetCharged {
+                    resource: BudgetResource::SourceBytes,
+                    ..
+                }
+            )),
+            "import: source の BudgetCharged: {envs:#?}"
+        );
+
+        // 同じ context で 2 回続けて run した 2 回目も sequence・operation_id が 0 から振られて一致する。
+        let mut tree = side(Backend::TreeWalk);
+        let mut vm = side(Backend::VmExperimental);
+        let first = input(ALLOW_SOURCE, Grant::ReadWrite);
+        assert_parity_on("reuse-1", &mut tree, &mut vm, &first, 601);
+        let (envs, _) = assert_parity_on("reuse-2", &mut tree, &mut vm, &first, 602);
+        assert_eq!(envs[0].sequence, 0, "2 回目の sequence は 0 から");
+        let first_op = envs.iter().find_map(|e| match e.event {
+            AuditEvent::HostCallStarted { operation_id, .. } => Some(operation_id),
+            _ => None,
+        });
+        assert_eq!(first_op, Some(0), "2 回目の operation_id は 0 から");
+    }
+
+    fn terminal_fields(envs: &[AuditEnvelope]) -> (TerminalOutcome, bool, bool) {
+        match terminal_of(envs) {
+            AuditEvent::Terminal {
+                outcome,
+                context_committed,
+                host_effects_may_remain,
+                ..
+            } => (
+                outcome.clone(),
+                *context_committed,
+                *host_effects_may_remain,
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    /// AVT-AT-07: `Completed`・`RuntimeError`・`BudgetExceeded`（代表値と原本が違う resource）・`Exited`・
+    /// pre-cancel の `Cancelled`・開始時点で過ぎた deadline の `DeadlineExceeded` で、Terminal の全 field と
+    /// `AuditedOutcome` が tree と一致する。
+    #[test]
+    fn avt_at_07_terminal_matches_tree() {
+        let (envs, _) = assert_parity(
+            "completed",
+            &input(
+                "let x = 1
+",
+                Grant::None,
+            ),
+        );
+        assert_eq!(
+            terminal_fields(&envs),
+            (TerminalOutcome::Completed, true, false)
+        );
+
+        let (envs, out) = assert_parity(
+            "runtime-error",
+            &input(
+                "let x = 1
+let y = undefined_name
+",
+                Grant::None,
+            ),
+        );
+        assert!(matches!(
+            out.outcome(),
+            Some(ExecutionOutcome::RuntimeError { .. })
+        ));
+        assert_eq!(
+            terminal_fields(&envs),
+            (TerminalOutcome::RuntimeError, false, false)
+        );
+
+        // 出力 byte の超過: ErrorKind（IoLimit）から復元する代表値（InputCalls）ではなく、VM が退避した
+        // 原本の OutputBytes が載る。
+        let mut output = input("print(\"hello world\")\n", Grant::None);
+        output.tweak = |budget| budget.max_output_bytes = 2;
+        let (envs, out) = assert_parity("budget-output-bytes", &output);
+        assert!(matches!(
+            out.outcome(),
+            Some(ExecutionOutcome::BudgetExceeded { .. })
+        ));
+        assert_eq!(
+            terminal_fields(&envs).0,
+            TerminalOutcome::BudgetExceeded(BudgetResource::OutputBytes)
+        );
+
+        // 書き込みの host call の後の exit。
+        let mut exited = input(
+            "write_file(\"@data/e.txt\", \"x\")\nexit(3)\nlet z = 1\n",
+            Grant::ReadWrite,
+        );
+        exited.exit = true;
+        let (envs, out) = assert_parity("exited", &exited);
+        assert!(matches!(
+            out.outcome(),
+            Some(ExecutionOutcome::Exited { .. })
+        ));
+        assert_eq!(
+            terminal_fields(&envs),
+            (TerminalOutcome::Exited(3), true, true)
+        );
+
+        // pre-cancel: Started と Terminal だけ。
+        let mut cancelled = input("write_file(\"@data/c.txt\", \"x\")\n", Grant::ReadWrite);
+        cancelled.pre_cancel = true;
+        let (envs, _) = assert_parity("pre-cancel", &cancelled);
+        assert_eq!(envs.len(), 2, "pre-cancel: {envs:#?}");
+        assert_eq!(
+            terminal_fields(&envs),
+            (TerminalOutcome::Cancelled, false, false)
+        );
+
+        // run の開始時点で過ぎた deadline。
+        let mut deadline = input(
+            "let x = 1
+let y = 2
+",
+            Grant::None,
+        );
+        deadline.deadline_passed = true;
+        let (envs, _) = assert_parity("deadline", &deadline);
+        assert_eq!(terminal_fields(&envs).0, TerminalOutcome::DeadlineExceeded);
+    }
+
+    /// `InMemoryAuditSink` で 1 回 run したときの envelope 数と、最初の `HostCallStarted` の位置。
+    /// `ScriptedAuditSink` の応答計画を backend ごとに組むために使う（tree だけが `HeapBytes` の
+    /// event を持つことがあり、同じ event の位置が backend で違いうる）。
+    fn dry_run(backend: Backend, input: &Input) -> (usize, Option<usize>) {
+        let mut side = side(backend);
+        let (envs, _) = run(&mut side, input, 700, &Arc::new(FakeClock::new()));
+        let host = envs
+            .iter()
+            .position(|e| matches!(e.event, AuditEvent::HostCallStarted { .. }));
+        (envs.len(), host)
+    }
+
+    /// `fail_at` 番目の submit（0 始まり）で `Fail` を返す計画で tree と VM を run し、比べる。
+    fn assert_fail_parity(
+        case: &str,
+        input: &Input,
+        fail_at: impl Fn(Backend) -> usize,
+    ) -> (Vec<AuditEnvelope>, AuditedOutcome) {
+        let plan = |backend: Backend| {
+            let mut plan = vec![ScriptedResponse::AckCorrect; fail_at(backend)];
+            plan.push(ScriptedResponse::Fail);
+            plan
+        };
+        let mut tree = side_with(Backend::TreeWalk, Some(plan(Backend::TreeWalk)), None);
+        let mut vm = side_with(
+            Backend::VmExperimental,
+            Some(plan(Backend::VmExperimental)),
+            None,
+        );
+        assert_parity_on(case, &mut tree, &mut vm, input, 801)
+    }
+
+    /// AVT-AT-08: Started・host-call event・Terminal の各 `Failed` で、sink が受け取る列と `AuditFailed`
+    /// の `withheld`・`failure` が tree と一致する。VM の経路の `Pending` は ticket を cancel して
+    /// `AuditFailure::Sink` にし、`Yielded`/`Resumed` を出さない。
+    #[test]
+    fn avt_at_08_fail_closed_matches_tree() {
+        let source = input(
+            "let x = 1\nwrite_file(\"@data/f.txt\", \"x\")\nlet y = 2\n",
+            Grant::ReadWrite,
+        );
+
+        // Started の Failed: emergency slot の Terminal(AuditFailure) と AuditFailed。VM は 1 文も実行しない。
+        let mut tree = side_with(Backend::TreeWalk, Some(vec![ScriptedResponse::Fail]), None);
+        let mut vm = side_with(
+            Backend::VmExperimental,
+            Some(vec![ScriptedResponse::Fail]),
+            None,
+        );
+        let (_, out) = assert_parity_on("started-fail", &mut tree, &mut vm, &source, 811);
+        match &out {
+            AuditedOutcome::AuditFailed { withheld, failure } => {
+                assert_eq!(*withheld, TerminalOutcome::AuditFailure);
+                assert_eq!(*failure, AuditFailure::Sink);
+            }
+            other => panic!("started-fail: {other:?}"),
+        }
+        assert!(
+            !vm.dir.join("f.txt").exists(),
+            "Started の失敗では host call の出力が無い"
+        );
+        // language-state も変わっていない（x は定義されていない）。
+        let (_, probe) = run(
+            &mut vm,
+            &input("let z = x\n", Grant::None),
+            812,
+            &Arc::new(FakeClock::new()),
+        );
+        assert!(
+            matches!(probe.outcome(), Some(ExecutionOutcome::RuntimeError { .. })),
+            "started-fail の後に x は無い: {probe:?}"
+        );
+
+        // host-call event（HostCallStarted）の Failed。
+        let host_at = |backend| dry_run(backend, &source).1.expect("HostCallStarted");
+        let (envs, out) = assert_fail_parity("host-call-fail", &source, host_at);
+        assert!(
+            !envs
+                .iter()
+                .any(|e| matches!(e.event, AuditEvent::Terminal { .. })),
+            "host-call-fail: Terminal は出ない"
+        );
+        match &out {
+            AuditedOutcome::AuditFailed { withheld, failure } => {
+                assert_eq!(*withheld, TerminalOutcome::Completed);
+                assert_eq!(*failure, AuditFailure::Sink);
+            }
+            other => panic!("host-call-fail: {other:?}"),
+        }
+
+        // Terminal の Failed。
+        let terminal_at = |backend| dry_run(backend, &source).0 - 1;
+        let (_, out) = assert_fail_parity("terminal-fail", &source, terminal_at);
+        match &out {
+            AuditedOutcome::AuditFailed { withheld, failure } => {
+                assert_eq!(*withheld, TerminalOutcome::Completed);
+                assert_eq!(*failure, AuditFailure::Sink);
+            }
+            other => panic!("terminal-fail: {other:?}"),
+        }
+
+        // VM の Pending（tree とは比べない。決定記録 Q1=A（PR #539））。Started だけ Ack し、次の
+        // submit で Pending を返して completer を手元に残す sink で、VM が ticket を cancel したことを
+        // completer から確かめる。
+        let sink = Arc::new(PendingOnceSink::default());
+        let engine = engine_for(
+            Backend::VmExperimental,
+            Arc::clone(&sink) as Arc<dyn AuditSink>,
+            None,
+        );
+        let mut vm = Side {
+            ctx: ExecutionContext::new(&engine),
+            engine,
+            recorded: {
+                let read = Arc::clone(&sink);
+                Box::new(move || read.received())
+            },
+            dir: temp_dir("vm"),
+        };
+        let (envs, out) = run(&mut vm, &source, 821, &Arc::new(FakeClock::new()));
+        match &out {
+            AuditedOutcome::AuditFailed { failure, .. } => {
+                assert_eq!(*failure, AuditFailure::Sink);
+            }
+            other => panic!("vm-pending: {other:?}"),
+        }
+        let completer = sink.completer.lock().expect("lock").take();
+        assert!(
+            completer.expect("Pending を 1 回返した").is_cancelled(),
+            "vm-pending: VM は Pending の ticket を cancel する"
+        );
+        assert_eq!(sink.submits.lock().expect("lock").len(), 2, "再送しない");
+        assert!(
+            !envs.iter().any(|e| matches!(
+                e.event,
+                AuditEvent::Yielded { .. } | AuditEvent::Resumed { .. }
+            )),
+            "vm-pending: Yielded/Resumed を出さない: {envs:#?}"
+        );
+    }
+
+    /// 最初の submit（Started）を Ack し、2 回目の submit で `Pending` を返して completer を保持し、
+    /// 3 回目以降は Ack する test 用の sink（AVT-AT-08 の VM の Pending で ticket の cancel を確かめる）。
+    #[derive(Default)]
+    struct PendingOnceSink {
+        submits: std::sync::Mutex<Vec<AuditEnvelope>>,
+        completer: std::sync::Mutex<Option<crate::audit::AuditCompleter>>,
+    }
+
+    impl PendingOnceSink {
+        /// submit された envelope（Ack したかどうかに依らず）。
+        fn received(&self) -> Vec<AuditEnvelope> {
+            self.submits.lock().expect("lock").clone()
+        }
+    }
+
+    impl AuditSink for PendingOnceSink {
+        fn submit(
+            &self,
+            batch: Arc<[AuditEnvelope]>,
+            _waker: crate::audit::AuditWaker,
+        ) -> crate::audit::AuditSubmit {
+            let last = batch.last().expect("non-empty batch");
+            let ack = crate::audit::AuditAck {
+                execution_id: last.execution_id,
+                through_sequence: last.sequence,
+            };
+            let mut submits = self.submits.lock().expect("lock");
+            submits.extend(batch.iter().cloned());
+            if submits.len() == 2 {
+                let (ticket, completer) = crate::audit::new_audit_ticket();
+                *self.completer.lock().expect("lock") = Some(completer);
+                return crate::audit::AuditSubmit::Pending(ticket);
+            }
+            crate::audit::AuditSubmit::Ack(ack)
+        }
+    }
+
+    /// AVT-AT-09: 既定と違う `policy_id` と policy を注入した engine で、Started の `redaction_policy_id` と
+    /// host-call event の Path・Body の field が tree と一致する（VM に engine の policy が届く）。
+    #[test]
+    fn avt_at_09_redaction_policy_reaches_vm() {
+        use crate::audit::{AuditDirection, AuditFieldKey, SecretBytes};
+        let policy = || RedactionPolicy {
+            policy_id: "avtb-custom".to_string(),
+            path_mode: RedactionMode::Reveal,
+            body_mode: RedactionMode::Reveal,
+            reveal_body_fields: [AuditFieldKey {
+                operation: "write_file".to_string(),
+                direction: AuditDirection::Request,
+                field: "1".to_string(),
+            }]
+            .into_iter()
+            .collect(),
+            hmac_key: SecretBytes::new(b"avtb-key".to_vec()),
+            max_revealed_body_bytes: 64,
+            ..RedactionPolicy::default()
+        };
+        let source = input(
+            "write_file(\"@data/r.txt\", \"hello\")\nlet c = read_file(\"@data/r.txt\")\n",
+            Grant::ReadWrite,
+        );
+        let mut tree = side_with(Backend::TreeWalk, None, Some(policy()));
+        let mut vm = side_with(Backend::VmExperimental, None, Some(policy()));
+        let (envs, _) = assert_parity_on("custom-policy", &mut tree, &mut vm, &source, 901);
+        match &envs[0].event {
+            AuditEvent::ExecutionStarted {
+                redaction_policy_id,
+                ..
+            } => assert_eq!(redaction_policy_id, "avtb-custom"),
+            other => panic!("Started: {other:?}"),
+        }
+        // 注入した policy が効いている（既定の policy の VM の列とは host-call event が違う）。
+        let host_events = |envs: &[AuditEnvelope]| -> Vec<AuditEvent> {
+            envs.iter()
+                .filter(|e| {
+                    matches!(
+                        e.event,
+                        AuditEvent::HostCallStarted { .. } | AuditEvent::HostCallFinished { .. }
+                    )
+                })
+                .map(|e| e.event.clone())
+                .collect()
+        };
+        let mut default_vm = side(Backend::VmExperimental);
+        let (default_envs, _) = run(&mut default_vm, &source, 902, &Arc::new(FakeClock::new()));
+        assert_eq!(host_events(&envs).len(), 4);
+        assert_ne!(
+            host_events(&envs),
+            host_events(&default_envs),
+            "VM に engine の policy が届く"
+        );
+        assert!(
+            format!("{:?}", host_events(&envs)).contains("Utf8(\"hello\")"),
+            "allow-list の body は Reveal: {:?}",
+            host_events(&envs)
+        );
+    }
+
+    /// AVT-AT-10（の crate 内の部分）: 公開の `EngineBuilder::build` は今までどおり監査 sink と
+    /// `VmExperimental` の同時設定を拒否する。既存の test が期待値を変えずに緑であることは `cargo test`
+    /// と `git diff --stat`（`tests/` の既存ファイルを変えない）で確かめる。
+    #[test]
+    fn avt_at_10_public_build_still_rejects_audit_sink_with_vm() {
+        let err = Engine::builder()
+            .config(EngineConfig {
+                backend: Backend::VmExperimental,
+                language_revision: LanguageRevision::CURRENT,
+                audit_sink: None,
+                audit_slice_fuel: None,
+            })
+            .allow_experimental_backend(true)
+            .audit_sink(Arc::new(InMemoryAuditSink::new()) as Arc<dyn AuditSink>)
+            .build()
+            .map(|_| ())
+            .expect_err("拒否される");
+        assert_eq!(err, ConfigError::AuditSinkWithExperimentalBackend);
+        // sink 無しの VM の run は監査に関係なく今までどおり回る。
+        let engine = Engine::builder()
+            .config(EngineConfig {
+                backend: Backend::VmExperimental,
+                language_revision: LanguageRevision::CURRENT,
+                audit_sink: None,
+                audit_slice_fuel: None,
+            })
+            .allow_experimental_backend(true)
+            .build()
+            .expect("build");
+        let mut ctx = ExecutionContext::new(&engine);
+        let linked = {
+            let script = engine
+                .compile(
+                    Source::new(SourceId::new("root").expect("id"), "let x = 1\n"),
+                    &CompileOptions {
+                        retain_source: true,
+                    },
+                )
+                .expect("compile");
+            let clock = FakeClock::new();
+            let budget = BudgetConfig::standard(&clock).expect("budget");
+            engine
+                .link(
+                    &script,
+                    LinkRequest::new(
+                        ExecutionId::new(NonZeroU128::new(1).expect("non-zero")),
+                        CapabilitySet::empty(),
+                        budget,
+                    ),
+                )
+                .expect("link")
+        };
+        let clock: Arc<dyn crate::budget::MonotonicClock> = Arc::new(FakeClock::new());
+        let budget = BudgetConfig::standard(clock.as_ref()).expect("budget");
+        let request = ExecutionRequest::new(budget, clock).expect("request");
+        let out = engine.run_audited(&linked, &mut ctx, request);
+        assert!(
+            matches!(out.outcome(), Some(ExecutionOutcome::Completed { .. })),
+            "{out:?}"
         );
     }
 }
