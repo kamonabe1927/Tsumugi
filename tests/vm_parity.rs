@@ -1049,11 +1049,28 @@ fn linked_dir(stem: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("tsumugi-vm-parity-{}-{stem}", std::process::id()))
 }
 
-fn fresh_dir(stem: &str) -> std::path::PathBuf {
+/// engine の 1 回の実行のあいだだけ置く空のディレクトリ。drop で消す（`tests/integration.rs` の `TestDir`
+/// と同じ）。作るときにも消してから作り直すので、後に流す engine から前の engine のファイルは見えない。
+struct FreshDir(std::path::PathBuf);
+
+impl std::ops::Deref for FreshDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for FreshDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+fn fresh_dir(stem: &str) -> FreshDir {
     let dir = linked_dir(stem);
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).expect("一時ディレクトリの作成に失敗");
-    dir
+    FreshDir(dir)
 }
 
 /// CLI と同じ組み立てで compile → link する。compile・link の error は両 engine に同じ観測
@@ -1838,6 +1855,8 @@ fn vpd_at_08_linked_capabilities_are_identical() {
     );
     // 両 engine は同じ path のディレクトリを使う（出力に path が出ても一致する）。
     assert_eq!(dir, linked_dir(setup.stem));
+    // 実行の後にディレクトリは残らない。
+    assert!(!dir.exists(), "{dir:?} が残っている");
 
     // import resolver も同じ内容で両 engine に渡る（fixtures ディレクトリの default mount）。
     let import = LinkedSetup {
@@ -1878,8 +1897,9 @@ fn vpd_at_09_cli_matches_known_diffs() {
 /// 「ケース・軸・tree の値・VM の値」で報告する。VM の警告の 1 行だけを除く。
 #[test]
 fn vpd_at_09_cli_compare_reports_each_axis() {
+    // gate のケース（`cli/<stem>`）と名前を分け、並列に走る test と同じディレクトリを共有しない。
     let case = |stem: &str| CliCase {
-        name: format!("cli/{stem}"),
+        name: format!("probe/{stem}"),
         stem: stem.to_string(),
         allow_all: None,
     };
