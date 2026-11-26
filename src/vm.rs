@@ -175,6 +175,24 @@ pub struct Vm {
     /// 既定/全順序切替をこれで分岐する。tree engine（`Evaluator`）と同一シグネチャで持ち、
     /// backend 固有分岐を作らない。CLI/テストは既定 `CURRENT`（=0.21）で動く。
     language_revision: crate::embedding::LanguageRevision,
+
+    /// host-call lifecycle 監査 event（triple と、host call 開始前に flush した `BudgetCharged`）の
+    /// temporal 順の buffer（Phase 6、audit-vm-triple-a。tree の `Evaluator::audit_events` と同じ役割）。
+    /// push は常に走ってよい軽量操作で、意味論・課金・外部効果を変えない。crate 内の
+    /// [`Self::drain_audit_events`] だけが取り出す（監査付き実行の VM 経路は audit-vm-triple-b）。
+    audit_events: Vec<crate::audit::AuditEvent>,
+
+    /// host-call 監査 event に発番する operation_id の次値（§7.2/§8）。execution（REPL では
+    /// submission）ごとに 0 始まりで単調増加し、`checked_add` で溢れたら internal error。
+    next_host_operation_id: u64,
+
+    /// この execution で外部効果が残りうる host call（`Committed` / `Unknown`）を積んだか
+    /// （Terminal の `host_effects_may_remain` の元）。drain しても戻さず、execution ごとに戻す。
+    host_effects_may_remain: bool,
+
+    /// host-call payload の redaction policy（Phase 6 R-1、§9.1）。既定は tree と同じ
+    /// `RedactionPolicy::default()`。
+    redaction_policy: crate::audit::RedactionPolicy,
 }
 
 impl Vm {
@@ -217,6 +235,11 @@ impl Vm {
             pending_exit: None,
             // 既定は現行 revision（=0.21）。埋め込み host が set_language_revision で上書きする。
             language_revision: crate::embedding::LanguageRevision::CURRENT,
+            // host-call 監査（audit-vm-triple-a）は execution の開始で 0・空から始める。
+            audit_events: Vec::new(),
+            next_host_operation_id: 0,
+            host_effects_may_remain: false,
+            redaction_policy: crate::audit::RedactionPolicy::default(),
         }
     }
 
@@ -248,6 +271,11 @@ impl Vm {
             pending_exit: None,
             // 既定は現行 revision（=0.21）。埋め込み host が set_language_revision で上書きする。
             language_revision: crate::embedding::LanguageRevision::CURRENT,
+            // host-call 監査（audit-vm-triple-a）は execution の開始で 0・空から始める。
+            audit_events: Vec::new(),
+            next_host_operation_id: 0,
+            host_effects_may_remain: false,
+            redaction_policy: crate::audit::RedactionPolicy::default(),
         }
     }
 
@@ -458,6 +486,44 @@ impl Vm {
         let cancellation = self.budget.cancellation_token();
         self.budget
             .begin_repl_submission(config, None, cancellation);
+        // host-call 監査（audit-vm-triple-a）も submission 境界で戻す（tree の
+        // `rearm_budget_for_repl` と同じ: operation_id を 0 へ巻き戻し、前 submission の event を
+        // 持ち越さない）。
+        self.next_host_operation_id = 0;
+        self.audit_events.clear();
+        self.host_effects_may_remain = false;
+    }
+
+    /// 蓄積済みの host-call 監査 event を temporal 順のまま drain して返す（audit-vm-triple-a。
+    /// tree の `Evaluator::drain_audit_events` と同じ意味）。返した後は buffer を空にする。
+    // 監査付き実行の VM 経路（audit-vm-triple-b）が使う。今は crate 内 test だけが呼ぶ。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn drain_audit_events(&mut self) -> Vec<crate::audit::AuditEvent> {
+        std::mem::take(&mut self.audit_events)
+    }
+
+    /// この execution で外部効果が残りうる host call（`Committed` / `Unknown`）を積んだか
+    /// （tree の `Evaluator::host_effects_may_remain` と同じ意味）。
+    // 監査付き実行の VM 経路（audit-vm-triple-b）が使う。今は crate 内 test だけが呼ぶ。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn host_effects_may_remain(&self) -> bool {
+        self.host_effects_may_remain
+    }
+
+    /// 監査 event 1 件を buffer へ積む（tree の `Evaluator::push_audit_event` と同じ flag 規則）。
+    fn push_audit_event(&mut self, event: crate::audit::AuditEvent) {
+        if crate::builtin_core::audit_event_marks_host_effect(&event) {
+            self.host_effects_may_remain = true;
+        }
+        self.audit_events.push(event);
+    }
+
+    /// accumulator を flush して確定した `BudgetCharged` を buffer へ移す（§7.3・§8 規則 7。tree の
+    /// `Evaluator::flush_charges_into_audit_events` と同じ）。
+    fn flush_charges_into_audit_events(&mut self) {
+        for charge in self.budget.drain_budget_charges() {
+            self.push_audit_event(charge);
+        }
     }
 
     /// REPL 用: 既存のスタック（ローカル変数）を保持したまま新しいチャンクを実行する。
@@ -2166,7 +2232,15 @@ impl Vm {
         // 前に課金する（§6.1、REV-015 Slice 2、I-O accounting）。tree engine（builtin.rs
         // の PureCore wrapper）と同じ論理位置・同じ規則で課金する（14 個すべて。write/append 以外は request 0 byte）。
         let is_host_call = crate::builtin_core::is_host_call_builtin(name);
-        if is_host_call {
+        let emits_triple = crate::builtin_core::emits_host_call_triple(name);
+        let request_bytes_for_audit = if is_host_call {
+            if emits_triple {
+                // §7.3: host call の開始前に accumulator を flush する（tree の builtin.rs と同じ位置、
+                // fix-audit-flush-before-host-call）。host call より前の消費の `BudgetCharged` が
+                // この host call の `HostCallStarted` より前に出て、host call 自身の課金（以降の描画・
+                // attempt・request・response）は次の flush 点で出る。
+                self.flush_charges_into_audit_events();
+            }
             // write/append の非 Str 内容は予算付きで 1 回だけ描画してから request を課金する
             // （tree engine の builtin.rs と同じ順序、issue #356）。
             crate::builtin_core::render_fs_content_budgeted(name, &mut args, &mut self.budget)
@@ -2177,7 +2251,10 @@ impl Vm {
             self.budget
                 .charge_host_call_request(request_bytes, ExecutionPhase::Run)
                 .map_err(|stop| Self::control_stop_to_error(&self.budget, stop, line))?;
-        }
+            request_bytes
+        } else {
+            0
+        };
         // まず共通モジュールで処理を試みる
         let max_collection = self.budget.max_collection_elements();
         // C10: filesystem builtin は grant 有無に関わらず常に capability 経路を通す（tree engine
@@ -2185,20 +2262,38 @@ impl Vm {
         // adapter/OS call 0 で単一の sandbox denial を返す。ambient std::fs fallback へは落ちない。
         let language_revision = self.language_revision();
         let fs_capability_result = if crate::builtin_core::is_filesystem_builtin(name) {
-            // Phase 6 R-1: dispatch_fs は canonical label を同伴して返すが、VM は監査 triple を
-            // 組まないため label は無視し、従来どおり outcome だけを取り出す（観測挙動不変）。
-            Some(
-                crate::builtin_core::dispatch_fs(
+            let dispatched_fs = crate::builtin_core::dispatch_fs(
+                name,
+                &args,
+                self.capabilities.filesystem(),
+                self.capabilities.is_legacy_fs_syntax(),
+                max_collection,
+                language_revision,
+                line,
+            );
+            let fs_result = dispatched_fs.outcome;
+            // Phase 6（§7.2/§8、audit-vm-triple-a）: tree の builtin.rs と同じ位置・同じ共有関数で
+            // host-call lifecycle triple を buffer へ積む。deny・host error でも triple を積んでから
+            // error を伝播する。label は dispatch_fs が返す canonical label（Deny は None）。
+            if emits_triple {
+                let op_id = crate::builtin_core::alloc_host_call_operation_id(
+                    &mut self.next_host_operation_id,
+                    line,
+                )?;
+                let triple = crate::builtin_core::fs_host_call_triple(
+                    op_id,
                     name,
                     &args,
-                    self.capabilities.filesystem(),
-                    self.capabilities.is_legacy_fs_syntax(),
-                    max_collection,
-                    language_revision,
-                    line,
-                )
-                .outcome?,
-            )
+                    &fs_result,
+                    request_bytes_for_audit,
+                    &self.redaction_policy,
+                    dispatched_fs.label.as_deref(),
+                );
+                for event in triple {
+                    self.push_audit_event(event);
+                }
+            }
+            Some(fs_result?)
         } else {
             None
         };
@@ -3442,5 +3537,585 @@ mod tests {
         );
         // 印は CapabilitySetId に入らない。
         assert_eq!(marked().id(), CapabilitySet::empty().id());
+    }
+}
+
+// audit-vm-triple-a の tree/VM 比較 test（AVT-AT-01..05）。ambient 走査（tests/ambient_access_audit.rs）
+// が `#[cfg(test)] mod` の中を production から除くため、別ファイルにせずここへ置く。
+#[cfg(test)]
+mod audit_triple_parity {
+    //! audit-vm-triple-a: VM の fs host call が tree と同じ監査 event を同じ順序・同じ中身で内部 buffer へ
+    //! 積むことの比較 test（`docs/determinism-and-audit.md` §14「audit-vm-triple-a 実装スライス」、
+    //! AVT-AT-01..04。決定記録 Q2=A のとおり crate 内の `#[cfg(test)]` で比べる）。
+    //!
+    //! 同じ source を同じ capability・同じ budget で `Evaluator` と `Vm` に流し、実行の後に accumulator
+    //! の残りを flush してから buffer を drain し、event 列（`HostCallStarted`・`CapabilityDecision`・
+    //! `HostCallFinished`・`BudgetCharged` の全 field と順序）を exact に比べる。最後の flush は、
+    //! host call 自身の課金が「次の flush 点」で出ることを観測するための test 側の flush 点である。
+
+    use std::collections::BTreeSet;
+    use std::num::NonZeroU128;
+    use std::sync::Arc;
+
+    use crate::audit::{AuditEvent, AuditField, AuditFieldClass, CapabilityDecisionKind};
+    use crate::budget::{BudgetConfig, BudgetResource};
+    use crate::capability::{
+        CapabilitySet, FilesystemCapability, FilesystemRoot, FsOperation, MountName,
+        OsDirectoryHandle, SymlinkPolicy,
+    };
+    use crate::compiler::Compiler;
+    use crate::error::TsumugiError;
+    use crate::eval::Evaluator;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    use super::Vm;
+
+    /// filesystem の grant の形（AVT-AT-01 の allow・deny の経路を作る）。
+    #[derive(Clone, Copy, Debug)]
+    enum Grant {
+        /// filesystem を grant しない（capability 未 grant の deny）。
+        None,
+        /// Read だけ grant する（write/append は operation 不足の deny）。
+        ReadOnly,
+        /// Read + Write + Create を grant する。
+        ReadWrite,
+    }
+
+    /// 一意な一時 dir を作る（tree と VM で別の dir を使い、互いの書き込みを持ち越さない）。
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!("tsg-avt-{}-{}-{}", tag, std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        path
+    }
+
+    fn capabilities(grant: Grant, base: &std::path::Path) -> CapabilitySet {
+        let ops: BTreeSet<FsOperation> = match grant {
+            Grant::None => return CapabilitySet::empty(),
+            Grant::ReadOnly => [FsOperation::Read].into_iter().collect(),
+            Grant::ReadWrite => [FsOperation::Read, FsOperation::Write, FsOperation::Create]
+                .into_iter()
+                .collect(),
+        };
+        let pid = NonZeroU128::new(1).expect("non-zero");
+        let mount = MountName::new("data").expect("mount");
+        let handle = OsDirectoryHandle::new(base.to_path_buf(), pid, SymlinkPolicy::DenyAll);
+        let root = FilesystemRoot::new(mount, pid, ops, SymlinkPolicy::DenyAll, Arc::new(handle))
+            .expect("root");
+        let fs = FilesystemCapability::new(vec![root]).expect("fs");
+        CapabilitySet::builder()
+            .filesystem(fs)
+            .expect("grant filesystem")
+            .build()
+    }
+
+    fn budget() -> BudgetConfig {
+        BudgetConfig::for_legacy(1_000_000, 1_000_000)
+    }
+
+    fn parse(source: &str) -> crate::ast::Program {
+        Parser::new(Lexer::new(source).tokenize())
+            .parse()
+            .expect("パースに失敗")
+    }
+
+    /// 1 回の実行の観測（drain した event 列・`host_effects_may_remain`・結果）。
+    #[derive(Debug)]
+    struct Observed {
+        events: Vec<AuditEvent>,
+        host_effects_may_remain: bool,
+        result: Result<(), TsumugiError>,
+    }
+
+    /// 一時 dir へ `seed` の (相対 path, 内容) を書いてから実行する。
+    fn seeded_dir(tag: &str, seed: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir = temp_dir(tag);
+        for (path, content) in seed {
+            std::fs::write(dir.join(path), content).expect("seed");
+        }
+        dir
+    }
+
+    fn run_tree(source: &str, grant: Grant, seed: &[(&str, &str)]) -> Observed {
+        let dir = seeded_dir("tree", seed);
+        let program = parse(source);
+        let mut evaluator = Evaluator::with_budget(budget());
+        evaluator.set_capabilities(capabilities(grant, &dir));
+        let result = evaluator.run(&program, source.len() as u64);
+        evaluator.flush_charges_into_audit_events();
+        let observed = Observed {
+            events: evaluator.drain_audit_events(),
+            host_effects_may_remain: evaluator.host_effects_may_remain(),
+            result,
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        observed
+    }
+
+    fn run_vm(source: &str, grant: Grant, seed: &[(&str, &str)]) -> Observed {
+        let dir = seeded_dir("vm", seed);
+        let program = parse(source);
+        let chunk = Compiler::new().compile(&program).expect("compile に失敗");
+        let mut vm = Vm::with_budget(chunk, budget());
+        vm.set_capabilities(capabilities(grant, &dir));
+        // tree の `run()` は root source を link で課金する。VM 単発の入口は通らないため、tree と同じ
+        // 課金を先に行って比較を揃える（tests/differential.rs の run_vm_single と同じ対称化）。
+        vm.charge_link_graph(source.len() as u64, &[])
+            .expect("link 課金");
+        let result = vm.run();
+        vm.flush_charges_into_audit_events();
+        let observed = Observed {
+            events: vm.drain_audit_events(),
+            host_effects_may_remain: vm.host_effects_may_remain(),
+            result,
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        observed
+    }
+
+    /// 比較の対象にする event 列。`BudgetCharged` の `HeapBytes` だけを除き、残りの順序は保つ。
+    ///
+    /// live heap の数値は engine 固有の artifact・frame 構造（tree の block scope frame・AST token と
+    /// VM の bytecode chunk token）で決まり、backend 間で byte 単位に一致しない（§15.5・§5.3 の A-1。
+    /// A-2 は採らない）。heap 以外の event（triple・fuel・I/O・string・source の `BudgetCharged`）は全 field と
+    /// 順序を exact に比べる。
+    fn comparable(events: &[AuditEvent]) -> Vec<&AuditEvent> {
+        events
+            .iter()
+            .filter(|e| {
+                !matches!(
+                    e,
+                    AuditEvent::BudgetCharged {
+                        resource: BudgetResource::HeapBytes,
+                        ..
+                    }
+                )
+            })
+            .collect()
+    }
+
+    /// 2 つの観測が一致することを確かめる（event 列は [`comparable`] の範囲で exact）。食い違えば
+    /// 最初に食い違う event を示す。
+    fn assert_same(case: &str, tree: &Observed, vm: &Observed) {
+        let tree_events = comparable(&tree.events);
+        let vm_events = comparable(&vm.events);
+        if tree_events == vm_events
+            && tree.host_effects_may_remain == vm.host_effects_may_remain
+            && tree.result == vm.result
+        {
+            return;
+        }
+        let first = tree_events.iter().zip(&vm_events).position(|(t, v)| t != v);
+        panic!(
+            "case {case}: tree と VM の監査 event 列が食い違う\n\
+             first diff index: {first:?}\n\
+             tree event: {:?}\n\
+             vm event:   {:?}\n\
+             len tree={} vm={}, flag tree={} vm={}\n\
+             result tree={:?}\n\
+             result vm={:?}",
+            first.map(|i| tree_events[i]),
+            first.map(|i| vm_events[i]),
+            tree_events.len(),
+            vm_events.len(),
+            tree.host_effects_may_remain,
+            vm.host_effects_may_remain,
+            tree.result,
+            vm.result,
+        );
+    }
+
+    /// tree と VM の観測が完全に一致することを確かめ、tree の観測を返す。
+    fn assert_parity(case: &str, source: &str, grant: Grant, seed: &[(&str, &str)]) -> Observed {
+        let tree = run_tree(source, grant, seed);
+        let vm = run_vm(source, grant, seed);
+        assert_same(case, &tree, &vm);
+        tree
+    }
+
+    fn host_call_events(events: &[AuditEvent]) -> Vec<&AuditEvent> {
+        events
+            .iter()
+            .filter(|e| !matches!(e, AuditEvent::BudgetCharged { .. }))
+            .collect()
+    }
+
+    /// triple ごとの (operation_id, call_id) を Started・Decision・Finished の順に取り出す。
+    fn operation_ids(events: &[AuditEvent]) -> Vec<(u64, Option<u64>)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AuditEvent::HostCallStarted {
+                    operation_id,
+                    call_id,
+                    ..
+                }
+                | AuditEvent::HostCallFinished {
+                    operation_id,
+                    call_id,
+                    ..
+                } => Some((*operation_id, Some(*call_id))),
+                AuditEvent::CapabilityDecision {
+                    operation_id,
+                    call_id,
+                    ..
+                } => Some((*operation_id, *call_id)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_triples_numbered(case: &str, events: &[AuditEvent], count: u64) {
+        let expected: Vec<(u64, Option<u64>)> =
+            (0..count).flat_map(|id| [(id, Some(id)); 3]).collect();
+        assert_eq!(operation_ids(events), expected, "case {case}: operation_id");
+        // triple の順序（Started → Decision → Finished）。
+        for chunk in host_call_events(events).chunks(3) {
+            assert!(
+                matches!(
+                    chunk,
+                    [
+                        AuditEvent::HostCallStarted { .. },
+                        AuditEvent::CapabilityDecision { .. },
+                        AuditEvent::HostCallFinished { .. }
+                    ]
+                ),
+                "case {case}: triple の順序: {chunk:?}"
+            );
+        }
+    }
+
+    fn decisions(events: &[AuditEvent]) -> Vec<CapabilityDecisionKind> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AuditEvent::CapabilityDecision { decision, .. } => Some(*decision),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const ALLOW_SOURCE: &str = "let i = 0\nwhile i < 3\n    i = i + 1\nend\n\
+    write_file(\"@data/a.txt\", \"hello\")\n\
+    append_file(\"@data/a.txt\", 12)\n\
+    let c = read_file(\"@data/a.txt\")\n\
+    let ls = read_lines(\"@data/a.txt\")\n";
+
+    /// 4 builtin を try で包んで、deny・host error でも実行を続ける source。
+    const ALL_CAUGHT_SOURCE: &str = "let n = 0\n\
+    try\n    read_file(\"@data/missing.txt\")\ncatch e\n    n = n + 1\nend\n\
+    try\n    read_lines(\"@data/missing.txt\")\ncatch e\n    n = n + 1\nend\n\
+    try\n    write_file(\"@data/w.txt\", \"x\")\ncatch e\n    n = n + 1\nend\n\
+    try\n    append_file(\"@data/w.txt\", [1, 2])\ncatch e\n    n = n + 1\nend\n";
+
+    /// AVT-AT-01・AVT-AT-04: fs 4 builtin を allow・deny（未 grant・operation 不足）・host error の各経路で
+    /// 呼び、tree と VM の event 列が全 field・順序まで一致する。
+    #[test]
+    fn avt_at_01_event_sequences_match_tree() {
+        // allow: 4 builtin がすべて Allow で、Committed（書き込み）と None（読み込み）を含む。
+        let allow = assert_parity("allow", ALLOW_SOURCE, Grant::ReadWrite, &[]);
+        assert!(allow.result.is_ok(), "allow: {:?}", allow.result);
+        assert_triples_numbered("allow", &allow.events, 4);
+        assert_eq!(
+            decisions(&allow.events),
+            vec![CapabilityDecisionKind::Allow; 4]
+        );
+
+        // deny（capability 未 grant）: 4 builtin がすべて Deny。
+        let ungranted = assert_parity("ungranted", ALL_CAUGHT_SOURCE, Grant::None, &[]);
+        assert!(
+            ungranted.result.is_ok(),
+            "ungranted: {:?}",
+            ungranted.result
+        );
+        assert_triples_numbered("ungranted", &ungranted.events, 4);
+        assert_eq!(
+            decisions(&ungranted.events),
+            vec![CapabilityDecisionKind::Deny; 4]
+        );
+
+        // deny（operation 不足）と host error: Read だけ grant。read 2 つは存在しないファイルの host
+        // error（Allow）、write/append は operation 不足の Deny。
+        let read_only = assert_parity("read-only", ALL_CAUGHT_SOURCE, Grant::ReadOnly, &[]);
+        assert!(
+            read_only.result.is_ok(),
+            "read-only: {:?}",
+            read_only.result
+        );
+        assert_triples_numbered("read-only", &read_only.events, 4);
+        assert_eq!(
+            decisions(&read_only.events),
+            vec![
+                CapabilityDecisionKind::Allow,
+                CapabilityDecisionKind::Allow,
+                CapabilityDecisionKind::Deny,
+                CapabilityDecisionKind::Deny,
+            ]
+        );
+
+        // 未捕捉の deny / host error でも triple を積んでから error を伝播する（結果の error も一致）。
+        for (case, source, grant) in [
+            (
+                "uncaught-deny",
+                "write_file(\"@data/w.txt\", \"x\")\n",
+                Grant::ReadOnly,
+            ),
+            (
+                "uncaught-host-error",
+                "read_file(\"@data/missing.txt\")\n",
+                Grant::ReadWrite,
+            ),
+        ] {
+            let observed = assert_parity(case, source, grant, &[]);
+            assert!(observed.result.is_err(), "case {case}");
+            assert_triples_numbered(case, &observed.events, 1);
+        }
+
+        // 既存ファイルの読み込み（seed）も一致する。
+        let seeded = assert_parity(
+            "seeded-read",
+            "let c = read_file(\"@data/s.txt\")\nlet ls = read_lines(\"@data/s.txt\")\n",
+            Grant::ReadOnly,
+            &[("s.txt", "line1\nline2\n")],
+        );
+        assert!(seeded.result.is_ok(), "seeded: {:?}", seeded.result);
+        assert_triples_numbered("seeded-read", &seeded.events, 2);
+    }
+
+    /// AVT-AT-02: host call より前の文の消費の `BudgetCharged` が `HostCallStarted` より前に、host call
+    /// 自身の課金が次の flush 点以降に出る（VM で確かめ、tree と一致する）。
+    #[test]
+    fn avt_at_02_flush_before_host_call_matches_tree() {
+        let source = "let i = 0\nwhile i < 3\n    i = i + 1\nend\nwrite_file(\"@data/out.txt\", \"hello\")\n";
+        let observed = assert_parity("flush", source, Grant::ReadWrite, &[]);
+        assert!(observed.result.is_ok(), "flush: {:?}", observed.result);
+        let started = observed
+            .events
+            .iter()
+            .position(|e| matches!(e, AuditEvent::HostCallStarted { .. }))
+            .expect("HostCallStarted");
+        let finished = observed
+            .events
+            .iter()
+            .position(|e| matches!(e, AuditEvent::HostCallFinished { .. }))
+            .expect("HostCallFinished");
+        // host call より前の fuel 消費が Started より前に flush されている。
+        assert!(
+            observed.events[..started].iter().any(|e| matches!(
+                e,
+                AuditEvent::BudgetCharged {
+                    resource: BudgetResource::Fuel,
+                    ..
+                }
+            )),
+            "Started より前に fuel の BudgetCharged がある: {:?}",
+            observed.events
+        );
+        // host call 自身の課金（request bytes・host call 回数）は Finished の後の flush 点で出る。
+        let after: Vec<BudgetResource> = observed.events[finished + 1..]
+            .iter()
+            .filter_map(|e| match e {
+                AuditEvent::BudgetCharged { resource, .. } => Some(*resource),
+                _ => None,
+            })
+            .collect();
+        let before: Vec<BudgetResource> = observed.events[..started]
+            .iter()
+            .filter_map(|e| match e {
+                AuditEvent::BudgetCharged { resource, .. } => Some(*resource),
+                _ => None,
+            })
+            .collect();
+        assert!(after.contains(&BudgetResource::Fuel), "after: {after:?}");
+        assert!(
+            after.contains(&BudgetResource::HostRequestBytes),
+            "after: {after:?}"
+        );
+        assert!(
+            !before.contains(&BudgetResource::HostRequestBytes),
+            "before: {before:?}"
+        );
+    }
+
+    /// AVT-AT-03（単発）: `host_effects_may_remain` は Committed / Unknown の host call を行った実行で
+    /// true、deny だけの実行で false（tree と一致）。
+    #[test]
+    fn avt_at_03_host_effects_flag_matches_tree() {
+        let allow = assert_parity("flag-allow", ALLOW_SOURCE, Grant::ReadWrite, &[]);
+        assert!(allow.host_effects_may_remain);
+        let deny_only = assert_parity("flag-deny", ALL_CAUGHT_SOURCE, Grant::None, &[]);
+        assert!(!deny_only.host_effects_may_remain);
+    }
+
+    /// REPL の入力列を tree で回し、入力ごとの観測を返す（`src/main.rs` の tree REPL ループを模す）。
+    fn tree_repl(inputs: &[&str], grant: Grant) -> Vec<Observed> {
+        let dir = temp_dir("tree-repl");
+        let mut evaluator = Evaluator::with_budget(budget());
+        evaluator.set_capabilities(capabilities(grant, &dir));
+        let mut observed = Vec::new();
+        for (index, input) in inputs.iter().enumerate() {
+            if index > 0 {
+                evaluator.rearm_budget_for_repl(
+                    budget(),
+                    Arc::new(crate::budget::SystemMonotonicClock::new()),
+                    crate::budget::CancellationToken::new(),
+                );
+            }
+            let program = parse(input);
+            let result = evaluator.run_repl_submission(&program, input.len() as u64);
+            evaluator.flush_charges_into_audit_events();
+            observed.push(Observed {
+                events: evaluator.drain_audit_events(),
+                host_effects_may_remain: evaluator.host_effects_may_remain(),
+                result,
+            });
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        observed
+    }
+
+    /// REPL の入力列を VM で回し、入力ごとの観測を返す（`src/main.rs` の VM REPL ループを模す）。
+    fn vm_repl(inputs: &[&str], grant: Grant) -> Vec<Observed> {
+        let dir = temp_dir("vm-repl");
+        let mut compiler = Compiler::new();
+        let mut vm = Vm::new_repl_with_budget(budget());
+        vm.set_capabilities(capabilities(grant, &dir));
+        let mut observed = Vec::new();
+        for input in inputs {
+            vm.begin_repl_submission(budget());
+            vm.charge_link_graph(input.len() as u64, &[])
+                .expect("link 課金");
+            let program = parse(input);
+            let chunk = compiler.compile_repl_line(&program).expect("compile");
+            let result = vm.run_repl_chunk(chunk);
+            vm.flush_charges_into_audit_events();
+            observed.push(Observed {
+                events: vm.drain_audit_events(),
+                host_effects_may_remain: vm.host_effects_may_remain(),
+                result,
+            });
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        observed
+    }
+
+    /// AVT-AT-03（REPL）: 入力ごとに operation_id が 0 へ戻り、flag も入力ごとに戻る（tree と一致）。
+    #[test]
+    fn avt_at_03_repl_resets_operation_id_and_flag_per_submission() {
+        let inputs = [
+            "write_file(\"@data/r.txt\", \"one\")\nappend_file(\"@data/r.txt\", \"two\")\n",
+            "let c = read_file(\"@data/r.txt\")\n",
+            "let n = 0\ntry\n    read_file(\"@data/missing.txt\")\ncatch e\n    n = 1\nend\n",
+        ];
+        // 3 つ目の入力は ReadWrite の grant の下での host error（Allow・Unknown でない読み込み失敗）。
+        let tree = tree_repl(&inputs, Grant::ReadWrite);
+        let vm = vm_repl(&inputs, Grant::ReadWrite);
+        assert_eq!(tree.len(), vm.len());
+        for (index, (t, v)) in tree.iter().zip(&vm).enumerate() {
+            assert_same(&format!("repl-{index}"), t, v);
+        }
+        assert_triples_numbered("repl-1", &tree[0].events, 2);
+        assert_triples_numbered("repl-2", &tree[1].events, 1);
+        assert_triples_numbered("repl-3", &tree[2].events, 1);
+        assert!(tree[0].host_effects_may_remain, "書き込みの入力");
+        assert!(
+            !tree[1].host_effects_may_remain,
+            "読み込みだけの入力では戻る"
+        );
+
+        // deny だけの入力の列でも flag は false のまま（入力をまたいで持ち越さない）。
+        let deny_inputs =
+            ["try\n    write_file(\"@data/r.txt\", \"x\")\ncatch e\n    let m = 1\nend\n"];
+        let tree = tree_repl(&deny_inputs, Grant::None);
+        let vm = vm_repl(&deny_inputs, Grant::None);
+        assert_same("repl-deny", &tree[0], &vm[0]);
+        assert!(!tree[0].host_effects_may_remain);
+    }
+
+    /// AVT-AT-04: Path は canonical label の HMAC、Body は既定 policy で `Omitted`。label を取れない
+    /// route 前の拒否（mount の無い path・未 grant）でも tree と同じ `original_bytes`。
+    #[test]
+    fn avt_at_04_redaction_and_label_match_tree() {
+        let allow = assert_parity("redaction-allow", ALLOW_SOURCE, Grant::ReadWrite, &[]);
+        let fields: Vec<&AuditField> = allow
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                AuditEvent::HostCallStarted { request, .. } => Some(request.fields.values()),
+                AuditEvent::CapabilityDecision { resource, .. } => Some(resource.fields.values()),
+                AuditEvent::HostCallFinished { response, .. } => Some(response.fields.values()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(
+            fields.iter().any(|f| matches!(
+                f,
+                AuditField::HmacSha256 {
+                    class: AuditFieldClass::Path,
+                    ..
+                }
+            )),
+            "Path は HMAC: {fields:?}"
+        );
+        assert!(
+            fields.iter().any(|f| matches!(
+                f,
+                AuditField::Omitted {
+                    class: AuditFieldClass::Body,
+                    ..
+                }
+            )),
+            "Body は Omitted: {fields:?}"
+        );
+        assert!(
+            !fields.iter().any(|f| matches!(
+                f,
+                AuditField::Revealed {
+                    class: AuditFieldClass::Path | AuditFieldClass::Body,
+                    ..
+                }
+            )),
+            "既定 policy では Path・Body を平文で出さない: {fields:?}"
+        );
+
+        // route 前の拒否（mount 形式でない path・存在しない mount）と未 grant。
+        let route_denied = "let n = 0\n\
+    try\n    read_file(\"plain/relative.txt\")\ncatch e\n    n = n + 1\nend\n\
+    try\n    read_file(\"@nomount/x.txt\")\ncatch e\n    n = n + 1\nend\n";
+        for grant in [Grant::ReadWrite, Grant::None] {
+            let observed = assert_parity("route-denied", route_denied, grant, &[]);
+            assert!(observed.result.is_ok(), "{grant:?}: {:?}", observed.result);
+            assert_eq!(
+                decisions(&observed.events),
+                vec![CapabilityDecisionKind::Deny; 2],
+                "{grant:?}"
+            );
+        }
+    }
+
+    /// AVT-AT-05（補助）: buffer へ積むことと drain は課金・結果を変えない。sink 無しの経路の観測挙動
+    /// 全体は、既存の test（`tests/audit_*.rs`・`tests/differential.rs`・`tests/integration.rs`・golden
+    /// fixture）が無改変で緑であることで確かめる（`cargo test`）。
+    #[test]
+    fn avt_at_05_buffering_does_not_change_usage() {
+        let dir = temp_dir("vm-usage");
+        let program = parse(ALLOW_SOURCE);
+        let chunk = Compiler::new().compile(&program).expect("compile に失敗");
+        let mut vm = Vm::with_budget(chunk, budget());
+        vm.set_capabilities(capabilities(Grant::ReadWrite, &dir));
+        vm.run().expect("allow の source は成功する");
+        let before = vm.budget_usage();
+        let drained = vm.drain_audit_events();
+        assert_eq!(host_call_events(&drained).len(), 12, "4 builtin の triple");
+        assert_eq!(vm.budget_usage(), before, "drain は課金を変えない");
+        assert!(vm.drain_audit_events().is_empty(), "drain の後は空");
+        assert!(vm.host_effects_may_remain(), "drain しても flag は戻さない");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

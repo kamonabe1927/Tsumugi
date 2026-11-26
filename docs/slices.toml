@@ -807,12 +807,13 @@ order      = 31
 [[slice]]
 id         = "audit-vm-triple-a"
 title      = "VM の fs host call で host-call triple と host call 開始前の BudgetCharged の flush を tree と同じ順序・中身で buffer へ積む"
-status     = "ready"
+status     = "done"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-triple-a 実装スライス（VM の fs host call で host-call triple と flush 点を buffer へ積む）" }
 acceptance = ["AVT-AT-01..05"]
 design_pr  = 527
+impl_pr    = 531
 order      = 70
 
 [[slice]]
