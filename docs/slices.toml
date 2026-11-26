@@ -821,6 +821,11 @@ impl_pr    = 534
 #   判断の候補 Q1（alpha facade に VM の経路を作るか）・Q2（VmExperimental の host function の扱い）は判断役が Q1=A・Q2=A を選んだ（PR #537）。
 #   レビューの指摘から足した Q3（VM の Exited の commit の境界）は Q3=A（実行済みの文まで commit。PR #537）。
 #   Q2=A の条件: 実装 PR が embedding-api の逸脱一覧に build の拒否の行（延期先つき）を足す。
+# b の再設計 PR #539（main 122fdf6、todo → ready）: 前提の a（PR #531）と vm-engine-run-route（PR #538）が done になったので、
+#   PR #535 の見込みを確定して受入基準を採番した。分けずに 1 本（run_audited_inner の VM 分岐と VM の入口 3 つ）。
+#   見積もり src/ 約 170〜320 行、tests 約 350〜550 行、受入基準 5（AVT-AT-06..10、crate 内の比較 test。PR #535 の Q2=A の条件 2）。
+#   §6.7 のとおり §14.1 の上限は当てない。design_pr は最初の設計 PR #535 からこの PR #539 へ改めた。
+#   判断の候補 Q1（VM の経路で sink が Pending を返したときの扱い）は判断役が Q1=A（fail-closed、AuditFailure::Sink）を選んだ（PR #539）。
 [[slice]]
 id         = "vm-engine-run-route"
 title      = "Engine::run が VmExperimental のとき ExecutionContext で VM を回す経路（既知の差分一覧の KD-1 を消す。embedding-api の E9 の残り）"
@@ -849,11 +854,12 @@ order      = 70
 [[slice]]
 id         = "audit-vm-triple-b"
 title      = "Engine::run_audited の VM 経路（Started・VM の buffer の drain・Terminal を tree と同じ journal・sink の規則で出す）"
-status     = "todo"
+status     = "ready"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-triple-b 実装スライス（`Engine::run_audited` の VM 経路）" }
-design_pr  = 535
+acceptance = ["AVT-AT-06..10"]
+design_pr  = 539
 depends_on = ["audit-vm-triple-a", "vm-engine-run-route"]
 order      = 71
 
