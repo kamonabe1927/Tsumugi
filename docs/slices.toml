@@ -767,7 +767,7 @@ order      = 60
 #   判断の候補 Q1〜Q3（Engine::run の context の扱い・差の出なくなった項目の扱い・heap の比べ方）は判断役が Q1=A・Q2=A・Q3=A を選んだ（PR #526）。spec の小節の決定記録に書いた。
 # vm-parity-diff-b: a が done（PR #528）になったので設計して ready にした。見積もり src/ 0 行、tests/ 約 450〜750 行、
 #   受入基準 6（VPD-AT-07..12）。§6.7 のとおり §14.1 の上限は当てない。判断の候補 Q1〜Q3（capability の要る fixture の
-#   in-process の入口・CLI の VM の experimental の警告の扱い・import される側の fixture の扱い）は設計 PR で判断役が選ぶ。
+#   in-process の入口・CLI の VM の experimental の警告の扱い・import される側の fixture の扱い）は判断役が Q1=A・Q2=A・Q3=A を選んだ（PR #533）。spec の小節の決定記録に書いた。
 # order は loop-runbook §8 の「優先」の既定（今あるすべての ready・todo より前）で 27・31。0〜52 に空きが無いので、この PR の中で付け直した。
 #   done のスライスの order は変えず、todo・blocked・ready どうしの相対順を保つよう、それぞれを 2 つ後ろの todo・blocked・ready の値へ、
 #   最後の 2 つを空いている 53・54 へ送った: fix-closure-capture-chain-stack 27 → 32、fix-run-foreign-engine-mismatch 31 → 34、
