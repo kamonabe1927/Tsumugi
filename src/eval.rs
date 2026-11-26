@@ -1340,12 +1340,7 @@ impl Evaluator {
         &mut self,
         line: usize,
     ) -> Result<u64, TsumugiError> {
-        let id = self.next_host_operation_id;
-        self.next_host_operation_id =
-            self.next_host_operation_id.checked_add(1).ok_or_else(|| {
-                TsumugiError::internal(line, "host-call operation_id を割り当てできません")
-            })?;
-        Ok(id)
+        crate::builtin_core::alloc_host_call_operation_id(&mut self.next_host_operation_id, line)
     }
 
     /// host-call lifecycle triple を emission 待ちバッファへ積む（Phase 6、§8 規則3）。
@@ -1365,9 +1360,7 @@ impl Evaluator {
     /// 監査 event 1 件を temporal 順の buffer へ積み、audit drain queue へ計上する（Phase 6 B-2）。
     /// `audit_events` への push はすべてここを通す。
     fn push_audit_event(&mut self, event: crate::audit::AuditEvent) {
-        if let crate::audit::AuditEvent::HostCallFinished { effect_status, .. } = &event
-            && !matches!(effect_status, crate::audit::EffectStatus::None)
-        {
+        if crate::builtin_core::audit_event_marks_host_effect(&event) {
             self.host_effects_may_remain = true;
         }
         self.audit_queue_admit(&event);

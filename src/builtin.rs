@@ -321,39 +321,15 @@ impl Evaluator {
             // 既存の制御フロー（成功時 response byte 課金・error 伝播）は triple を積んだ後
             // も厳密に保つため、`fs_result` を `?` で畳む前に triple を構築・push する。
             if emits_triple {
-                let response_bytes = match &fs_result {
-                    Ok(value) => crate::builtin_core::host_call_response_bytes(name, value),
-                    Err(_) => 0,
-                };
-                // Deny の original_bytes 用: 先頭の Str 引数（requested path）の UTF-8 byte
-                // 長。path 文字列が無い（引数型エラー等）なら 0（§9.1 / R-1 スライス）。
-                let requested_path_bytes = evaluated
-                    .first()
-                    .and_then(|v| match v {
-                        crate::value::Value::Str(s) => Some(s.as_str().len() as u64),
-                        _ => None,
-                    })
-                    .unwrap_or(0);
                 let op_id = self.alloc_host_call_operation_id(line)?;
-                let bodies = crate::builtin_core::host_call_body_values(
+                let triple = crate::builtin_core::fs_host_call_triple(
+                    op_id,
                     name,
                     &evaluated,
                     &fs_result,
                     request_bytes_for_audit,
-                    response_bytes,
-                    self.redaction_policy(),
-                );
-                let triple = crate::builtin_core::host_call_triple_with_bodies(
-                    op_id,
-                    name,
-                    request_bytes_for_audit,
-                    &fs_result,
-                    response_bytes,
                     self.redaction_policy(),
                     fs_label.as_deref(),
-                    requested_path_bytes,
-                    bodies.request,
-                    bodies.response,
                 );
                 self.push_host_call_events(triple);
             }

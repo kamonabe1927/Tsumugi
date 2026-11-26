@@ -22,7 +22,7 @@
 | host-call triple の §8 規則5/6 の timing（allow ack 前に外部効果を止める／`HostCallFinished` ack 前に response を露出させない）を満たさない。外部効果は `dispatch_fs` 内で同期完結し、triple は評価器 buffer から後で drain する。満たすのは triple の論理順序（規則3/4） | §8/§11 | A-1 |
 | §11 の host call 開始前 atomic reserve を pre-effect reservation でなく drain 時の容量チェックで代用。外部効果自体を reserve 失敗で止める faithful 実装は未了 | §11 | A-1 |
 | `AdmissionQueued` / `SchedulerPreempted` / `HostPaused` / `HostCallPending` の yield は engine-poll 経路（`engine.rs::poll`、sink 無し）でのみ生じるため、写像は定義するが監査付き経路では emission しない。sink-bearing な scheduler/pause/cooperative host-call 経路の配線が未了 | §7.2/§8 | A-1 |
-| audit triple / yield/resume の emission が tree-only。VM への配線は未了（監査 sink と `VmExperimental` の同時設定は build 時に `ConfigError::AuditSinkWithExperimentalBackend` で拒否。既知の受容済み tree/VM 差分、Slice 6 で解消予定） | §2.1/§7.1 | A-1 |
+| VM は host-call triple と flush 点の event を内部 buffer へ積むが、監査付き実行（`run_audited`）の経路が無いため配送しない。yield/resume は tree-only（監査 sink と `VmExperimental` の同時設定は build 時に `ConfigError::AuditSinkWithExperimentalBackend` で拒否。audit-vm-triple-b・c で解消予定）。buffer の `BudgetCharged` のうち `HeapBytes` は engine 固有の artifact・frame 構造で値が決まり tree と一致しない（§15.5、`normalize_for_conformance` は未実装） | §2.1/§7.1 | A-1（audit-vm-triple-a で更新） |
 | §10 の「次回 `ExecutionHandle::poll` が `try_take` して再開」を、facade 内の単一 execution poll driver（`run_audited_driver`）が sink round-trip を担う形で代用。scheduler engine（`engine.rs::poll`）は sink を持たず `YieldReason::AuditBackpressure` を返さない（E10 統合後） | §10/§10.2 | B-1 |
 | audit drain queue byte 上限の判定がトップレベル境界だけの soft limit。関数・callback 本体の中では効かず、queue は上限を超えて溜まり得る（超過量は host-call 回数 budget で有界） | §10.2 | B-2 |
 | host-call triple を emission するのは fs builtin のうち読み書きの payload byte が明確な 4 つ（`read_file` / `read_lines` / `write_file` / `append_file`、`src/builtin_core.rs::emits_host_call_triple`）だけ。`rename` / `mkdir` / `remove` 系 / `list_dir` / `file_size` / `is_file` / `is_dir` / `path_exists` など capability 判定を通る他の fs builtin は監査対象外（「fs builtin 監査範囲」スライスへ延期） | §7.2/§8 | R-1a |
@@ -53,7 +53,7 @@ host call 開始前に `BudgetCharged` を flush しない行（loop:drift #342 
 | 60 KiB 縮退規則（normal event の最大 60 KiB、超過時 Body → Path → Identifier の順で `Omitted` へ縮退、なお超過で `EventTooLarge`）。`AuditFailure::EventTooLarge` は型としてあるが、判定は単一 event が通常 byte 枠全体（`max_encoded_bytes` − Terminal 予約）を超える場合だけで、60 KiB 判定と縮退は無い | §7.2/§9 | 正確な byte 推定が前提のため strict CBOR スライスへ延期 |
 | record/replay | §6 | — |
 | record/replay での redaction 再適用（record 済み redacted payload を盲目コピーせず現行 policy を適用） | §12 | record/replay スライスへ延期 |
-| VM の audit triple 対応（監査 wiring） | §2.1 | Slice 6（VM conformance）へ延期 |
+| VM の audit triple 対応（監査 wiring） | §2.1 | audit-vm-triple-b・c（Slice 6、VM conformance）へ延期 |
 | VM 適合 gate のうち audit 以外の残り。差分テストの土台と既知の差分一覧の CI gate（`tests/vm_parity.rs`。print だけで動く fixture・書き換えの種類 × 値の持ち方 × 変数の置き場所の matrix・REPL 継続を、値・error・出力・fuel・budget の各カウンタ・heap で比べ、一覧と実際の差を完全一致させる）は vm-parity-diff-a で入った。残りは、capability の要る fixture と CLI の stdout・stderr・終了コードの byte 比較（vm-parity-diff-b）、limit 境界（各上限の N と N−1）の網羅、pause/resume、fuzz gate と、既知の差分一覧の 4 項目（KD-1 `Engine::execute` の VM の経路なし・KD-2/KD-3 `for` の反復の peak heap・KD-4 REPL の error の入力の fuel）を 0 件にすること | §2.1 | Slice 6（VM conformance）。フェーズのスライス（手順書 §6.7）で減らす |
 | `normalize_for_conformance`（backend 間比較の前の envelope 正規化） | §3 | Slice 6（VM conformance）へ延期 |
 | `DeterminismInput` tuple と `ContextSnapshot` | §3.1 | record/replay スライスへ延期 |

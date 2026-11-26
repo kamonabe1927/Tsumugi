@@ -1704,6 +1704,77 @@ pub(crate) fn host_call_triple_with_bodies(
     ]
 }
 
+/// 1 host call へ監査 operation_id を発番する（Phase 6、§7.2）。tree の `Evaluator` と VM の `Vm`
+/// が同じ規則で使う（audit-vm-triple-a）。
+///
+/// `next` は execution 内で 0 始まり単調増加の counter。`checked_add` で overflow を fail-closed
+/// にし、通常運用で到達不能な overflow は internal error（terminal）へ写す。発番した id は triple
+/// の operation_id / call_id に兼用する。
+pub(crate) fn alloc_host_call_operation_id(
+    next: &mut u64,
+    line: usize,
+) -> Result<u64, TsumugiError> {
+    let id = *next;
+    *next = next.checked_add(1).ok_or_else(|| {
+        TsumugiError::internal(line, "host-call operation_id を割り当てできません")
+    })?;
+    Ok(id)
+}
+
+/// 監査 event が「外部効果が残りうる」host call の完了か（Terminal の `host_effects_may_remain`
+/// の元、§7.2）。`HostCallFinished` の `effect_status` が `None` 以外なら真。tree と VM の buffer
+/// への push で共有する（audit-vm-triple-a）。
+pub(crate) fn audit_event_marks_host_effect(event: &crate::audit::AuditEvent) -> bool {
+    matches!(
+        event,
+        crate::audit::AuditEvent::HostCallFinished { effect_status, .. }
+            if !matches!(effect_status, crate::audit::EffectStatus::None)
+    )
+}
+
+/// fs host call（[`emits_host_call_triple`] の 4 builtin）の lifecycle triple を、評価済みの引数と
+/// [`dispatch_fs`] の結果から組む（Phase 6 §7.2/§8・R-1 §9.1）。tree の `apply_pure_core_builtin`
+/// と VM の `exec_builtin` が同じ位置で呼ぶ共有関数（audit-vm-triple-a、VM 専用の写しを作らない）。
+///
+/// response bytes は成功時の [`host_call_response_bytes`]、失敗時 0。Deny の `original_bytes` 用の
+/// requested path bytes は先頭の Str 引数の UTF-8 byte 長（無ければ 0）。
+pub(crate) fn fs_host_call_triple(
+    operation_id: u64,
+    name: &str,
+    args: &[Value],
+    result: &Result<Value, TsumugiError>,
+    request_bytes: u64,
+    policy: &crate::audit::RedactionPolicy,
+    label: Option<&str>,
+) -> [crate::audit::AuditEvent; 3] {
+    let response_bytes = match result {
+        Ok(value) => host_call_response_bytes(name, value),
+        Err(_) => 0,
+    };
+    // Deny の original_bytes 用: 先頭の Str 引数（requested path）の UTF-8 byte
+    // 長。path 文字列が無い（引数型エラー等）なら 0（§9.1 / R-1 スライス）。
+    let requested_path_bytes = args
+        .first()
+        .and_then(|v| match v {
+            Value::Str(s) => Some(s.as_str().len() as u64),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let bodies = host_call_body_values(name, args, result, request_bytes, response_bytes, policy);
+    host_call_triple_with_bodies(
+        operation_id,
+        name,
+        request_bytes,
+        result,
+        response_bytes,
+        policy,
+        label,
+        requested_path_bytes,
+        bodies.request,
+        bodies.response,
+    )
+}
+
 // C10: ambient fs builtin（read_file/read_lines/write_file/append_file ほか 14 名）の
 // `sandbox::check_path` + 生 `std::fs` 実装は削除した。fs builtin は tree/VM の dispatch 境界で
 // 必ず capability 経路（[`dispatch_fs`] → [`dispatch_filesystem_capability`]）を通る。
