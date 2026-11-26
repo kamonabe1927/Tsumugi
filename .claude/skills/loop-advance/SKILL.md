@@ -25,12 +25,12 @@ PM は spec も実装も自分で書かない。各役を Agent ツールで**�
 `state.py` の結果を見て、手順書 §6.1 の 1〜8 の順に片付ける。
 
 - `running_stale` が true の PR: `loop:running` を外して一言残す
-- `loop:paused` の PR（一時停止。手順書 §6.6）: 以下の片付け（レビュー・修正・審査・マージ）の対象から外し、§4 の同時の枠にも数えない。`main` の `slices.toml` で再開の条件のスライスがすべて `done` か確かめ、満たせば手順書 §6.6 の「再開」のとおり外す。条件のスライスが `blocked`、または 7 日たっても再開していなければ、`loop:stuck` を付けずに閉じる
+- `loop:paused` の PR（一時停止。手順書 §6.6）: 以下の片付け（レビュー・修正・審査・マージ）の対象から外し、§4 の同時の枠にも数えない。`main` の `slices.toml` で再開の条件のスライスがすべて `done` か確かめ、満たせば手順書 §6.6 の「再開」のとおり外す。条件のスライスが `blocked`、または 7 日たっても再開していなければ、`loop:paused` を外して `loop:stuck` を付けて閉じ、閉じるコメントに `スライス: <スライスID>` を書く（loop-guard §7 の回数に入る。一時停止のあいだは数えない）
 - `owner_writes_to_handle`: 手順書 §5 のとおり応える（`修正依頼:` は書いた役に直させる）
   - `issue #492`（回答箱。手順書 §6.5 の試行）: 回答ごとに対象を読み、開いている PR・issue が対象ならそこに書かれたときと同じに、マージ済み・閉じたもの・`blocked`・`needs-design` が対象なら kamonabe の新しい issue と同じに受け付ける（反映は手順書 §6.2 の 6 の設計、PR 本文に `Refs #492` と回答の URL）。1 つの書き込みの回答にすべて応えてから、書き込みごとに 1 件、回答箱に `🤖 Claude Code 回答箱: <回答の URL>` で返信する。途中で時間切れになったら返信しない
 - `gate` が `ng` の PR: loop-guard §4.3 のとおり止める
 - `pending_decisions`: 判断役（`model: "fable"`、loop-decide）を起動し、決まった内容を書いた役に反映させる
-- `stuck_counts` が 2 以上: そのスライスを `blocked` にする状態整理の PR を出す
+- 閉じた `loop:stuck` の PR がある（`stuck_counts` が空でない）: スライスごとに数え直し、2 本以上のスライスを `blocked` にする状態整理の PR を出す。`stuck_counts` の値が 2 未満でも数え直しは省かない（出し直しの接尾辞の付いたブランチは `stuck_counts` で別の ID に分かれ、1 本ずつに見えるため。閉じるコメントの `スライス: <スライスID>` を主にし、`slices.toml` の ID と突き合わせる。`-<数字>` を機械的に除かない。手順書 §6.1 の 5）
 - CI のジョブが runner 起因で取り消された PR（`conclusion` が `cancelled`、runner が割り当てられず step が 0 件）: 手順書 §6.4 のとおり判定し、`gh api -X POST repos/kamonabe1927/Tsumugi/actions/runs/<run_id>/rerun-failed-jobs` で再実行する（同じ commit につき 2 回まで、`run_attempt` で数える）。`failure` や step が始まってからの取り消しが混じれば再実行せず「CI が赤」として扱う。`state.py` は判定しないので `gh api` で見る
 - CI が赤・`main` と競合・`gate` が `findings` の PR: 手順書 §6.1 の 6 のとおり
 - `review` または `gate` が `null` の PR（最新 commit を名指ししたものが無い）: `loop:running` を付け、
