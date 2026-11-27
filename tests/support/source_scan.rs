@@ -1,4 +1,4 @@
-//! 静的検査（tests/ambient_access_audit.rs と tests/no_host_abort_audit.rs）が共有する、`src/` の
+//! 静的検査（tests/ambient_access_audit.rs・tests/no_host_abort_audit.rs・tests/no_host_unwrap_audit.rs）が共有する、`src/` の
 //! production コードの切り出しと、パターン・`use` の照合。
 //!
 //! 「production コード」の定義はここに 1 つだけ持つ（manifesto-check-no-host-abort の Q1=A・Q6=A）。
@@ -55,6 +55,26 @@ pub fn line_has(line: &str, pat: &str) -> bool {
             return true;
         }
         from = start + pat.len().max(1);
+    }
+    false
+}
+
+/// `line` の中に `pat` があるか（メソッド呼びの照合用。manifesto-check-no-host-unwrap）。
+///
+/// [`line_has`] と違い、左の境界を求めない（`x.unwrap()` の `.` の左は識別子なので、`line_has` では一致しない）。
+/// 右は、`pat` が `(`・`)` で終わるならそのまま、それ以外（`::unwrap` のような path 形）なら識別子の途中でないこと
+/// （`::unwrap_or` に一致させないため）を求める。
+pub fn line_has_call(line: &str, pat: &str) -> bool {
+    let mut from = 0;
+    while let Some(off) = line[from..].find(pat) {
+        let end = from + off + pat.len();
+        let right_ok = pat.ends_with('(')
+            || pat.ends_with(')')
+            || line[end..].chars().next().is_none_or(|c| !is_ident(c));
+        if right_ok {
+            return true;
+        }
+        from = from + off + pat.len().max(1);
     }
     false
 }
