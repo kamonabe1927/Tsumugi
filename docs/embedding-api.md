@@ -775,8 +775,7 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
 本書 §11 規則 5 の対象である。§11 の目標の文は変えない。検査の作りは manifesto-check-no-host-abort と同じ許可リスト方式（ファイル・パターン・件数）で、
 production コードの切り出しは `tests/support/source_scan.rs` を共有する（issue #544 の「決めたこと」）。
 
-判断の候補（設計 PR の本文）: Q1（1 本で入れるか割るか）・Q2（parser の自前の `expect` メソッドの扱い）・Q3（`Mutex::lock` の `.expect` の扱い）。
-下の実装範囲・受入基準は推奨案（各 Q の A）で書いてあり、判断役が選んだら決定記録に反映する。
+1 本で入れるか・parser の自前の `expect` メソッドの扱い・`Mutex::lock` の `.expect` の扱いは、判断役が選択（PR #553）の Q1=A・Q2=A・Q3=A による（下の「決定記録」）。
 
 - **前提（設計時点の main 1a9fc11 で確かめたこと）**:
   走査の範囲（`src/main.rs` と `src/bin/` を除く `src/` の `*.rs` を、`tests/support/source_scan.rs` の `production_lines` で切り出したもの。manifesto-check-no-host-abort の
@@ -835,6 +834,24 @@ production コードの切り出しは `tests/support/source_scan.rs` を共有�
 - **依存**: manifesto-check-no-host-abort（done。`tests/support/source_scan.rs` を使う）。
 - **順番**: `order` は 73。issue #544 の「決めたこと」のとおり、tree と VM の差分をなくすフェーズ（手順書 §6.7）の最後のスライス `audit-vm-triple-c`（72）の直後、`audit-record-replay`（80）より前に置く。
   フェーズのスライスが先に回る。
+- **決定記録**（判断役が選択（PR #553））:
+  - **Q1=A**（1 本で入れる。`src/` は 0 行で、届く箇所は fix スライスに返す）。理由: `src/` 0 行・触る仕組みは tests/ の静的検査 1 つ・受入基準 4 項目で手順書 §14.1 に収まり、
+    issue #544 の「1 本で §14.1 に収まらなければ割る」の条件に当たらない。検査が通った時点で走査の範囲すべて（lib 全体）の裏付けになり、原則 6・9 と優先順位の表
+    「再現可能な検証 ＞ 根拠のない安全性の主張」に合う。確かめる 109 行は、PR #462 の Q4=A が分けたときの規模（130 か所近く）より少ない。
+    採らなかった案 B（host 側 7 ファイルと評価器側 5 ファイルに割る）は、マニフェストには反しないが、前半だけが入っている間は評価器側（49 行）が走査の外に残り、
+    検査が通っても原則 6 の裏付けが半分になる期間ができる。割る理由は 1 回で読む箇所の数だけで、それは届く箇所を fix スライスに返す作り（実装範囲 5）で吸収できるため採らない。
+  - **Q2=A**（`src/parser.rs` の `self.expect(` と `fn expect(` の 2 つの形だけを、そのファイルに限って照合から外す）。理由: parser の `fn expect` は `Result<(), TsumugiError>` を返し
+    panic しない（`impl Parser` の 1 つだけで、`self.expect(` は 27 行）。外す形と理由がテストの定数に残り、`parser.rs` の `Option`・`Result` の `.expect(` とほかのファイルの
+    `self.expect(` を検出し続けることを NHU-AT-02 で固定するので、原則 6 の 1 段目は弱まらない。`src/` を変えない作りは manifesto-check-no-host-abort と一貫する（原則 8・9）。
+    採らなかった案 B（parser のメソッドを改名する）は、マニフェストには反しないが、静的検査のスライスが `src/parser.rs` を約 30 行変えることになり、範囲外の「`src/` の書き換え」と
+    先行スライスの作りから外れる。特例は 1 ファイル・2 形に限られ unit で固定できるので、`src/` を触ってまで消す必要は無いため採らない。
+    案 C（`parser.rs`×`expect` を件数 27 の許可の組にする）は、`parser.rs` に panic する `.expect(` が入っても同じ組の件数に紛れ、件数を直すだけで通りうるので、
+    原則 6 の機械チェックが新しい箇所に気付けなくなる（マニフェストに反しうる）ため採らない。
+  - **Q3=A**（`Mutex::lock()` の `.expect` は、lock を持つ間に host callback を呼ばないこと、またはその間の panic が script の入力から届かないことを箇所ごとに確かめてから許可し、
+    lock を持ったまま callback を呼ぶ箇所は fix スライスとして返す）。理由: poison は lock の中の panic のあとにしか起きないので、この確かめが §11 規則 5 の裏付けになる。
+    検査のスライスで失敗の扱い（挙動）を変えず、届く箇所を隠さずに返す作りは、原則 6・9 と manifesto-check-no-host-abort の実装範囲 6 に合う。
+    採らなかった案 B（`lock().unwrap_or_else(PoisonError::into_inner)` に書き換える）は、panic のあとの壊れているかもしれない状態（audit・budget・scheduler）のまま続けることになり、
+    優先順位の表「構造化された停止・失敗 ＞ best-effort での実行継続」と原則 6・7 に反しうるため採らない。採るなら、状態の整合を設計した別の fix スライスで扱う。
 
 ### manifesto-check-no-unsafe 実装スライス（Tsumugi 自身の crate の production コードへの `unsafe` の追加を `forbid(unsafe_code)` で止める）
 
