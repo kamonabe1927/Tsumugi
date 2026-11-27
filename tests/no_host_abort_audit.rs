@@ -20,7 +20,7 @@
 //! | `process`（`process::exit`・`process::abort`、`use std::process;`） | 6 | 規則 5（process exit・abort）。lib の許可は 0 組（CLI adapter は走査から除く） |
 //!
 //! 限界: 行単位の文字列照合なので、許可した組のファイルの中で箇所が入れ替わっても件数が同じなら区別しない。
-//! `assert!`・`debug_assert!` の条件つき panic、`.unwrap()`・`.expect()`（manifesto-check-no-host-unwrap で扱う）、
+//! `assert!`・`debug_assert!` の条件つき panic、`.unwrap()`・`.expect()`（tests/no_host_unwrap_audit.rs が検査する）、
 //! slice の添字・`RefCell::borrow_mut` の panic、整数の overflow、OOM・stack overflow の abort、
 //! 依存 crate の中の panic、`macro_rules!` の展開先・別名を通した呼びは検出しない。unwind panic は §11 規則 1 の
 //! `catch_host_unwind` が最後の受け皿で、本検査はその前の段である。これらはレビューで見る。

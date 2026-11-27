@@ -1052,12 +1052,13 @@ order      = 16
 [[slice]]
 id         = "manifesto-check-no-host-unwrap"
 title      = "lib の production コードの `.unwrap()`・`.expect()` が許可リスト外に無いことを cargo test で固定する（loop-guard §4.1 の 1 段目、原則 6、manifesto-check-no-host-abort の sub-slice、issue #544）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-022"
 spec       = { doc = "docs/embedding-api.md", section = "manifesto-check-no-host-unwrap 実装スライス（lib の production コードの `.unwrap()`・`.expect()` が許可リスト外に無いことを固定する）" }
 acceptance = ["NHU-AT-01..04"]
 depends_on = ["manifesto-check-no-host-abort"]
 design_pr  = 553
+impl_pr    = 554
 order      = 73
 
 # loop:drift #373 の D-69・D-71・D-70 で逸脱一覧・未実装範囲に載せた差の延期先。未設計（todo）。
