@@ -781,7 +781,8 @@ production コードの切り出しは `tests/support/source_scan.rs` を共有�
   走査の範囲（`src/main.rs` と `src/bin/` を除く `src/` の `*.rs` を、`tests/support/source_scan.rs` の `production_lines` で切り出したもの。manifesto-check-no-host-abort の
   実装範囲 2・3 と同じ）で、行の数（1 行に 2 つあっても 1 と数える。既存の `scan_source` と同じ数え方）は次のとおりである。
   - `.unwrap()` は 7 行: `compiler.rs` 6（`self.loops` の pop・last_mut。605・648 行付近の `last_mut().unwrap()` は、同じ関数（`compile_break`・`compile_continue`）の冒頭の
-    let-else で loop の外の `break`・`continue` を受け〔実行時エラーの op を出して戻る〕たあと、474・572 行付近の `pop().unwrap()` は、同じ関数で直前に push した分の pop）、`eval.rs` 1（4255 行。直前の範囲検査で
+    let-else で loop の外の `break`・`continue` を受け〔実行時エラーの op を出して戻る〕たあと、551・553 行付近の `last_mut().unwrap()` は、`compile_for` の中で
+    513 行付近で push した分を、本体の compile のあと（本体の中の入れ子の loop は各自の push と pop が対になる）に読むもの、474・572 行付近の `pop().unwrap()` は、同じ関数で直前に push した分の pop）、`eval.rs` 1（4255 行。直前の範囲検査で
     添字が文字数の内側であることを確かめたあとの `chars().nth(..)`）。
   - `Option`・`Result` の `.expect(` は 102 行: `audit.rs` 19・`budget.rs` 1・`builtin.rs` 1・`capability.rs` 7・`cli_capability.rs` 13・`embedding.rs` 3・`env.rs` 2・
     `eval.rs` 31・`host_pending.rs` 7・`scheduler.rs` 10・`value.rs` 8。種類は、`Mutex::lock()` の poison（`audit.rs`・`host_pending.rs`・`scheduler.rs` に 30 行余り）、
