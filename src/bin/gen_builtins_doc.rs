@@ -11,6 +11,9 @@
 //! cargo run --bin gen_builtins_doc
 //! ```
 
+// production コードに unsafe を入れない（embedding-api §11 規則 6）。forbid なので下位で allow に戻せない。
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 use std::fs;
 use std::path::Path;
 

@@ -1558,9 +1558,10 @@ order      = 119
 [[slice]]
 id         = "manifesto-check-no-unsafe"
 title      = "Tsumugi 自身の crate（lib・CLI adapter・開発用ツール）の production コードへの unsafe の追加を forbid(unsafe_code) で止め、cargo test で attribute を固定する（loop-guard §4.1 の 1 段目、原則 1・6、embedding-api §11 規則 6、issue #543）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-022"
 spec       = { doc = "docs/embedding-api.md", section = "manifesto-check-no-unsafe 実装スライス（Tsumugi 自身の crate の production コードへの `unsafe` の追加を `forbid(unsafe_code)` で止める）" }
 acceptance = ["NUS-AT-01..03"]
 design_pr  = 551
+impl_pr    = 552
 order      = 120
