@@ -775,12 +775,13 @@ loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェ�
 本書 §11 規則 5 の対象である。§11 の目標の文は変えない。検査の作りは manifesto-check-no-host-abort と同じ許可リスト方式（ファイル・パターン・件数）で、
 production コードの切り出しは `tests/support/source_scan.rs` を共有する（issue #544 の「決めたこと」）。
 
-1 本で入れるか・parser の自前の `expect` メソッドの扱い・`Mutex::lock` の `.expect` の扱いは、判断役が選択（PR #553）の Q1=A・Q2=A・Q3=A による（下の「決定記録」）。
+1 本で入れるか・parser の自前の `expect` メソッドの扱い・`Mutex::lock` の `.expect` の扱いは、判断役が選択（PR #553）の Q1=A・Q2=A・Q3=A による。順番は同じ PR のレビュー指摘から出た Q4=A による（下の「決定記録」）。
 
 - **前提（設計時点の main 1a9fc11 で確かめたこと）**:
   走査の範囲（`src/main.rs` と `src/bin/` を除く `src/` の `*.rs` を、`tests/support/source_scan.rs` の `production_lines` で切り出したもの。manifesto-check-no-host-abort の
   実装範囲 2・3 と同じ）で、行の数（1 行に 2 つあっても 1 と数える。既存の `scan_source` と同じ数え方）は次のとおりである。
-  - `.unwrap()` は 7 行: `compiler.rs` 6（`self.loops` の pop・last_mut。loop の外の `break`・`continue` は compile 前に弾く前提）、`eval.rs` 1（4255 行。直前の範囲検査で
+  - `.unwrap()` は 7 行: `compiler.rs` 6（`self.loops` の pop・last_mut。605・648 行付近の `last_mut().unwrap()` は、同じ関数（`compile_break`・`compile_continue`）の冒頭の
+    let-else で loop の外の `break`・`continue` を受け〔実行時エラーの op を出して戻る〕たあと、474・572 行付近の `pop().unwrap()` は、同じ関数で直前に push した分の pop）、`eval.rs` 1（4255 行。直前の範囲検査で
     添字が文字数の内側であることを確かめたあとの `chars().nth(..)`）。
   - `Option`・`Result` の `.expect(` は 102 行: `audit.rs` 19・`budget.rs` 1・`builtin.rs` 1・`capability.rs` 7・`cli_capability.rs` 13・`embedding.rs` 3・`env.rs` 2・
     `eval.rs` 31・`host_pending.rs` 7・`scheduler.rs` 10・`value.rs` 8。種類は、`Mutex::lock()` の poison（`audit.rs`・`host_pending.rs`・`scheduler.rs` に 30 行余り）、
@@ -832,8 +833,9 @@ production コードの切り出しは `tests/support/source_scan.rs` を共有�
   §10 の TM-015（runtime bug・panic が host process を終了する）と TM-014（host function の panic）の緩和を、`catch_unwind` の前の段で裏付ける。受入基準は NHU-AT-01〜03 と、
   §11 の既存の受入試験 TM-AT-14・TM-AT-15（`catch_unwind` が最後の受け皿であること）。
 - **依存**: manifesto-check-no-host-abort（done。`tests/support/source_scan.rs` を使う）。
-- **順番**: `order` は 73。issue #544 の「決めたこと」のとおり、tree と VM の差分をなくすフェーズ（手順書 §6.7）の最後のスライス `audit-vm-triple-c`（72）の直後、`audit-record-replay`（80）より前に置く。
-  フェーズのスライスが先に回る。
+- **順番**: `order` は issue #544 のとおり 73（tree と VM の差分をなくすフェーズ〔手順書 §6.7〕の最後のスライス `audit-vm-triple-c`（72）の直後、`audit-record-replay`（80）より前）。
+  手順書 §6.2 の 4 は `ready` の中で順を決めるので、`audit-vm-triple-c` が `todo` のあいだは本スライスが先に実装される。本スライスは言語の挙動・課金・監査を変えず、
+  tree と VM の差を増やさないので、§6.7 のフェーズの目的と衝突しない（判断役が選択（PR #553）の Q4=A）。
 - **決定記録**（判断役が選択（PR #553））:
   - **Q1=A**（1 本で入れる。`src/` は 0 行で、届く箇所は fix スライスに返す）。理由: `src/` 0 行・触る仕組みは tests/ の静的検査 1 つ・受入基準 4 項目で手順書 §14.1 に収まり、
     issue #544 の「1 本で §14.1 に収まらなければ割る」の条件に当たらない。検査が通った時点で走査の範囲すべて（lib 全体）の裏付けになり、原則 6・9 と優先順位の表
@@ -852,6 +854,14 @@ production コードの切り出しは `tests/support/source_scan.rs` を共有�
     検査のスライスで失敗の扱い（挙動）を変えず、届く箇所を隠さずに返す作りは、原則 6・9 と manifesto-check-no-host-abort の実装範囲 6 に合う。
     採らなかった案 B（`lock().unwrap_or_else(PoisonError::into_inner)` に書き換える）は、panic のあとの壊れているかもしれない状態（audit・budget・scheduler）のまま続けることになり、
     優先順位の表「構造化された停止・失敗 ＞ best-effort での実行継続」と原則 6・7 に反しうるため採らない。採るなら、状態の整合を設計した別の fix スライスで扱う。
+  - **Q4=A**（状態と `order` は `ready`・73 のままにし、「順番」の文を実際の進み方に合わせる。設計 PR のレビュー指摘から出た候補）。理由: どの選択肢も実行時の経路・言語の挙動・課金・監査を変えず、
+    マニフェストに反しうるものは無い。原則 6 の機械検査が早く入り、文書が実際の進み方（§6.2 の 4 は `ready` の中だけで `order` を比べ、設計時点で `audit-vm-triple-c` は `todo`）を偽らない
+    （原則 6・9、優先順位の表「再現可能な検証 ＞ 根拠のない安全性の主張」）。issue #544 の具体的な指示（`ready` にする・order 73〜79・「ready になれば §6.2 の 4 のとおり回る」）にそのまま従い、
+    変更がいちばん小さい（原則 8）。本スライスは `src/` 0 行の tests/ の静的検査なので tree と VM の差を増やさず、フェーズへの影響は `audit-vm-triple-c` の設計が進行の回 1 つ分あとになることに限られる。
+    issue #544 の一文「フェーズより先には実装しない」とは合わず、#544 の中で両立しない 2 つの指示を、具体的な側（状態・order・回し方）で読んだ（kamonabe の `判断:` で上書きできる）。
+    採らなかった案 B（`audit-vm-triple-c` の done まで実装を待たせる規則を足す）は、小節に書くだけでは PM が止まらず手順書 §6.2 か §6.7 の変更が要り、設計 PR の範囲を超えて
+    スライス 1 つのために運用の規則を増やす（原則 8）ため採らない。案 C（`todo` に戻す）は、issue #544 の「設計 PR で todo → ready にし」に反し、フェーズのあいだ §6.2 の 6 は `todo` を
+    フェーズのスライスに絞るので、順位を上げるという issue の目的が消えるため採らない。
 
 ### manifesto-check-no-unsafe 実装スライス（Tsumugi 自身の crate の production コードへの `unsafe` の追加を `forbid(unsafe_code)` で止める）
 
