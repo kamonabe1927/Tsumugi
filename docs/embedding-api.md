@@ -41,6 +41,7 @@ REPL の budget の行は fix-repl-submission-budget（PR #497）で削除した
 | `EngineConfig`（`src/embedding.rs`）が目標の `backend`・`language_revision` に加えて pub field の `audit_sink`・`audit_slice_fuel` を持ち、`EngineBuilder::audit_slice_fuel` が `#[doc(hidden)]` なしで公開されている。目標は §3 のとおり `EngineConfig` は 2 field だけで、`audit_sink` は builder に置き、`audit_slice_fuel` は embedder 向けの契約にしない（[実行予算・協調実行仕様](execution-control.md) のテスト専用フックの項は「テスト専用の内部 surface」とする）。fix スライス fix-engine-config-audit-fields で直す。loop:drift #429 D-133 | §3 | A-1（`audit_sink`）、D3（`audit_slice_fuel`） |
 | CLI の REPL（`src/main.rs`、tree・VM の両 REPL loop が使う）は、継続入力の判定（`is_incomplete`）で `Lexer` を、EOF の診断（`finish_repl_at_eof`）で `Lexer`・`Parser` を直接呼ぶ。目標は §12 の「parser/compiler/evaluator/VMを直接呼ばない」。fix スライス fix-cli-repl-compile-diagnostics で、EOF の診断を `Engine::compile` の `CompileErrors` から出すようにする（継続判定のトークン走査を許すかはその設計で決める）。loop:drift #429 D-134 | §12 | E7（tree REPL の Engine API 統合） |
 | `HostErrorCode::new`（`src/embedding.rs`）は NUL を含まない文字種の違反（`"A"`・`"1a"`）にも `ConfigError::IdentifierContainsNul` を返す。目標は §8 のとおり `ConfigError::InvalidDescriptor { field: "host_error_code", code: "invalid_identifier" }`。fix スライス fix-host-error-code-invalid-descriptor で直す。loop:drift #352 D-68 | §3・§8 | 既存の挙動（loop:drift #352 D-68 で確認） |
+| `src/lib.rs`・`src/main.rs`・`src/bin/gen_builtins_doc.rs` の crate root に `#![cfg_attr(not(test), forbid(unsafe_code))]` が無く、production コードに `unsafe` を足しても `cargo build`・`cargo test` は失敗しない（設計時点の main 1a9463e で production コードの `unsafe` は 0 か所）。目標は §11 規則 6。manifesto-check-no-unsafe で直す。issue #543 | §11 | 既存の状態（issue #543 で目標を追加） |
 
 ## 1. 目的と規範範囲
 
@@ -821,7 +822,7 @@ manifesto-check-ambient-surface（`tests/ambient_access_audit.rs`）の検出パ
     （`src/embedding.rs` の `c3_env_snapshot_is_fixed_and_isolated_from_process_env` を含む）が通る。確かめ方: 手順書 §14.2 の機械チェックと CI。
 - **想定の変更規模**: `src/` は 3 ファイルに attribute 1 行とコメント 1 行ずつで +6 行程度（`#[cfg(test)]` を除く）。テストは `tests/no_unsafe_audit.rs` が
   +100〜180 行（fixture と unit を含む）。触る仕組みは「Tsumugi 自身の crate の静的検査（crate attribute と tests/ の 1 本）」1 つで、受入基準は 3 項目。
-  [開発ループ手順書](loop-runbook.md) §14.1 に収まる。逸脱一覧の変更は見込まない（今 `unsafe` は 0 か所で、§11 規則 6 に対する逸脱は無い）。
+  [開発ループ手順書](loop-runbook.md) §14.1 に収まる。done にする実装 PR で、本書の逸脱一覧の「crate root に `#![cfg_attr(not(test), forbid(unsafe_code))]` が無い」行（§11 規則 6 の未実装範囲）を削除する。
 - **依存**: なし。
 - **設計役の選択**（issue #543 が設計役に任せた点。spec に無い判断で公開 API・データ構造・言語挙動に影響するものは無い）:
   - **A を採る**（`#![cfg_attr(not(test), forbid(unsafe_code))]`）。理由: 検出をコンパイラの lint に任せるので、`unsafe` ブロックだけでなく `unsafe fn`・
