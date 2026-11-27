@@ -1,3 +1,6 @@
+// production コードに unsafe を入れない（embedding-api §11 規則 6）。forbid なので下位で allow に戻せない。
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 mod cli_capability;
 
 use std::env as std_env;

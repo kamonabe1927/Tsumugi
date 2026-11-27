@@ -5,6 +5,8 @@
 //! ベンチマーク・テストツールとの互換性のため公開しており、埋め込み API としての
 //! 安定性は保証しない。crate 全体は引き続き alpha 段階である。
 
+// production コードに unsafe を入れない（embedding-api §11 規則 6）。forbid なので下位で allow に戻せない。
+#![cfg_attr(not(test), forbid(unsafe_code))]
 #![allow(clippy::new_without_default)]
 #![allow(clippy::result_unit_err)]
 #![allow(clippy::len_without_is_empty)]
