@@ -767,6 +767,103 @@ manifesto-check-ambient-surface（[Capability Model仕様](capability-model.md) 
     Q1=A で採らなかった案 B と同じ弱点を範囲の定義の側に残す（原則 9）。除かれるのは build に入らないコードだけなので、ambient の側を広いまま残しても原則 2 の裏付けは強まらないため採らない。
     判断の外の気付き（判断役のコメント）を受け、`#[cfg(test)]` と item が同じ行にある場合（`src/embedding.rs` 2229 行）の扱いを実装範囲 3 と NHA-AT-01 に明記した。2 つの検査に同時に効く切り出しの誤りで `run_audited_inner` の本体を丸ごと除かないためである。
 
+### manifesto-check-no-host-unwrap 実装スライス（lib の production コードの `.unwrap()`・`.expect()` が許可リスト外に無いことを固定する）
+
+loop-guard §4.1 の 1 段目（機械チェック）のうち、[マニフェスト](manifesto.md) 原則 6（スクリプトの失敗によってホストプロセスが panic、abort、
+または意図せず exit しない）の残りを、`cargo test` で走る静的検査として固定する（issue #544、親 AUD-022）。先行の manifesto-check-no-host-abort
+（上の同名小節）が判断役が選択（PR #462）の Q4=A で分けた sub-slice で、`.unwrap()`・`.expect()` は値が `None`・`Err` なら無条件に panic するので、
+本書 §11 規則 5 の対象である。§11 の目標の文は変えない。検査の作りは manifesto-check-no-host-abort と同じ許可リスト方式（ファイル・パターン・件数）で、
+production コードの切り出しは `tests/support/source_scan.rs` を共有する（issue #544 の「決めたこと」）。
+
+1 本で入れるか・parser の自前の `expect` メソッドの扱い・`Mutex::lock` の `.expect` の扱いは、判断役が選択（PR #553）の Q1=A・Q2=A・Q3=A による。順番は同じ PR のレビュー指摘から出た Q4=A による（下の「決定記録」）。
+
+- **前提（設計時点の main 1a9fc11 で確かめたこと）**:
+  走査の範囲（`src/main.rs` と `src/bin/` を除く `src/` の `*.rs` を、`tests/support/source_scan.rs` の `production_lines` で切り出したもの。manifesto-check-no-host-abort の
+  実装範囲 2・3 と同じ）で、行の数（1 行に 2 つあっても 1 と数える。既存の `scan_source` と同じ数え方）は次のとおりである。
+  - `.unwrap()` は 7 行: `compiler.rs` 6（`self.loops` の pop・last_mut。605・648 行付近の `last_mut().unwrap()` は、同じ関数（`compile_break`・`compile_continue`）の冒頭の
+    let-else で loop の外の `break`・`continue` を受け〔実行時エラーの op を出して戻る〕たあと、551・553 行付近の `last_mut().unwrap()` は、`compile_for` の中で
+    513 行付近で push した分を、本体の compile のあと（本体の中の入れ子の loop は各自の push と pop が対になる）に読むもの、474・572 行付近の `pop().unwrap()` は、同じ関数で直前に push した分の pop）、`eval.rs` 1（4255 行。直前の範囲検査で
+    添字が文字数の内側であることを確かめたあとの `chars().nth(..)`）。
+  - `Option`・`Result` の `.expect(` は 102 行: `audit.rs` 19・`budget.rs` 1・`builtin.rs` 1・`capability.rs` 7・`cli_capability.rs` 13・`embedding.rs` 3・`env.rs` 2・
+    `eval.rs` 31・`host_pending.rs` 7・`scheduler.rs` 10・`value.rs` 8。種類は、`Mutex::lock()` の poison（`audit.rs`・`host_pending.rs`・`scheduler.rs` に 30 行余り）、
+    tree の frame・operand の stack の不変条件（`eval.rs`）、`Rc::get_mut` の一意性（`value.rs`。直前の複製で一意にした前提）、定数の `NonZero*::new`、
+    builder の検査済みの `Option`（`capability.rs`・`cli_capability.rs`）である。
+  - `src/parser.rs` の 27 行の `self.expect(` は parser の自前のメソッド（`fn expect(` が 1 行。token が合わなければ `Err` を返す）で、panic しない。
+  - `.unwrap_err()`・`.expect_err(`・`Option::unwrap` のような path 形の呼びは、production の範囲に 0 行（`#[cfg(test)]` の中にだけある）。
+  - `tests/no_host_abort_audit.rs` は `.unwrap()`・`.expect(` を検出しない（同ファイル冒頭の「限界」に「manifesto-check-no-host-unwrap で扱う」とある）。
+  - 既存の `source_scan::line_has` は照合の左右に識別子の境界を求めるので、`x.unwrap()` の `.unwrap()` には一致しない（`.` の左が識別子のため）。
+- **実装範囲**:
+  1. 検査は新しい `tests/no_host_unwrap_audit.rs` に置く。走査の範囲と production コードの切り出しは `tests/support/source_scan.rs` の `collect_rs`・`production_lines` を使い、
+     manifesto-check-no-host-abort と同じにする（`src/main.rs` と `src/bin/` を除く）。`tests/no_host_abort_audit.rs` のパターン・許可リストは変えない（issue #544 の「変えないこと」）。
+     同ファイル冒頭の「限界」の `.unwrap()`・`.expect()` の行は、新しい検査を指す文に直してよい（doc コメントだけ）。
+  2. 検出パターン: key `unwrap` は `.unwrap()`・`.unwrap_err()` と path 形の `::unwrap`・`::unwrap_err`（`Option::unwrap` を関数値として渡すもの）、key `expect` は `.expect(`・`.expect_err(` と
+     path 形の `::expect`・`::expect_err`。前の行から続く `.expect("")` のように行頭にある呼びも照合する。`unwrap_or`・`unwrap_or_else`・`unwrap_or_default` は検出しない
+     （panic しない）。`unwrap_unchecked` は §11 規則 6 の `forbid(unsafe_code)` が止めるので扱わない。照合には、`.` の左が識別子でも一致する関数を `source_scan.rs` に足し、
+     既存の `line_has` の挙動は変えない（2 つの既存の検査の結果を変えないため）。
+  3. parser の自前のメソッド（Q2）: `src/parser.rs` の `self.expect(` と `fn expect(` は照合から外す。外すのはこのファイルのこの 2 つの形だけで、ほかのファイルの `self.expect(`、
+     `parser.rs` の `Option`・`Result` の `.expect(` は検出する。外す形と理由はテストの定数に書く。
+  4. 許可リストは「ファイル・パターン・件数」の組にし、各組に理由と原則を書く。組の件数と実際の一致数が違えば検査を失敗させる（manifesto-check-no-host-abort の Q5=A と同じ）。
+     各組は、実装役が各箇所の到達条件を読み、script の入力（source・host から渡る値）から `None`・`Err` に届かないことを確かめてから載せる。理由は種類ごと
+     （stack の不変条件・直前の検査・定数・poison など）に書いてよい。
+  5. `Mutex::lock()` の `.expect`（Q3）: lock を持っている間に host callback（audit sink・host function・resolver）を呼ばないこと、またはその間の panic が
+     script の入力から届かないことを確かめて許可する。lock を持ったまま host callback を呼ぶ箇所、script の入力から届く `None`・`Err` が見つかったら、本スライスで `src/` を直さず、
+     `fix-` スライスとして PM に返す（その箇所は組の件数に含めず、テストを `#[ignore]` にせず、実装 PR を止めて返す。manifesto-check-no-host-abort の実装範囲 6 と同じ）。
+  6. ファイル冒頭に、検査項目・守る原則・本書 §11 の規則の対応表と、検査の限界を置く。
+- **検査の限界**: 行単位の文字列照合なので、許可した組のファイルの中で箇所が入れ替わっても件数が同じなら区別しない。`assert!` 系、slice の添字・`RefCell::borrow_mut` の panic、
+  整数の overflow、OOM・stack overflow の abort、依存 crate の中の panic、`macro_rules!` の展開先・別名・trait を通した呼び（`Option::unwrap` を別名で取り込む `use` など）は検出しない
+  （manifesto-check-no-host-abort の「限界」のまま。issue #544 の「変えないこと」）。unwind panic は §11 規則 1 の `catch_host_unwind` が最後の受け皿で、本検査はその前の段である。
+- **範囲外**: `src/` の `.unwrap()`・`.expect()` の書き換え（届く箇所が見つかれば fix スライスへ）。`tests/no_host_abort_audit.rs` のパターン・許可リストの変更。
+  `tests/ambient_access_audit.rs` の変更。CLI adapter（`src/main.rs`）と `src/bin/`。構文木による解析。`.github/`（凍結）の変更。§11 の目標の文の変更。
+- **受入基準**:
+  - **NHU-AT-01**（検出パターン）: 実装範囲 2 のパターン（`x.unwrap()`、行頭の `.expect("")`、`.unwrap_err()`、`.expect_err(`、`Option::unwrap` の path 形）がそれぞれ違反として検出され、
+    `unwrap_or`・`unwrap_or_else`・`unwrap_or_default`、文字列・コメントの中、`#[cfg(test)]` の付いた item の中は検出されない。確かめ方: 検査関数を文字列の入力で呼ぶ unit を同じテストファイルに置く。
+  - **NHU-AT-02**（parser の自前のメソッド）: `parser.rs` の `self.expect(`・`fn expect(` は検出されず、`parser.rs` の `Option` の `.expect(` と、ほかのファイルの `self.expect(` は検出される。
+    確かめ方: ファイル名と文字列の入力を渡す unit。
+  - **NHU-AT-03**（許可リスト）: 許可リストの各組に理由と原則があり、組の件数と一致数が違うと検査が失敗する。確かめ方: 件数の多い・少ない入力の unit と、
+    `cargo test --test no_host_unwrap_audit` が main で通ること。
+  - **NHU-AT-04**（対応表と既存の検査）: テストファイル冒頭に検査項目・守る原則・§11 の規則の対応表と限界があり、`tests/no_host_abort_audit.rs`・`tests/ambient_access_audit.rs` の
+    パターン・許可リスト・unit が変わらずに通る。確かめ方: 対応表はレビューで読む。`cargo test --test no_host_abort_audit` と `cargo test --test ambient_access_audit` が通り、
+    2 ファイルの差分が doc コメントだけであること（`git diff`）。
+- **想定の変更規模**: `tests/no_host_unwrap_audit.rs` が +250〜400 行（許可リスト 20〜30 組と unit を含む）、`tests/support/source_scan.rs` が +20〜40 行。`src/` は 0 行の見込み
+  （実装範囲 5 のとおり、直す必要が出たら fix スライスへ）。[開発ループ手順書](loop-runbook.md) §14.1 の行数と受入基準（5 項目以内）に収まり、触る仕組みは
+  「lib の production コードの静的検査（tests/）」1 つ。確かめる箇所は 109 行で、manifesto-check-no-host-abort の Q4=A が分けた理由（`unreachable!` 29 か所と合わせて
+  130 か所近くを 1 回で確かめる）より少ない。1 本で入れるか割るかは Q1。言語の挙動・課金・監査は変えないので、§14.1 の「tree と VM を同じスライスで」と §6.7 の差分テストへの追加は当たらない。
+  逸脱一覧の変更は見込まない（届く箇所が見つかって fix スライスに回すときは、実装 PR で本書の逸脱一覧に行を足す）。
+- **触る trust boundary と脅威**: 実行時の経路は変えない。守るのは [脅威モデル](threat-model.md) §6 の B1（lexer/parser/linker。`compiler.rs`・`parser.rs` の `None`・`Err` が source から届くか）、
+  B3（host callback。callback の panic のあとの `Mutex` の poison が次の host API の呼びで panic にならないか）、B5（audit sink。`audit.rs` の lock）の内側の Tsumugi 自身のコードで、
+  §10 の TM-015（runtime bug・panic が host process を終了する）と TM-014（host function の panic）の緩和を、`catch_unwind` の前の段で裏付ける。受入基準は NHU-AT-01〜03 と、
+  §11 の既存の受入試験 TM-AT-14・TM-AT-15（`catch_unwind` が最後の受け皿であること）。
+- **依存**: manifesto-check-no-host-abort（done。`tests/support/source_scan.rs` を使う）。
+- **順番**: `order` は issue #544 のとおり 73（tree と VM の差分をなくすフェーズ〔手順書 §6.7〕の最後のスライス `audit-vm-triple-c`（72）の直後、`audit-record-replay`（80）より前）。
+  手順書 §6.2 の 4 は `ready` の中で順を決めるので、`audit-vm-triple-c` が `todo` のあいだは本スライスが先に実装される。本スライスは言語の挙動・課金・監査を変えず、
+  tree と VM の差を増やさないので、§6.7 のフェーズの目的と衝突しない（判断役が選択（PR #553）の Q4=A）。
+- **決定記録**（判断役が選択（PR #553））:
+  - **Q1=A**（1 本で入れる。`src/` は 0 行で、届く箇所は fix スライスに返す）。理由: `src/` 0 行・触る仕組みは tests/ の静的検査 1 つ・受入基準 4 項目で手順書 §14.1 に収まり、
+    issue #544 の「1 本で §14.1 に収まらなければ割る」の条件に当たらない。検査が通った時点で走査の範囲すべて（lib 全体）の裏付けになり、原則 6・9 と優先順位の表
+    「再現可能な検証 ＞ 根拠のない安全性の主張」に合う。確かめる 109 行は、PR #462 の Q4=A が分けたときの規模（130 か所近く）より少ない。
+    採らなかった案 B（host 側 7 ファイルと評価器側 5 ファイルに割る）は、マニフェストには反しないが、前半だけが入っている間は評価器側（49 行）が走査の外に残り、
+    検査が通っても原則 6 の裏付けが半分になる期間ができる。割る理由は 1 回で読む箇所の数だけで、それは届く箇所を fix スライスに返す作り（実装範囲 5）で吸収できるため採らない。
+  - **Q2=A**（`src/parser.rs` の `self.expect(` と `fn expect(` の 2 つの形だけを、そのファイルに限って照合から外す）。理由: parser の `fn expect` は `Result<(), TsumugiError>` を返し
+    panic しない（`impl Parser` の 1 つだけで、`self.expect(` は 27 行）。外す形と理由がテストの定数に残り、`parser.rs` の `Option`・`Result` の `.expect(` とほかのファイルの
+    `self.expect(` を検出し続けることを NHU-AT-02 で固定するので、原則 6 の 1 段目は弱まらない。`src/` を変えない作りは manifesto-check-no-host-abort と一貫する（原則 8・9）。
+    採らなかった案 B（parser のメソッドを改名する）は、マニフェストには反しないが、静的検査のスライスが `src/parser.rs` を約 30 行変えることになり、範囲外の「`src/` の書き換え」と
+    先行スライスの作りから外れる。特例は 1 ファイル・2 形に限られ unit で固定できるので、`src/` を触ってまで消す必要は無いため採らない。
+    案 C（`parser.rs`×`expect` を件数 27 の許可の組にする）は、`parser.rs` に panic する `.expect(` が入っても同じ組の件数に紛れ、件数を直すだけで通りうるので、
+    原則 6 の機械チェックが新しい箇所に気付けなくなる（マニフェストに反しうる）ため採らない。
+  - **Q3=A**（`Mutex::lock()` の `.expect` は、lock を持つ間に host callback を呼ばないこと、またはその間の panic が script の入力から届かないことを箇所ごとに確かめてから許可し、
+    lock を持ったまま callback を呼ぶ箇所は fix スライスとして返す）。理由: poison は lock の中の panic のあとにしか起きないので、この確かめが §11 規則 5 の裏付けになる。
+    検査のスライスで失敗の扱い（挙動）を変えず、届く箇所を隠さずに返す作りは、原則 6・9 と manifesto-check-no-host-abort の実装範囲 6 に合う。
+    採らなかった案 B（`lock().unwrap_or_else(PoisonError::into_inner)` に書き換える）は、panic のあとの壊れているかもしれない状態（audit・budget・scheduler）のまま続けることになり、
+    優先順位の表「構造化された停止・失敗 ＞ best-effort での実行継続」と原則 6・7 に反しうるため採らない。採るなら、状態の整合を設計した別の fix スライスで扱う。
+  - **Q4=A**（状態と `order` は `ready`・73 のままにし、「順番」の文を実際の進み方に合わせる。設計 PR のレビュー指摘から出た候補）。理由: どの選択肢も実行時の経路・言語の挙動・課金・監査を変えず、
+    マニフェストに反しうるものは無い。原則 6 の機械検査が早く入り、文書が実際の進み方（§6.2 の 4 は `ready` の中だけで `order` を比べ、設計時点で `audit-vm-triple-c` は `todo`）を偽らない
+    （原則 6・9、優先順位の表「再現可能な検証 ＞ 根拠のない安全性の主張」）。issue #544 の具体的な指示（`ready` にする・order 73〜79・「ready になれば §6.2 の 4 のとおり回る」）にそのまま従い、
+    変更がいちばん小さい（原則 8）。本スライスは `src/` 0 行の tests/ の静的検査なので tree と VM の差を増やさず、フェーズへの影響は `audit-vm-triple-c` の設計が進行の回 1 つ分あとになることに限られる。
+    issue #544 の一文「フェーズより先には実装しない」とは合わず、#544 の中で両立しない 2 つの指示を、具体的な側（状態・order・回し方）で読んだ（kamonabe の `判断:` で上書きできる）。
+    採らなかった案 B（`audit-vm-triple-c` の done まで実装を待たせる規則を足す）は、小節に書くだけでは PM が止まらず手順書 §6.2 か §6.7 の変更が要り、設計 PR の範囲を超えて
+    スライス 1 つのために運用の規則を増やす（原則 8）ため採らない。案 C（`todo` に戻す）は、issue #544 の「設計 PR で todo → ready にし」に反し、フェーズのあいだ §6.2 の 6 は `todo` を
+    フェーズのスライスに絞るので、順位を上げるという issue の目的が消えるため採らない。
+
 ### manifesto-check-no-unsafe 実装スライス（Tsumugi 自身の crate の production コードへの `unsafe` の追加を `forbid(unsafe_code)` で止める）
 
 issue #543（kamonabe、手順書 §8 で受け入れ）を受けて、本書 §11 規則 6 を足し、その規則を機械で守る。loop-guard §4.1 の 1 段目（機械チェック）のうち、
