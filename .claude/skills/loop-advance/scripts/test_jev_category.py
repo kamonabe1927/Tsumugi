@@ -1,4 +1,5 @@
 import contextlib
+import gc
 import io
 import json
 import os
@@ -6,6 +7,7 @@ import socket
 import sys
 import unittest
 import urllib.error
+import warnings
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -149,6 +151,17 @@ class CallTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "接続できず"):
             self.call_with(urllib.error.URLError(ConnectionRefusedError()))
 
+    def test_http_error_is_closed(self):
+        err = urllib.error.HTTPError(jc.ENDPOINT, 500, "Error", {}, io.BytesIO(b"body"))
+        with self.assertRaisesRegex(RuntimeError, "HTTP 500"):
+            self.call_with(err)
+        self.assertTrue(err.fp is None or err.fp.closed)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            del err
+            gc.collect()
+        self.assertEqual([x for x in w if issubclass(x.category, ResourceWarning)], [])
+
     def test_bad_json(self):
         with self.assertRaisesRegex(RuntimeError, "答えの形が違う"):
             self.call_with(lambda *a, **k: FakeResponse(b"<html>"))
@@ -189,18 +202,27 @@ class MainTest(unittest.TestCase):
         return code, buf.getvalue()
 
     def test_no_key_and_unreachable(self):
+        # 環境に依らない: キーを消し、urlopen は 403、gh は呼ばれたら失敗する（fetch_issue を差し替えるので呼ばれない）
         env = {k: v for k, v in os.environ.items() if k != "TYPESAFE_API_KEY"}
         err = urllib.error.HTTPError(jc.ENDPOINT, 403, "Forbidden", {}, None)
+        fetched = []
+
+        def fetcher(repo, n):
+            fetched.append(n)
+            return ISSUE
         with mock.patch.dict(os.environ, env, clear=True), mock.patch("urllib.request.urlopen", side_effect=err), \
-                mock.patch.object(jc, "fetch_issue", fetch_ok):
+                mock.patch("subprocess.run", side_effect=AssertionError("gh を呼んだ")), \
+                mock.patch.object(jc, "fetch_issue", fetcher):
             code, out = self.run_main(["--number", "543", "--number", "544"])
         self.assertEqual(code, 0)
+        self.assertEqual(fetched, [543, 544])  # main は差し替えた fetch_issue を使う（既定を定義時に束縛しない）
         self.assertEqual(out.count("取得できず（HTTP 403）"), 2)
         self.assertIn("=== #543\n", out)
         self.assertIn('"issue": 544', out)
 
     def test_gh_missing(self):
-        with mock.patch("subprocess.run", side_effect=FileNotFoundError()):
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError()), \
+                mock.patch("urllib.request.urlopen", side_effect=AssertionError("ネットワークに出た")):
             code, out = self.run_main(["--number", "1"])
         self.assertEqual(code, 0)
         self.assertIn("取得できず（issue を読めず: FileNotFoundError）", out)

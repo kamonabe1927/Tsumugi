@@ -115,7 +115,12 @@ def call(state: dict, questions: dict, timeout: float = TIMEOUT):
         with urllib.request.urlopen(req, timeout=timeout) as res:
             data = json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code}") from None
+        code = e.code
+        try:
+            e.close()  # 応答の本体を閉じる（ResourceWarning を出さない）
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError(f"HTTP {code}") from None
     except TimeoutError:
         raise RuntimeError("時間切れ") from None
     except (urllib.error.URLError, OSError) as e:
@@ -143,8 +148,13 @@ def fetch_issue(repo: str, number: int) -> dict:
     return issue
 
 
-def classify(numbers: list[int], repo: str, caller=call, fetcher=fetch_issue, clock=time.monotonic) -> list[list[str]]:
-    """issue ごとに 2 行を返す。どの失敗も例外を外に出さず「取得できず」の行にする。"""
+def classify(numbers: list[int], repo: str, caller=None, fetcher=None, clock=time.monotonic) -> list[list[str]]:
+    """issue ごとに 2 行を返す。どの失敗も例外を外に出さず「取得できず」の行にする。
+
+    caller・fetcher の既定は呼ばれた時点のモジュールの call・fetch_issue を引く（定義時に束縛しない）。
+    """
+    caller = caller or call
+    fetcher = fetcher or fetch_issue
     start = clock()
     out = []
     for n in numbers:
