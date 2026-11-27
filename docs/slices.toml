@@ -1549,3 +1549,18 @@ status     = "todo"
 parent     = "REV-015"
 spec_slice = "exec-control Slice 2"
 order      = 119
+
+# issue #543（kamonabe、手順書 §8 の仕分けで「受け入れ」）から作った manifesto-check。Tsumugi 自身の crate（lib・src/main.rs・src/bin/）の
+#   crate root に `#![cfg_attr(not(test), forbid(unsafe_code))]` を置き、tests/no_unsafe_audit.rs で attribute の位置と意味を固定する
+#   （embedding-api §11 規則 6）。見積もり: src/ +6 行程度、テスト +100〜180 行、触る仕組みは Tsumugi 自身の crate の静的検査 1 つ、受入基準 3。
+#   parent は先行の manifesto-check 3 本と同じ AUD-022。
+# order は loop-runbook §8 の「それ以外」の既定（すべてのスライスより後。設計時点の最大は 119）。
+[[slice]]
+id         = "manifesto-check-no-unsafe"
+title      = "Tsumugi 自身の crate（lib・CLI adapter・開発用ツール）の production コードへの unsafe の追加を forbid(unsafe_code) で止め、cargo test で attribute を固定する（loop-guard §4.1 の 1 段目、原則 1・6、embedding-api §11 規則 6、issue #543）"
+status     = "ready"
+parent     = "AUD-022"
+spec       = { doc = "docs/embedding-api.md", section = "manifesto-check-no-unsafe 実装スライス（Tsumugi 自身の crate の production コードへの `unsafe` の追加を `forbid(unsafe_code)` で止める）" }
+acceptance = ["NUS-AT-01..03"]
+design_pr  = 551
+order      = 120

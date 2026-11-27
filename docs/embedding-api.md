@@ -41,6 +41,7 @@ REPL の budget の行は fix-repl-submission-budget（PR #497）で削除した
 | `EngineConfig`（`src/embedding.rs`）が目標の `backend`・`language_revision` に加えて pub field の `audit_sink`・`audit_slice_fuel` を持ち、`EngineBuilder::audit_slice_fuel` が `#[doc(hidden)]` なしで公開されている。目標は §3 のとおり `EngineConfig` は 2 field だけで、`audit_sink` は builder に置き、`audit_slice_fuel` は embedder 向けの契約にしない（[実行予算・協調実行仕様](execution-control.md) のテスト専用フックの項は「テスト専用の内部 surface」とする）。fix スライス fix-engine-config-audit-fields で直す。loop:drift #429 D-133 | §3 | A-1（`audit_sink`）、D3（`audit_slice_fuel`） |
 | CLI の REPL（`src/main.rs`、tree・VM の両 REPL loop が使う）は、継続入力の判定（`is_incomplete`）で `Lexer` を、EOF の診断（`finish_repl_at_eof`）で `Lexer`・`Parser` を直接呼ぶ。目標は §12 の「parser/compiler/evaluator/VMを直接呼ばない」。fix スライス fix-cli-repl-compile-diagnostics で、EOF の診断を `Engine::compile` の `CompileErrors` から出すようにする（継続判定のトークン走査を許すかはその設計で決める）。loop:drift #429 D-134 | §12 | E7（tree REPL の Engine API 統合） |
 | `HostErrorCode::new`（`src/embedding.rs`）は NUL を含まない文字種の違反（`"A"`・`"1a"`）にも `ConfigError::IdentifierContainsNul` を返す。目標は §8 のとおり `ConfigError::InvalidDescriptor { field: "host_error_code", code: "invalid_identifier" }`。fix スライス fix-host-error-code-invalid-descriptor で直す。loop:drift #352 D-68 | §3・§8 | 既存の挙動（loop:drift #352 D-68 で確認） |
+| `src/lib.rs`・`src/main.rs`・`src/bin/gen_builtins_doc.rs` の crate root に `#![cfg_attr(not(test), forbid(unsafe_code))]` が無く、production コードに `unsafe` を足しても `cargo build`・`cargo test` は失敗しない（設計時点の main 1a9463e で production コードの `unsafe` は 0 か所）。目標は §11 規則 6。manifesto-check-no-unsafe で直す。issue #543 | §11 | 既存の状態（issue #543 で目標を追加） |
 
 ## 1. 目的と規範範囲
 
@@ -536,6 +537,7 @@ pub enum StartError {
 3. panic payload/native backtraceはpublic errorへ含めず、host-only diagnostic hookがある場合だけ渡す。
 4. `panic=abort`、OOM、stack overflow abort、FFI UB、callback内process exit/abortは捕捉不能。[脅威モデル](threat-model.md)どおり別process隔離が最終防御である。
 5. 公式host function/adapterはpanic、abort、process exitを行ってはならない。
+6. Tsumugi 自身の crate（lib、CLI adapter の `src/main.rs`、開発用ツールの `src/bin/`）の production コード（`#[cfg(test)]` の付いたコードを除く）は `unsafe` を使わない。各 crate root に `#![cfg_attr(not(test), forbid(unsafe_code))]` を置き、`unsafe` が入れば `cargo build`・`cargo test` が失敗するようにする。規則 4 の「FFI UB」のうち Tsumugi 自身が持ち込む分をこの規則で閉じる。依存 crate の中の `unsafe` は [脅威モデル](threat-model.md) TM-012 のとおり host 責任で、この規則の対象外である（issue #543）。
 
 ## 12. CLI adapter
 
@@ -765,6 +767,76 @@ manifesto-check-ambient-surface（[Capability Model仕様](capability-model.md) 
     採らなかった案 B（共有は mod の除外までとし、広い除外は新しいテストだけに置く）は、ambient の検査の挙動に触れずに済む（原則 8）が、切り出しが 2 通りになって 2 つの検査の範囲が違う理由を持ち続けることになり、
     Q1=A で採らなかった案 B と同じ弱点を範囲の定義の側に残す（原則 9）。除かれるのは build に入らないコードだけなので、ambient の側を広いまま残しても原則 2 の裏付けは強まらないため採らない。
     判断の外の気付き（判断役のコメント）を受け、`#[cfg(test)]` と item が同じ行にある場合（`src/embedding.rs` 2229 行）の扱いを実装範囲 3 と NHA-AT-01 に明記した。2 つの検査に同時に効く切り出しの誤りで `run_audited_inner` の本体を丸ごと除かないためである。
+
+### manifesto-check-no-unsafe 実装スライス（Tsumugi 自身の crate の production コードへの `unsafe` の追加を `forbid(unsafe_code)` で止める）
+
+issue #543（kamonabe、手順書 §8 で受け入れ）を受けて、本書 §11 規則 6 を足し、その規則を機械で守る。loop-guard §4.1 の 1 段目（機械チェック）のうち、
+[マニフェスト](manifesto.md) 原則 1（ホストの安定性）と 6（ホストプロセスを abort させない）に当たる。`unsafe` の中の未定義動作は §11 規則 1 の
+`catch_unwind` でも捕まらず（規則 4 の「FFI UB」）、manifesto-check-no-host-abort（`tests/no_host_abort_audit.rs`）と
+manifesto-check-ambient-surface（`tests/ambient_access_audit.rs`）の検出パターンにも入らないので、入る前に止める。
+先行の 2 本と同じく親は AUD-022 で、置き場所も同じ並び（本書 §14 の manifesto-check 系の小節）にした。
+
+- **前提（設計時点の main 1a9463e で確かめたこと）**:
+  - `src/` 配下で `unsafe` のキーワードは 2 か所だけで、どちらも `src/embedding.rs` の `#[cfg(test)] mod` の中のテスト
+    `c3_env_snapshot_is_fixed_and_isolated_from_process_env` が、edition 2024 で `unsafe` になった `std::env::set_var`・`remove_var` を呼ぶもの。
+    ほかに `unsafe` を含む字句は `src/capability.rs` の関数名 `reject_if_unsafe_reparse` とそのコメントだけで、キーワードではない。
+  - `#[no_mangle]`・`#[export_name]`・`#[link_section]`・`extern` ブロック（`unsafe_code` の lint が対象にするもの）は `src/` に無い。
+  - `src/lib.rs` の crate attribute は `#![allow(clippy::…)]` の 3 行だけで、`src/main.rs`（`src/cli_capability.rs` はこの crate の module）と
+    `src/bin/gen_builtins_doc.rs` には crate attribute が無い。`Cargo.toml` に `[lints]` は無い。
+  - 3 つの crate root に下の attribute を置いた手元の確かめで、`cargo build --all-targets --all-features` と `cargo test --lib --all-features c3_env`
+    （上のテストを含む）は通り、`src/value.rs`（lib）と `src/cli_capability.rs`（bin）に `unsafe {}` を足すとそれぞれ `cargo build` が
+    `error: usage of an unsafe block` で失敗した。
+- **やり方の選択**（issue #543 が設計役に任せた点。下の「設計役の選択」に理由）: A の `#![cfg_attr(not(test), forbid(unsafe_code))]` を採る。
+  対象には `src/main.rs` と `src/bin/` を含める。
+- **実装範囲**:
+  1. `src/lib.rs`・`src/main.rs`・`src/bin/` の各 crate root（今は `gen_builtins_doc.rs` の 1 本）の先頭の inner attribute の並び（`//!` の doc コメントの後、最初の
+     `mod`・`use`・item の前）に、`#![cfg_attr(not(test), forbid(unsafe_code))]` を 1 行置く。理由を 1 行の通常のコメントで添え、本書 §11 規則 6 を指す。
+     `forbid` なので、下位の module や item で `#[allow(unsafe_code)]` に戻せない（E0453）。例外を作るにはこの attribute 自体を変える PR が要る。
+  2. 新しい `tests/no_unsafe_audit.rs` を置き、次を確かめる。ファイル冒頭に、検査項目・守る原則・本書 §11 の規則・脅威モデルの TM-ID の対応表を置く。
+     - crate root の列挙: `src/lib.rs`・`src/main.rs` と、`src/bin/` 直下の `*.rs` と `src/bin/*/main.rs`（Cargo の bin の自動検出の規則）。
+       `src/bin/` に bin を足せば自動で対象に入る。
+     - 各 crate root に、実装範囲 1 の attribute と完全に一致する行（前後の空白を除く）が、最初の `mod`・`use`・`fn`・`pub` などの item より前にある。
+       コメントや文字列の中の一致は数えない（`tests/support/source_scan.rs` の `strip_literals_and_comment` を使ってよい）。
+     - attribute の意味の確かめ: 実装範囲 1 の attribute（テストの定数で持ち、上の照合と同じ文字列）を先頭に置いた小さな fixture を、一時ディレクトリで
+       `rustc --edition 2024 --crate-type lib --emit metadata` に通す（`rustc` は環境変数 `RUSTC` があればそれ、無ければ `PATH` の `rustc`）。
+       `unsafe {}` を含む fixture と、その関数に `#[allow(unsafe_code)]` を付けた fixture は失敗し、`--test` を付けて `#[cfg(test)]` の中だけに
+       `unsafe` を置いた fixture は成功する。
+  3. `Cargo.toml` は変えない（`[lints.rust] unsafe_code = "forbid"` は `#[cfg(test)]` の中の `unsafe` も止めるので採らない。issue #543）。
+- **観測される変化**: 無い。言語の挙動・公開 API・CLI の出力・fuel・heap・監査の値は変えない。`unsafe` を足した build が失敗するようになるだけである。
+- **検査の限界**: `#[cfg(test)]` の付いたコードの `unsafe` は対象外（issue #543 のとおり）。`cargo test` の lib の unit test の build（`cfg(test)`）では
+  attribute が外れるが、同じ `cargo test` が integration test と doctest のために lib と bin を `cfg(test)` 無しで build するので、production コードの `unsafe` は
+  そこで失敗する（`--no-default-features` では bin `tsumugi` を作らないので、その構成では lib と `gen_builtins_doc` だけを見る）。依存 crate の中の `unsafe`（TM-012）、`benches/`・`examples/`・`tests/` の crate、build script は対象外。crate root の attribute を消す・
+  弱める変更は、実装範囲 2 の照合で `cargo test` が失敗する（そのテストまで消す変更はレビューで見る）。
+- **範囲外**: `src/` の production コードの書き換え（`unsafe` は今 0 か所）。`benches/`・`examples/` の crate への attribute。`Cargo.toml` の `[lints]`。
+  `src/embedding.rs` のテストの `unsafe`。依存 crate の監査。`.github/`（凍結）と CI の job（今ある `cargo build`・`cargo test`・`cargo clippy` の中で止める）。
+- **触る trust boundary と脅威**: 実行時の経路は変えない。守るのは [脅威モデル](threat-model.md) §6 の B3（native code 境界）の内側の Tsumugi 自身のコードで、
+  §10 の TM-014 の残余リスク「FFI UB」のうち Tsumugi が自分で持ち込む分を 1 段目で閉じる。受入基準は NUS-AT-01〜03。TM-012（依存 crate）は host 責任のまま扱わない。
+- **受入基準**:
+  - **NUS-AT-01**（attribute の位置）: `src/lib.rs`・`src/main.rs`・`src/bin/` の全 crate root に、実装範囲 1 の attribute が最初の item より前にあり、
+    1 つでも欠ける・文字列が違う・item の後ろにある・コメントの中にあるだけなら検査が失敗する。確かめ方: `tests/no_unsafe_audit.rs` で main の 3 本を照合する test と、
+    文字列の入力（欠ける・`warn` に弱めた・item の後ろ・コメントの中）で判定関数を呼ぶ unit。crate root の列挙が `src/bin/` の `*.rs` と `*/main.rs` を拾う unit。
+  - **NUS-AT-02**（production の `unsafe` を止める）: 実装範囲 1 の attribute の下で、`unsafe` ブロックを含む lib は `rustc` が失敗し、`#[allow(unsafe_code)]` で
+    戻そうとしても失敗し、`--test` の build の `#[cfg(test)]` の中の `unsafe` は通る。確かめ方: 実装範囲 2 の fixture の test。加えて実装 PR の本文に、lib の 1 ファイルと
+    `src/cli_capability.rs` に `unsafe {}` を足したときの `cargo build` の失敗を貼る（commit しない）。
+  - **NUS-AT-03**（今の main で通る）: `cargo build --all-targets --all-features`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`
+    （`src/embedding.rs` の `c3_env_snapshot_is_fixed_and_isolated_from_process_env` を含む）が通る。確かめ方: 手順書 §14.2 の機械チェックと CI。
+- **想定の変更規模**: `src/` は 3 ファイルに attribute 1 行とコメント 1 行ずつで +6 行程度（`#[cfg(test)]` を除く）。テストは `tests/no_unsafe_audit.rs` が
+  +100〜180 行（fixture と unit を含む）。触る仕組みは「Tsumugi 自身の crate の静的検査（crate attribute と tests/ の 1 本）」1 つで、受入基準は 3 項目。
+  [開発ループ手順書](loop-runbook.md) §14.1 に収まる。done にする実装 PR で、本書の逸脱一覧の「crate root に `#![cfg_attr(not(test), forbid(unsafe_code))]` が無い」行（§11 規則 6 の未実装範囲）を削除する。
+- **依存**: なし。
+- **設計役の選択**（issue #543 が設計役に任せた点。spec に無い判断で公開 API・データ構造・言語挙動に影響するものは無い）:
+  - **A を採る**（`#![cfg_attr(not(test), forbid(unsafe_code))]`）。理由: 検出をコンパイラの lint に任せるので、`unsafe` ブロックだけでなく `unsafe fn`・
+    `unsafe impl`・`unsafe extern`・`#[no_mangle]` のような unsafe な attribute まで、文字列照合の取りこぼし（`macro_rules!` の展開先、`reject_if_unsafe_reparse`
+    のような識別子との区別）無しに止められる。`forbid` は下で `allow` に戻せないので、例外は crate root の attribute を変える差分としてレビューと
+    審査に必ず見える（原則 1・9、優先順位の表「再現可能な検証 ＞ 根拠のない安全性の主張」）。採らなかった B（`tests/support/source_scan.rs` を使う許可リスト方式）は、
+    行単位の字句照合なので上の取りこぼしがあり、許可 0 組の検査を保つために `cfg(test)` の切り出しと識別子の境界の判定を正しく持ち続ける必要がある。
+    それでも A と同じ範囲を止められないため採らない。A の弱点（attribute を消せば止まらない）は、実装範囲 2 の照合（NUS-AT-01）で `cargo test` を失敗させて補う。
+  - **`src/main.rs` と `src/bin/` を含める**。理由: CLI adapter はホストの process そのもので、`unsafe` の未定義動作は lib と同じく捕まえられない（§11 規則 4）。
+    今 0 か所で、足すのは 1 行ずつなので、「Tsumugi 自身の crate の production コード」を 1 つの規則で言える（原則 9）。`#[cfg(test)]` を外す形は lib と揃え、
+    CLI のテストが環境変数を書き換える場合に lib と同じ扱いにする。`benches/`・`examples/` は host に配る production コードではないので含めない。
+  - **置き場所は本書 §14 の manifesto-check 系の小節の並び、親は AUD-022**。理由: 規則の目標（§11）が本書にあり、先行の manifesto-check-no-host-abort（§11 規則 5 を
+    裏付ける）と同じ形で §11 規則 6 を裏付けるスライスだからである。`slices.toml` の親も先行の 3 本（ambient-surface・no-host-abort・no-host-unwrap）に揃える。
+  - **`order` は 120**。手順書 §8 の「それ以外」の既定（すべてのスライスより後。設計時点の最大は 119）で、issue #543 の「順番」のとおり。
 
 ### fix-link-request-budget-charge 実装スライス（`Engine::link` で `LinkRequest` の budget に source/import の count・bytes を課金し上限を判定する）
 
