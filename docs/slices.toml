@@ -1046,12 +1046,18 @@ order      = 16
 # manifesto-check-no-host-abort の設計（判断役が選択（PR #462）の Q4=A）で、`.unwrap()`・`.expect()` の検査を分けた sub-slice。未設計（todo）。
 # lib の production コードに `.unwrap()` が 7 か所・`.expect(` が 120 か所余り（設計時点の main c5e5e84 の粗い数え）あり、検査に含めると
 # 許可リストか `src/` の書き換えが大きくなるため別にした。order は loop-runbook §8 の「それ以外」の既定（すべてのスライスより後）。
+# issue #544 で設計して ready にした（設計時点の main 1a9fc11 で `.unwrap()` 7 行・`Option`/`Result` の `.expect(` 102 行。parser の自前の
+# `self.expect(` 27 行は別）。order は issue #544 のとおり 116 → 73（§6.7 のフェーズの最後の audit-vm-triple-c 72 の直後、audit-record-replay 80 より前。
+# 73 は空いていたので、ほかのスライスの order は付け直していない）。
 [[slice]]
 id         = "manifesto-check-no-host-unwrap"
-title      = "lib の production コードの `.unwrap()`・`.expect()` を許可リストか書き換えで扱い、cargo test で固定する（loop-guard §4.1 の 1 段目、原則 6、manifesto-check-no-host-abort の sub-slice）"
-status     = "todo"
+title      = "lib の production コードの `.unwrap()`・`.expect()` が許可リスト外に無いことを cargo test で固定する（loop-guard §4.1 の 1 段目、原則 6、manifesto-check-no-host-abort の sub-slice、issue #544）"
+status     = "ready"
 parent     = "AUD-022"
-order      = 116
+spec       = { doc = "docs/embedding-api.md", section = "manifesto-check-no-host-unwrap 実装スライス（lib の production コードの `.unwrap()`・`.expect()` が許可リスト外に無いことを固定する）" }
+acceptance = ["NHU-AT-01..04"]
+depends_on = ["manifesto-check-no-host-abort"]
+order      = 73
 
 # loop:drift #373 の D-69・D-71・D-70 で逸脱一覧・未実装範囲に載せた差の延期先。未設計（todo）。
 # fix 2 本の order は loop-runbook §8 の「不具合の報告」の既定（今ある ready より前）にすべきだが、ready の最小は 32 で
