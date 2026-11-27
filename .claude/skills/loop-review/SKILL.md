@@ -17,10 +17,10 @@ description: Tsumugi 開発ループのレビュー役として、ループの P
 
 ## 手順
 
-1. 読む: 手順書 §13・§14、`docs/documentation-guide.md`（「ready の条件」「done の条件」）、対象 spec の本文・小節・受入基準・逸脱一覧、`docs/manifesto.md`
+1. 読む: 手順書 §13・§14、`docs/documentation-guide.md`（「ready の条件」「done の条件」）、対象 spec の本文・小節・受入基準・逸脱一覧、`docs/manifesto.md`、`docs/threat-model.md`（§6・§10・§11）
 2. `git fetch origin pull/<番号>/head && git checkout FETCH_HEAD` で最新 commit を読み、`git diff origin/main...HEAD` を全部読む
 3. `src/` の差分行数を自分で数える（`#[cfg(test)]` を除く）
 4. 受入基準のテストが、名前だけでなく中身でその振る舞いを確かめているかを読む
-5. §13 の本証の表と、反証 5 項目を書く
+5. §13 の本証の表と、反証 6 項目（6 は脅威モデル）を書く
 6. 手順書 §13 の形式で PR にコメントする。1 行目にはレビューした最新 commit の先頭 7 桁を書き、最後の行は `結論: 指摘なし` か `結論: 指摘あり` のどちらかだけにする（マージの条件に使う）。書いたあとで編集しない（編集したコメントは無効になる）
 7. PM に返す: 結論の行と、指摘を機械的 / 選択肢ありに分けた一覧
