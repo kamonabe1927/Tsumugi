@@ -1613,7 +1613,7 @@ order      = 120
 #   一覧を Phase 0〜7 まで一度に作ると 1 回の実装に収まらないので、形と検査と Phase 0・1 を a に、Phase 2〜4 を b に、Phase 5〜7 を c に割った
 #   （割り方の理由は verification-release-operations「phase-gates-a 実装スライス」）。parent は Phase 7 の検証の gate を持つ AUD-022。
 # order は loop-runbook §8 の「それ以外」の既定（すべてのスライスより後。設計時点の最大は 120）。§6.7 のフェーズのスライスは今 todo で
-#   この order より前（89〜）にあるので、フェーズのスライスが ready になれば先に実装される。a を今 ready にするか、フェーズの後まで
+#   この order より前（74・75）にあるので、フェーズのスライスが ready になれば先に実装される。a を今 ready にするか、フェーズの後まで
 #   todo に置くかは設計 PR #558 の判断の候補 Q1。
 # 見積もり（a）: src/ 0 行、テスト +200〜350 行とパーサの移動、docs/phase-gates.toml 25〜40 行、受入基準 4。
 [[slice]]
