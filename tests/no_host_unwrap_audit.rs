@@ -135,7 +135,7 @@ const ALLOWLIST: &[Allow] = &[
     Allow {
         file: "eval.rs",
         key: "expect",
-        count: 31,
+        count: 30,
         reason: "tree 評価器の frame・operand stack の不変条件（直前の `len > stop_depth` の検査、作る側が積んだ式 frame・driver の Call frame・callback 状態・pending key・push の代入先）、builtin の arity は評価前に `validate_context_builtin_call`・`check_arity_count` が検査、直前の matches! の検査、数値の組の compare_relational。`run_slice` は begin_execution 済みの session を前提にする埋め込みの契約（ホストの呼び順）で、script の入力では届かない",
         principle: "6",
     },

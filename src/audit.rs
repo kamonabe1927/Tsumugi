@@ -1264,6 +1264,166 @@ pub(crate) fn queue_envelope_overhead_bytes(language_revision: &str) -> u64 {
     cbor::envelope_fixed_len_upper_bound(language_revision).unwrap_or(u64::MAX)
 }
 
+/// audit drain queue の byte 計器（Phase 6 B-2、§10.2。audit-vm-triple-c で tree と VM の共有へ移した）。
+///
+/// queue は「生成済みだが sink の ack をまだ得ていない通常 event」の推定 encoded byte 合計。
+/// `bytes` は backend の buffer（host-call triple・`Yielded`/`Resumed`・buffer へ移った
+/// `BudgetCharged`）に積んだ時点で加算し、facade が sink の ack を得た時点で減算する（drain 済み・
+/// in-flight の event も ack まで queue に残る）。accumulator 内の確定済み `BudgetCharged` は
+/// [`crate::budget::BudgetLedger::audit_finalized_charge_bytes`] の合計を判定時に足す。
+/// tree（`Evaluator`）と VM（`Vm`）が同じ型・同じ関数で持つ（片方だけ直る差を作らない）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AuditQueueMeter {
+    /// `AuditBudget.max_pending_bytes`（per-execution 上限）。
+    limit: u64,
+    /// envelope 固定部の上限値の byte 数（[`queue_envelope_overhead_bytes`]）。
+    envelope_overhead: u64,
+    /// backend の buffer 由来の未 ack event の推定 byte 合計。
+    bytes: u64,
+}
+
+impl AuditQueueMeter {
+    /// 監査付き実行の計器を作る（`bytes` は 0）。
+    pub(crate) fn new(limit: u64, envelope_overhead: u64) -> Self {
+        Self {
+            limit,
+            envelope_overhead,
+            bytes: 0,
+        }
+    }
+
+    /// event 1 件の計上 byte 数（envelope 固定部の上限値 ＋ event 本体の実 encode 長）。
+    fn event_bytes(&self, event: &AuditEvent) -> u64 {
+        self.envelope_overhead
+            .saturating_add(queued_event_bytes(event))
+    }
+
+    /// event 1 件を queue へ計上する（journal の append の増分以上で数える）。
+    pub(crate) fn admit(&mut self, event: &AuditEvent) {
+        self.bytes = self.bytes.saturating_add(self.event_bytes(event));
+    }
+
+    /// sink の ack を得た event 1 件を queue から外す。
+    pub(crate) fn release(&mut self, event: &AuditEvent) {
+        self.bytes = self.bytes.saturating_sub(self.event_bytes(event));
+    }
+
+    /// 現在の queue の推定 byte 数。buffer 由来の未 ack 分に、backend の ledger の accumulator 内の
+    /// 確定済み `BudgetCharged` を足す。
+    pub(crate) fn queued_bytes(&self, ledger: &crate::budget::BudgetLedger) -> u64 {
+        self.bytes
+            .saturating_add(ledger.audit_finalized_charge_bytes(self.envelope_overhead))
+    }
+
+    /// トップレベル境界で queue 上限による yield が必要か（B-2）。`progress`（この区切りで 1 文・
+    /// 1 反復以上進めたか、前進保証）が真で、queue が上限以上のときだけ真。
+    pub(crate) fn exceeded(&self, progress: bool, ledger: &crate::budget::BudgetLedger) -> bool {
+        progress && self.queued_bytes(ledger) >= self.limit
+    }
+}
+
+/// yield/resume lifecycle 監査 event（§7.2 CBOR tag 5/6）の pair の状態（Phase 6。
+/// audit-vm-triple-c で tree と VM の共有へ移した）。
+///
+/// `poll_index` は execution ごとに 0 始まりで単調増加し、1 回の yield/resume pair（`Yielded` と
+/// その直後の `Resumed`）へ同値を使う。`last_yield_reason` / `last_yield_poll_index` は直前の
+/// yield の事由と poll_index、`saved_yield_before_backpressure` は backpressure yield が外側の
+/// yield（SliceFuel/Explicit）の内側で起きたときの退避 slot（B-1、§5.1）。tree（`Evaluator`）と
+/// VM（`Vm`）が同じ型・同じ関数で持ち、実行の入口で [`Self::reset`] する。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AuditYieldPairs {
+    poll_index: u64,
+    last_yield_reason: Option<AuditYieldReason>,
+    last_yield_poll_index: u64,
+    saved_yield_before_backpressure: Option<(AuditYieldReason, u64)>,
+}
+
+impl AuditYieldPairs {
+    /// 実行の入口で 0 へ戻す（前実行の pending resume / yield を持ち越さない）。
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// 1 つの yield/resume poll point へ poll_index を発番する。`checked_add` で overflow を
+    /// fail-closed（internal error）にする。
+    fn alloc_poll_index(&mut self, line: usize) -> Result<u64, crate::error::TsumugiError> {
+        let index = self.poll_index;
+        self.poll_index = self.poll_index.checked_add(1).ok_or_else(|| {
+            crate::error::TsumugiError::internal(line, "yield poll_index を割り当てできません")
+        })?;
+        Ok(index)
+    }
+
+    /// 直前の yield が残した事由を取り出し、pair の `Resumed` を返す（slice の先頭の resume）。
+    pub(crate) fn take_resume(&mut self, usage: BudgetUsage) -> Option<AuditEvent> {
+        let previous_reason = self.last_yield_reason.take()?;
+        Some(AuditEvent::Resumed {
+            previous_reason,
+            poll_index: self.last_yield_poll_index,
+            usage,
+        })
+    }
+
+    /// slice の境界の yield へ poll_index を発番し、pair の `Resumed` が再利用できるよう退避して
+    /// `Yielded` を返す。
+    pub(crate) fn record_yield(
+        &mut self,
+        reason: AuditYieldReason,
+        usage: BudgetUsage,
+    ) -> Result<AuditEvent, crate::error::TsumugiError> {
+        let poll_index = self.alloc_poll_index(0)?;
+        self.last_yield_reason = Some(reason.clone());
+        self.last_yield_poll_index = poll_index;
+        Ok(AuditEvent::Yielded {
+            reason,
+            poll_index,
+            usage,
+        })
+    }
+
+    /// backpressure（sink の `Pending`）の `Yielded(AuditBackpressure)` を返す（B-1、§5.1）。
+    ///
+    /// 外側 yield の pair 情報を退避してから発番する。発番に失敗したら退避を戻して `Err`。
+    /// 呼び出し元は先に accumulator を flush する（§8 規則7）。
+    pub(crate) fn record_backpressure_yield(
+        &mut self,
+        usage: BudgetUsage,
+    ) -> Result<AuditEvent, crate::error::TsumugiError> {
+        self.saved_yield_before_backpressure = self
+            .last_yield_reason
+            .take()
+            .map(|reason| (reason, self.last_yield_poll_index));
+        match self.record_yield(AuditYieldReason::AuditBackpressure, usage) {
+            Ok(event) => Ok(event),
+            Err(e) => {
+                self.restore_saved_yield();
+                Err(e)
+            }
+        }
+    }
+
+    /// backpressure から resume したときの `Resumed(AuditBackpressure)` を返す。直前の事由が
+    /// `AuditBackpressure` のときだけ pair を張り、退避した外側 yield の pair 情報を戻す。
+    pub(crate) fn record_backpressure_resume(&mut self, usage: BudgetUsage) -> Option<AuditEvent> {
+        if !matches!(
+            self.last_yield_reason,
+            Some(AuditYieldReason::AuditBackpressure)
+        ) {
+            return None;
+        }
+        let event = self.take_resume(usage);
+        self.restore_saved_yield();
+        event
+    }
+
+    fn restore_saved_yield(&mut self) {
+        if let Some((reason, index)) = self.saved_yield_before_backpressure.take() {
+            self.last_yield_reason = Some(reason);
+            self.last_yield_poll_index = index;
+        }
+    }
+}
+
 // =============================================================================
 // §10.1 journal（per-execution bounded logical journal）
 // =============================================================================

@@ -873,13 +873,14 @@ order      = 71
 [[slice]]
 id         = "audit-vm-triple-c"
 title      = "VM の audit backpressure（drain queue の byte 計上とトップレベル境界の Yielded/Resumed）と ConfigError::AuditSinkWithExperimentalBackend の撤去"
-status     = "ready"
+status     = "done"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-triple-c 実装スライス（VM の audit backpressure と `ConfigError::AuditSinkWithExperimentalBackend` の撤去）" }
 acceptance = ["AVT-AT-11..15"]
 depends_on = ["audit-vm-triple-b"]
 design_pr  = 556
+impl_pr    = 557
 order      = 72
 
 # audit-vm-triple-c の設計 PR で登録（判断の候補 Q2 の推奨案 A）。c は監査 sink・audit_slice_fuel・VmExperimental の同時設定を
@@ -893,6 +894,19 @@ parent     = "VM parity"
 spec_slice = "determinism Slice 6"
 depends_on = ["audit-vm-triple-c"]
 order      = 74
+
+# audit-vm-triple-c の実装 PR #557 で登録（判断の候補 Q1=A、判断役が選択（PR #557））。VM の audit drain queue の上限の判定点に、
+#   tree の run_driver と同じ block（if・else・try・catch の本体）の末尾を足し、上限が Resumed 1 件の計上 byte 数より小さいときも
+#   Yielded/Resumed(AuditBackpressure) の数を tree と一致させる。受入基準の候補: その上限のケースを tests/vm_parity.rs の
+#   Axis::Audit に入れて一致を gate する。§6.7 のフェーズのスライス。未設計。order は audit-vm-slice-fuel（74）の後で空いている 75。
+[[slice]]
+id         = "audit-vm-block-end-boundary"
+title      = "VM の audit drain queue の上限の判定点に block の末尾を足し、Resumed より小さい上限でも AuditBackpressure の yield の数を tree と一致させる"
+status     = "todo"
+parent     = "VM parity"
+spec_slice = "determinism Slice 6"
+depends_on = ["audit-vm-triple-c"]
+order      = 75
 
 [[slice]]
 id         = "audit-record-replay"

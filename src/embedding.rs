@@ -249,12 +249,14 @@ pub enum ConfigError {
     },
     /// 実験 backend が許可されていない。
     ExperimentalBackendNotEnabled,
-    /// 監査 sink と `VmExperimental` backend を同時に設定した（Phase 6 A-1）。
+    /// 監査 sink・`audit_slice_fuel`・`VmExperimental` backend を同時に設定した
+    /// （audit-vm-triple-c、決定記録 Q2=A（PR #556））。
     ///
-    /// 監査付きの run 経路（A-1）は tree evaluator だけを持ち、VM の監査 wiring が無い
-    /// （`Engine::run` の VM の経路は vm-engine-run-route で sink 無しの経路にだけ入った）。
-    /// VM の監査 wiring が入るまで（audit-vm-triple-b・c）、この組み合わせは build 時に拒否する。
-    AuditSinkWithExperimentalBackend,
+    /// VM の監査付き実行は slice fuel の境界で yield しない（`Yielded`/`Resumed(SliceFuelExhausted)`
+    /// を tree と同じ位置に出すのは `audit-vm-slice-fuel`）。設定した slice の分割が VM で黙って
+    /// 効かないことを避けるため、この組み合わせは build 時に拒否する。sink の無い build では
+    /// `audit_slice_fuel` は効かないので拒否しない。
+    AuditSliceFuelWithExperimentalBackend,
     /// 空でない host function registry と `VmExperimental` backend を同時に設定した
     /// （vm-engine-run-route、決定記録 Q2=A）。
     ///
@@ -372,8 +374,9 @@ impl EngineBuilder {
     /// `Terminal`（各 terminal commit 点）を journal 経由で emission する。設定しなければ
     /// 監査は一切起きず、既存挙動と bit-identical（§1.1 の sink 必須は後続スライスへ延期）。
     ///
-    /// A-1 の run 経路は tree-only のため、`VmExperimental` backend と同時に設定したまま
-    /// [`Self::build`] すると [`ConfigError::AuditSinkWithExperimentalBackend`] を返す。
+    /// `VmExperimental` backend とも組み合わせられる（audit-vm-triple-c）。ただし
+    /// [`Self::audit_slice_fuel`] も同時に設定して [`Self::build`] すると
+    /// [`ConfigError::AuditSliceFuelWithExperimentalBackend`] を返す。
     pub fn audit_sink(mut self, sink: Arc<dyn crate::audit::AuditSink>) -> Self {
         self.config.audit_sink = Some(sink);
         self
@@ -442,37 +445,23 @@ impl EngineBuilder {
     /// 設定を検証して [`Engine`] を build する。
     ///
     /// `VmExperimental` を選びつつ許可していない場合は
-    /// [`ConfigError::ExperimentalBackendNotEnabled`] を返す。監査 sink を `VmExperimental`
-    /// backend と同時に設定した場合は [`ConfigError::AuditSinkWithExperimentalBackend`] を返す
-    /// （A-1 の run 経路は tree-only のため。§7.1）。空でない host function registry を `VmExperimental`
+    /// [`ConfigError::ExperimentalBackendNotEnabled`] を返す。監査 sink・`audit_slice_fuel`・
+    /// `VmExperimental` を同時に設定した場合は [`ConfigError::AuditSliceFuelWithExperimentalBackend`]
+    /// を返す（VM は slice fuel の境界で yield しないため）。空でない host function registry を `VmExperimental`
     /// と同時に設定した場合は [`ConfigError::HostFunctionsWithExperimentalBackend`] を返す（VM に
     /// host function の経路が無いため）。host function registry の validation は
     /// registry build 時に済んでいるため、ここでは再検証しない。
     pub fn build(self) -> Result<Engine, ConfigError> {
-        self.build_checked(true)
-    }
-
-    /// **crate 内 test 専用**: 監査 sink と `VmExperimental` の同時設定の拒否
-    /// （[`ConfigError::AuditSinkWithExperimentalBackend`]）だけを通らずに build する
-    /// （audit-vm-triple-b、決定記録 Q2=A（PR #535））。tree と VM の監査付き実行を crate 内の比較
-    /// test で比べるためだけに置く。`#[cfg(test)]` なので crate の外と公開 API からは見えない。
-    #[cfg(test)]
-    pub(crate) fn build_allowing_audit_sink_with_vm_for_test(self) -> Result<Engine, ConfigError> {
-        self.build_checked(false)
-    }
-
-    /// [`Self::build`] の本体。`reject_audit_vm` が `false` なのは crate 内 test の入口だけである。
-    fn build_checked(self, reject_audit_vm: bool) -> Result<Engine, ConfigError> {
         if self.config.backend == Backend::VmExperimental && !self.allow_experimental_backend {
             return Err(ConfigError::ExperimentalBackendNotEnabled);
         }
-        // Phase 6 A-1: 監査 sink と VmExperimental の組み合わせは、VM の監査 backpressure
-        // （audit-vm-triple-c）が入るまで拒否する。
-        if reject_audit_vm
-            && self.config.audit_sink.is_some()
+        // audit-vm-triple-c（決定記録 Q2=A）: VM の監査付き実行は slice fuel の境界で yield しない
+        // （`audit-vm-slice-fuel`）ので、監査 sink・audit_slice_fuel・VmExperimental の同時設定を拒否する。
+        if self.config.audit_sink.is_some()
+            && self.config.audit_slice_fuel.is_some()
             && self.config.backend == Backend::VmExperimental
         {
-            return Err(ConfigError::AuditSinkWithExperimentalBackend);
+            return Err(ConfigError::AuditSliceFuelWithExperimentalBackend);
         }
         // vm-engine-run-route（決定記録 Q2=A）: VM には登録 host function を呼ぶ経路が無いので、
         // 空でない registry と VmExperimental の組み合わせを拒否する。
@@ -2034,6 +2023,77 @@ impl ExecutionContext {
         }
     }
 
+    /// 監査付き実行の backend の buffer（host-call triple・`Yielded`/`Resumed`・flush 済みの
+    /// `BudgetCharged`）を drain する（VM の状態があれば VM、無ければ tree。audit-vm-triple-c）。
+    fn drain_audit_events(&mut self) -> Vec<crate::audit::AuditEvent> {
+        match self.vm.as_deref_mut() {
+            Some(state) => state.vm.drain_audit_events(),
+            None => self.evaluator.drain_audit_events(),
+        }
+    }
+
+    /// backend の accumulator に残る `BudgetCharged` を drain する（audit-vm-triple-c）。
+    fn drain_budget_charges(&mut self) -> Vec<crate::audit::AuditEvent> {
+        match self.vm.as_deref_mut() {
+            Some(state) => state.vm.drain_budget_charges(),
+            None => self.evaluator.drain_budget_charges(),
+        }
+    }
+
+    /// backend の audit drain queue へ event 1 件を計上する（計器が無ければ no-op。audit-vm-triple-c）。
+    fn audit_queue_admit(&mut self, event: &crate::audit::AuditEvent) {
+        match self.vm.as_deref_mut() {
+            Some(state) => state.vm.audit_queue_admit(event),
+            None => self.evaluator.audit_queue_admit(event),
+        }
+    }
+
+    /// backend の audit drain queue から ack 済みの event 1 件を外す（audit-vm-triple-c）。
+    fn audit_queue_release(&mut self, event: &crate::audit::AuditEvent) {
+        match self.vm.as_deref_mut() {
+            Some(state) => state.vm.audit_queue_release(event),
+            None => self.evaluator.audit_queue_release(event),
+        }
+    }
+
+    /// backend の audit drain queue の推定 byte 数（計器が無ければ `None`。audit-vm-triple-c）。
+    fn audit_queue_bytes(&self) -> Option<u64> {
+        match &self.vm {
+            Some(state) => state.vm.audit_queue_bytes(),
+            None => self.evaluator.audit_queue_bytes(),
+        }
+    }
+
+    /// backend へ `Yielded(AuditBackpressure)` を記録する（sink の `Pending`。audit-vm-triple-c）。
+    fn record_backpressure_yield(&mut self) -> Result<(), TsumugiError> {
+        match self.vm.as_deref_mut() {
+            Some(state) => state.vm.record_backpressure_yield(),
+            None => self.evaluator.record_backpressure_yield(),
+        }
+    }
+
+    /// backend へ `Resumed(AuditBackpressure)` を記録する（ack を得た。audit-vm-triple-c）。
+    fn record_backpressure_resume(&mut self) {
+        match self.vm.as_deref_mut() {
+            Some(state) => state.vm.record_backpressure_resume(),
+            None => self.evaluator.record_backpressure_resume(),
+        }
+    }
+
+    /// backpressure の待ちの各ステップで cancel → deadline の順に checkpoint を評価する
+    /// （backend の ledger の token と clock。audit-vm-triple-c）。止めるべきなら `true`。
+    fn audit_backpressure_stop_requested(&self) -> bool {
+        match &self.vm {
+            Some(state) => {
+                state.vm.checkpoint_cancel().is_err() || state.vm.checkpoint_deadline().is_err()
+            }
+            None => {
+                self.evaluator.checkpoint_cancel().is_err()
+                    || self.evaluator.checkpoint_deadline().is_err()
+            }
+        }
+    }
+
     /// 実行に使った backend（VM の状態があれば VM、無ければ tree）が退避した `BudgetExceeded` の
     /// 細粒度 resource を取り出す（監査 Terminal 用、§7.2。audit-vm-triple-b）。読み取ると消費する。
     fn take_pending_budget_resource(&self) -> Option<crate::budget::BudgetResource> {
@@ -2777,13 +2837,16 @@ impl Engine {
     /// 監査付きの VM の driver（audit-vm-triple-b）。
     ///
     /// sink 無しの [`Self::execute_program_vm`] と同じ手順（据え直し → pre-cancel → 注入 → 展開・課金 →
-    /// compile・実行 → 写像 → capability の後始末）で実行し、注入の後・実行の前に engine の redaction
-    /// policy を VM へ渡す（tree の [`Self::run_audited_driver`] と同じ位置）。VM は slice の境界を
-    /// 持たないので、terminal の後に VM の buffer（host-call triple と flush 点の `BudgetCharged`）→
-    /// accumulator に残る `BudgetCharged` の順で 1 回だけ配送する（[`AuditDelivery::flush_events`]、
-    /// §8 規則3/7/9）。`audit_slice_fuel` は見ない。配送の途中で監査が失敗したら、実行の outcome を
-    /// `terminal_outcome_from(&outcome, None)` で写した `withheld` を添えて `Failed` を返す（tree の
-    /// terminal の slice の後の失敗と同じ規則）。
+    /// compile・実行 → 写像 → capability の後始末）で実行し、注入の後・実行の前に audit drain queue の
+    /// 上限と engine の redaction policy を VM へ渡す（tree の [`Self::run_audited_driver`] と同じ位置）。
+    /// VM はトップレベル境界で queue が上限以上なら `Yielded(AuditBackpressure)` を積んで中断する
+    /// （audit-vm-triple-c）。driver はそのたびに buffer を配送して queue を 0 へ戻し、`Resumed` を
+    /// 積んでから続きを回す（tree の `YieldedAuditQueue` と同じ順、§8 規則8）。terminal の後に
+    /// buffer → accumulator に残る `BudgetCharged` の順で配送する（[`AuditDelivery::flush_events`]、
+    /// §8 規則3/7/9）。`audit_slice_fuel` は build が拒否する（`audit-vm-slice-fuel`）。yield の配送で
+    /// 監査が失敗したら、実行の開始時点へ rollback して `withheld: Cancelled` の `Failed` を返す（tree の
+    /// yield の途中の失敗と同じ）。terminal の後の配送の失敗は、実行の outcome を
+    /// `terminal_outcome_from(&outcome, None)` で写した `withheld` を添える（tree と同じ規則）。
     #[allow(clippy::too_many_arguments)]
     fn run_audited_driver_vm(
         &self,
@@ -2804,12 +2867,30 @@ impl Engine {
         if let Err(pre_cancel) = self.install_vm_execution_state(state, request) {
             return AuditDrive::Terminal(pre_cancel);
         }
+        // audit drain queue の per-execution 上限を張る（tree の `set_audit_queue` と同じ位置）。
+        state.vm.set_audit_queue(
+            self.audit_budget.max_pending_bytes,
+            crate::audit::queue_envelope_overhead_bytes(&delivery.language_revision),
+        );
         // Phase 6 R-1: host-call payload 構築へ注入 redaction policy を渡す（§9.1）。
         state.vm.set_redaction_policy(self.redaction_policy.clone());
-        let outcome = Self::run_vm_transactional(state, program, root_source_bytes, graph);
-        state
-            .vm
-            .set_capabilities(crate::capability::CapabilitySet::empty());
+        let mut on_yield = |context: &mut ExecutionContext| delivery.flush_events(context, journal);
+        let result =
+            Self::run_vm_transactional(context, program, root_source_bytes, graph, &mut on_yield);
+        if let Some(state) = context.vm.as_deref_mut() {
+            state
+                .vm
+                .set_capabilities(crate::capability::CapabilitySet::empty());
+        }
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(failure) => {
+                return AuditDrive::Failed {
+                    withheld: crate::audit::TerminalOutcome::Cancelled,
+                    failure,
+                };
+            }
+        };
         if let Err(failure) = delivery.flush_events(context, journal) {
             return AuditDrive::Failed {
                 withheld: crate::audit::terminal_outcome_from(&outcome, None),
@@ -2870,12 +2951,18 @@ impl Engine {
             return *pre_cancel;
         }
 
-        let outcome = Self::run_vm_transactional(state, program, root_source_bytes, graph);
+        // sink 無しの経路は queue の計器を持たないので yield せず、hook は呼ばれない。
+        let mut on_yield = |_: &mut ExecutionContext| Ok(());
+        let outcome =
+            Self::run_vm_transactional(context, program, root_source_bytes, graph, &mut on_yield)
+                .unwrap_or_else(|_| internal_failure("監査の無い VM の実行が中断しました"));
 
         // 7. capability を context に持ち越さない（§10 規則7、tree の clear_capabilities と同じ）。
-        state
-            .vm
-            .set_capabilities(crate::capability::CapabilitySet::empty());
+        if let Some(state) = context.vm.as_deref_mut() {
+            state
+                .vm
+                .set_capabilities(crate::capability::CapabilitySet::empty());
+        }
         outcome
     }
 
@@ -2907,13 +2994,19 @@ impl Engine {
     }
 
     /// 展開・課金・compile・実行を 1 つの transaction として回し、outcome へ写す（vm-engine-run-route）。
+    ///
+    /// VM が queue 上限のトップレベル境界で中断するたびに `on_yield`（監査付き実行の buffer の配送）を
+    /// 呼び、成功したら続きを回す（audit-vm-triple-c）。`on_yield` が失敗したら実行の開始時点へ
+    /// rollback して `Err(failure)` を返す。中断をまたいでも commit・rollback は 1 回の実行として行う。
     fn run_vm_transactional(
-        state: &mut VmContextState,
+        context: &mut ExecutionContext,
         program: &Program,
         root_source_bytes: u64,
         graph: &crate::module::GraphModules,
-    ) -> ExecutionOutcome {
+        on_yield: &mut dyn FnMut(&mut ExecutionContext) -> Result<(), crate::audit::AuditFailure>,
+    ) -> Result<ExecutionOutcome, crate::audit::AuditFailure> {
         use crate::error::ErrorKind;
+        use crate::vm::VmRunStep;
         let terminal = |state: &mut VmContextState, error: TsumugiError| {
             let usage = state.vm.budget_usage();
             let pending_exit = if error.kind() == Some(ErrorKind::ProcessExit) {
@@ -2923,24 +3016,48 @@ impl Engine {
             };
             terminal_outcome(error, usage, pending_exit)
         };
+        let Some(state) = context.vm.as_deref_mut() else {
+            return Ok(internal_failure("VM の状態を持たない実行コンテキストです"));
+        };
         // 4. link が確かめた graph から、context の展開済みの表に対して import を展開し、root source と
         //    新しく展開した module を課金する（CLI の VM REPL の expand_for_repl と同じ規則）。
         let (expanded_program, newly) =
             match crate::module::expand_from_graph(program, graph, &state.expanded) {
                 Ok(expanded) => expanded,
-                Err(error) => return terminal(state, error),
+                Err(error) => return Ok(terminal(state, error)),
             };
         let program = expanded_program.as_ref().unwrap_or(program);
         let module_tokens = match state.vm.charge_link_graph(root_source_bytes, &newly) {
             Ok(tokens) => tokens,
-            Err(error) => return terminal(state, error),
+            Err(error) => return Ok(terminal(state, error)),
         };
         // 5. compile して実行する。失敗した実行は compiler の状態も開始時点へ戻す。
         let compiler_checkpoint = state.compiler.clone();
-        let result = state
-            .compiler
-            .compile_repl_line(program)
-            .and_then(|chunk| state.vm.run_repl_chunk(chunk));
+        let mut step = match state.compiler.compile_repl_line(program) {
+            Ok(chunk) => state.vm.run_repl_chunk_resumable(chunk),
+            Err(error) => VmRunStep::Done(Err(error)),
+        };
+        let result = loop {
+            match step {
+                VmRunStep::Done(result) => break result,
+                VmRunStep::Yielded => {
+                    let delivered = on_yield(context);
+                    let Some(state) = context.vm.as_deref_mut() else {
+                        return Ok(internal_failure("VM の状態を持たない実行コンテキストです"));
+                    };
+                    if let Err(failure) = delivered {
+                        // yield の配送の途中で監査が失敗した。中断した位置で畳み、実行の開始時点へ戻す。
+                        state.vm.abort_suspended_repl_chunk();
+                        state.compiler = compiler_checkpoint;
+                        return Err(failure);
+                    }
+                    step = state.vm.resume_repl_chunk();
+                }
+            }
+        };
+        let Some(state) = context.vm.as_deref_mut() else {
+            return Ok(internal_failure("VM の状態を持たない実行コンテキストです"));
+        };
         let committed = match &result {
             Ok(()) => true,
             Err(error) if error.kind() == Some(ErrorKind::ProcessExit) => {
@@ -2963,12 +3080,12 @@ impl Engine {
             state.module_tokens.extend(module_tokens);
         }
         // 6. outcome は tree と同じ写像で作る。
-        match result {
+        Ok(match result {
             Ok(()) => ExecutionOutcome::Completed {
                 usage: state.vm.budget_usage(),
             },
             Err(error) => terminal(state, error),
-        }
+        })
     }
 
     /// 実行前の engine/context 整合検証と、保持 source からの Program 再構築（案 A）。
@@ -3516,7 +3633,7 @@ impl AuditDelivery {
         if let Some(trace) = self.poll_trace.as_mut() {
             trace.push(crate::engine::PollResult::Yielded {
                 reason: crate::engine::YieldReason::AuditBackpressure,
-                usage: context.evaluator.budget_usage(),
+                usage: context.budget_usage(),
             });
         }
     }
@@ -3553,16 +3670,11 @@ impl AuditDelivery {
                 }
             }
             AuditSubmit::Failed(_) => Err(AuditFailure::Sink),
-            AuditSubmit::Pending(ticket) if context.vm.is_some() => {
-                // audit-vm-triple-b（決定記録 Q1=A、PR #539）: VM の経路は backpressure の
-                // Yielded/Resumed を持たない（audit-vm-triple-c）。ticket を cancel して fail-closed にする。
-                ticket.cancel();
-                Err(AuditFailure::Sink)
-            }
             AuditSubmit::Pending(ticket) => {
                 // backpressure 突入（§10.2）。順序厳守（§4.6 linearization）:
-                // 1) Yielded(AuditBackpressure) を評価器の単一 poll_index カウンタで記録。
-                if context.evaluator.record_backpressure_yield().is_err() {
+                // 1) Yielded(AuditBackpressure) を backend の単一 poll_index カウンタで記録。tree と VM は
+                //    読む先（yield/resume の記録・checkpoint）だけを分け、手順は 1 つ（audit-vm-triple-c）。
+                if context.record_backpressure_yield().is_err() {
                     // poll_index overflow（通常到達不能）は internal fail-closed。
                     ticket.cancel();
                     return Err(AuditFailure::Sink);
@@ -3577,9 +3689,7 @@ impl AuditDelivery {
                 let mut resends: u64 = 0;
                 loop {
                     // 3) 各ステップ先頭で cancel→deadline を try_take より先に評価する（§10.2/§4.6）。
-                    if context.evaluator.checkpoint_cancel().is_err()
-                        || context.evaluator.checkpoint_deadline().is_err()
-                    {
+                    if context.audit_backpressure_stop_requested() {
                         // backpressure 中の cancel/deadline: ack が取れなかったので監査は未完了。
                         // §10.2: script の Deadline より優先して BackpressureDeadline を確定する。
                         ticket.cancel();
@@ -3589,7 +3699,7 @@ impl AuditDelivery {
                     if let Some(result) = ticket.try_take() {
                         match result {
                             Ok(ack) if self.ack_ok(&ack, through_seq) => {
-                                context.evaluator.record_backpressure_resume();
+                                context.record_backpressure_resume();
                                 return Ok(());
                             }
                             _ => return Err(AuditFailure::Sink),
@@ -3604,7 +3714,7 @@ impl AuditDelivery {
                         waker.clone(),
                     ) {
                         AuditSubmit::Ack(ack) if self.ack_ok(&ack, through_seq) => {
-                            context.evaluator.record_backpressure_resume();
+                            context.record_backpressure_resume();
                             return Ok(());
                         }
                         AuditSubmit::Ack(_) => return Err(AuditFailure::Sink),
@@ -3650,22 +3760,13 @@ impl AuditDelivery {
             // accumulator に残る BudgetCharged（§7.3 / §8 規則7、per-slice flush）。accumulator から
             // 直接 drain した分はここで audit drain queue へ計上し直す（B-2: 確定済み分は accumulator
             // 側の合計で数えていたが、drain でそこから外れるため。ack 時に他の event と同様に外す）。
-            // audit-vm-triple-b: VM の状態を持つ context は VM の buffer と accumulator を読む。VM には
-            // audit drain queue が無いので計上も解放もしない（queue は audit-vm-triple-c）。
-            let (events, charges) = match context.vm.as_deref_mut() {
-                Some(state) => (
-                    state.vm.drain_audit_events(),
-                    state.vm.drain_budget_charges(),
-                ),
-                None => {
-                    let events = context.evaluator.drain_audit_events();
-                    let charges = context.evaluator.drain_budget_charges();
-                    for charge in &charges {
-                        context.evaluator.audit_queue_admit(charge);
-                    }
-                    (events, charges)
-                }
-            };
+            // audit-vm-triple-c: VM の状態を持つ context は VM の buffer・accumulator・計器を読む（計上と
+            // 解放の位置は tree と同じ）。
+            let events = context.drain_audit_events();
+            let charges = context.drain_budget_charges();
+            for charge in &charges {
+                context.audit_queue_admit(charge);
+            }
 
             // backpressure deliver が評価器へ新しい Yielded/Resumed を積んだ場合に備え、全 buffer が
             // 空になるまで繰り返す。この pass で何も drain できなければ終了。
@@ -3686,16 +3787,14 @@ impl AuditDelivery {
                     Arc::from(vec![self.envelope(appended_seq, event.clone())]);
                 self.deliver(context, &batch, appended_seq)?;
                 // sink の ack を得たので audit drain queue から外す（B-2: in-flight は ack まで残る）。
-                if context.vm.is_none() {
-                    context.evaluator.audit_queue_release(&event);
-                }
+                context.audit_queue_release(&event);
             }
         }
         // 全 buffer を deliver し終えたので audit drain queue は 0 に戻っている（B-2、§10.2）。
         debug_assert!(
-            matches!(context.evaluator.audit_queue_bytes(), None | Some(0)),
+            matches!(context.audit_queue_bytes(), None | Some(0)),
             "flush 後の audit drain queue が 0 でない: {:?}",
-            context.evaluator.audit_queue_bytes()
+            context.audit_queue_bytes()
         );
         Ok(())
     }
@@ -4085,11 +4184,11 @@ mod tests {
         assert_eq!(engine.config().backend, Backend::VmExperimental);
     }
 
-    /// Phase 6 A-1: 監査 sink + `VmExperimental` backend は build 時に拒否する。
-    /// A-1 の run 経路は tree-only なので、VM label を監査へ載せると tree 実行を VM として
-    /// 誤報告してしまう。VM の監査 wiring が入るまで、この組み合わせを使えないよう固定する。
+    /// AVT-AT-14（audit-vm-triple-c）: 監査 sink + `VmExperimental` backend は build できる（VM の監査
+    /// backpressure が入ったので、Phase 6 A-1 の拒否を外した）。監査 sink・`audit_slice_fuel`・
+    /// `VmExperimental` の同時設定だけを `AuditSliceFuelWithExperimentalBackend` で拒否する。
     #[test]
-    fn audit_sink_with_experimental_backend_is_rejected() {
+    fn audit_sink_with_experimental_backend_builds() {
         let sink = Arc::new(crate::audit::InMemoryAuditSink::new());
         let config = EngineConfig {
             backend: Backend::VmExperimental,
@@ -4097,14 +4196,35 @@ mod tests {
             audit_sink: None,
             audit_slice_fuel: None,
         };
-        let err = Engine::builder()
-            .config(config)
-            // experimental backend 自体は許可済みにして、残る拒否理由を sink 併用だけに絞る。
+        let engine = Engine::builder()
+            .config(config.clone())
             .allow_experimental_backend(true)
-            .audit_sink(sink as Arc<dyn crate::audit::AuditSink>)
+            .audit_sink(Arc::clone(&sink) as Arc<dyn crate::audit::AuditSink>)
             .build()
-            .expect_err("audit_sink + VmExperimental は拒否される");
-        assert_eq!(err, ConfigError::AuditSinkWithExperimentalBackend);
+            .expect("audit_sink + VmExperimental は build できる");
+        assert_eq!(engine.config().backend, Backend::VmExperimental);
+        // audit_slice_fuel も足すと拒否する。
+        let err = Engine::builder()
+            .config(config.clone())
+            .allow_experimental_backend(true)
+            .audit_sink(Arc::clone(&sink) as Arc<dyn crate::audit::AuditSink>)
+            .audit_slice_fuel(10)
+            .build()
+            .expect_err("audit_sink + audit_slice_fuel + VmExperimental は拒否される");
+        assert_eq!(err, ConfigError::AuditSliceFuelWithExperimentalBackend);
+        // sink の無い audit_slice_fuel + VmExperimental は通る。
+        Engine::builder()
+            .config(config)
+            .allow_experimental_backend(true)
+            .audit_slice_fuel(10)
+            .build()
+            .expect("sink の無い audit_slice_fuel + VmExperimental は build できる");
+        // 監査 sink + audit_slice_fuel + TreeWalk は通る。
+        Engine::builder()
+            .audit_sink(sink as Arc<dyn crate::audit::AuditSink>)
+            .audit_slice_fuel(10)
+            .build()
+            .expect("audit_sink + audit_slice_fuel + TreeWalk は build できる");
     }
 
     /// 対照: 監査 sink は既定の tree-walk backend では問題なく build できる。
@@ -8306,10 +8426,12 @@ mod audit_vm_triple_b_tests {
         }
     }
 
-    fn engine_for(
+    /// 監査付きの engine（`audit_budget` で queue の上限を差し替えられる。audit-vm-triple-c）。
+    fn engine_with_budget(
         backend: Backend,
         sink: Arc<dyn AuditSink>,
         policy: Option<RedactionPolicy>,
+        audit_budget: Option<crate::audit::AuditBudget>,
     ) -> Engine {
         let mut builder = Engine::builder()
             .config(EngineConfig {
@@ -8323,15 +8445,27 @@ mod audit_vm_triple_b_tests {
         if let Some(policy) = policy {
             builder = builder.audit_redaction_policy_for_test(policy);
         }
-        builder
-            .build_allowing_audit_sink_with_vm_for_test()
-            .expect("build")
+        if let Some(audit_budget) = audit_budget {
+            builder = builder.audit_budget_for_test(audit_budget);
+        }
+        // audit-vm-triple-c: 公開の build が監査 sink と VmExperimental の同時設定を通す。
+        builder.build().expect("build")
     }
 
     fn side_with(
         backend: Backend,
         plan: Option<Vec<ScriptedResponse>>,
         policy: Option<RedactionPolicy>,
+    ) -> Side {
+        side_full(backend, plan, policy, None)
+    }
+
+    /// queue の上限（`max_pending_bytes`）も差し替えられる [`side_with`]（audit-vm-triple-c）。
+    fn side_full(
+        backend: Backend,
+        plan: Option<Vec<ScriptedResponse>>,
+        policy: Option<RedactionPolicy>,
+        max_pending_bytes: Option<u64>,
     ) -> Side {
         let (sink, recorded): (Arc<dyn AuditSink>, Recorded) = match plan {
             None => {
@@ -8345,7 +8479,11 @@ mod audit_vm_triple_b_tests {
                 (sink, Box::new(move || read.snapshot()))
             }
         };
-        let engine = engine_for(backend, Arc::clone(&sink), policy);
+        let audit_budget = max_pending_bytes.map(|max_pending_bytes| crate::audit::AuditBudget {
+            max_pending_bytes,
+            ..crate::audit::AuditBudget::default()
+        });
+        let engine = engine_with_budget(backend, Arc::clone(&sink), policy, audit_budget);
         let ctx = ExecutionContext::new(&engine);
         let tag = match backend {
             Backend::TreeWalk => "tree",
@@ -8472,7 +8610,9 @@ mod audit_vm_triple_b_tests {
                         assert_eq!(*started, backend, "Started の backend");
                         *started = Backend::TreeWalk;
                     }
-                    AuditEvent::Terminal { usage, .. } => mask_heap(usage),
+                    AuditEvent::Terminal { usage, .. }
+                    | AuditEvent::Yielded { usage, .. }
+                    | AuditEvent::Resumed { usage, .. } => mask_heap(usage),
                     _ => {}
                 }
                 env
@@ -8821,62 +8961,87 @@ let y = 2
             other => panic!("terminal-fail: {other:?}"),
         }
 
-        // VM の Pending（tree とは比べない。決定記録 Q1=A（PR #539））。Started だけ Ack し、次の
-        // submit で Pending を返して completer を手元に残す sink で、VM が ticket を cancel したことを
-        // completer から確かめる。
-        let sink = Arc::new(PendingOnceSink::default());
-        let engine = engine_for(
+        // audit-vm-triple-c: VM の Pending も tree と同じ backpressure（Yielded/Resumed(AuditBackpressure)
+        // と同じ batch の再送）を通る（AVT-AT-11）。b の「ticket を cancel して Sink」の確認を、tree との
+        // 比較に置き換えた。
+        let pending_at = |backend| dry_run(backend, &source).1.expect("HostCallStarted");
+        let plan = |backend: Backend| {
+            let mut plan = vec![ScriptedResponse::AckCorrect; pending_at(backend)];
+            plan.push(ScriptedResponse::PendingThenAck { pending_times: 1 });
+            plan
+        };
+        let mut tree = side_with(Backend::TreeWalk, Some(plan(Backend::TreeWalk)), None);
+        let mut vm = side_with(
             Backend::VmExperimental,
-            Arc::clone(&sink) as Arc<dyn AuditSink>,
+            Some(plan(Backend::VmExperimental)),
             None,
         );
-        let mut vm = Side {
-            ctx: ExecutionContext::new(&engine),
-            engine,
-            recorded: {
-                let read = Arc::clone(&sink);
-                Box::new(move || read.received())
-            },
-            dir: temp_dir("vm"),
+        let (envs, out) = assert_parity_on("host-call-pending", &mut tree, &mut vm, &source, 821);
+        assert!(
+            matches!(out.outcome(), Some(ExecutionOutcome::Completed { .. })),
+            "host-call-pending: {out:?}"
+        );
+        assert_eq!(backpressure_pairs(&envs), 1, "host-call-pending: {envs:#?}");
+    }
+
+    /// AVT-AT-11（sink の `Pending` の backpressure）: host-call event・終了時の `BudgetCharged`・Terminal の
+    /// 配送に `PendingThenAck` を返すと、VM でも `Yielded(AuditBackpressure)` と同じ poll_index の
+    /// `Resumed(AuditBackpressure)` が tree と同じ位置に入り、sink が受け取る列と `AuditedOutcome` が一致する。
+    #[test]
+    fn avt_at_11_sink_pending_backpressure_matches_tree() {
+        let source = input(
+            "let x = 1\nwrite_file(\"@data/f.txt\", \"x\")\nlet y = read_file(\"@data/f.txt\")\n",
+            Grant::ReadWrite,
+        );
+        // 各 backend の dry run での submit の位置（0 始まり。Started が 0）。
+        let positions = |backend: Backend| {
+            let mut side = side(backend);
+            let (envs, _) = run(&mut side, &source, 700, &Arc::new(FakeClock::new()));
+            let host = envs
+                .iter()
+                .position(|e| matches!(e.event, AuditEvent::HostCallFinished { .. }))
+                .expect("HostCallFinished");
+            let last_charge = envs
+                .iter()
+                .rposition(|e| matches!(e.event, AuditEvent::BudgetCharged { .. }))
+                .expect("BudgetCharged");
+            (host, last_charge, envs.len() - 1)
         };
-        let (envs, out) = run(&mut vm, &source, 821, &Arc::new(FakeClock::new()));
-        match &out {
-            AuditedOutcome::AuditFailed { failure, .. } => {
-                assert_eq!(*failure, AuditFailure::Sink);
-            }
-            other => panic!("vm-pending: {other:?}"),
+        for (case, pick) in [("host-call", 0usize), ("final-charge", 1), ("terminal", 2)] {
+            let plan = |backend: Backend| {
+                let (host, charge, terminal) = positions(backend);
+                let at = [host, charge, terminal][pick];
+                let mut plan = vec![ScriptedResponse::AckCorrect; at];
+                plan.push(ScriptedResponse::PendingThenAck { pending_times: 2 });
+                plan
+            };
+            let mut tree = side_with(Backend::TreeWalk, Some(plan(Backend::TreeWalk)), None);
+            let mut vm = side_with(
+                Backend::VmExperimental,
+                Some(plan(Backend::VmExperimental)),
+                None,
+            );
+            let (envs, out) = assert_parity_on(case, &mut tree, &mut vm, &source, 1101);
+            assert!(
+                matches!(out.outcome(), Some(ExecutionOutcome::Completed { .. })),
+                "{case}: {out:?}"
+            );
+            // Terminal の配送中の backpressure の Yielded/Resumed は Terminal の後に積まれ、配送されない
+            // （tree と同じ）。それ以外では 1 対が列に入る。
+            let expected = if case == "terminal" { 0 } else { 1 };
+            assert_eq!(backpressure_pairs(&envs), expected, "{case}: {envs:#?}");
         }
-        let completer = sink.completer.lock().expect("lock").take();
-        assert!(
-            completer.expect("Pending を 1 回返した").is_cancelled(),
-            "vm-pending: VM は Pending の ticket を cancel する"
-        );
-        assert_eq!(sink.submits.lock().expect("lock").len(), 2, "再送しない");
-        assert!(
-            !envs.iter().any(|e| matches!(
-                e.event,
-                AuditEvent::Yielded { .. } | AuditEvent::Resumed { .. }
-            )),
-            "vm-pending: Yielded/Resumed を出さない: {envs:#?}"
-        );
     }
 
     /// 最初の submit（Started）を Ack し、2 回目の submit で `Pending` を返して completer を保持し、
-    /// 3 回目以降は Ack する test 用の sink（AVT-AT-08 の VM の Pending で ticket の cancel を確かめる）。
-    #[derive(Default)]
-    struct PendingOnceSink {
+    /// 同時に request の cancellation token を cancel する test 用の sink（AVT-AT-11 の永続 `Pending`）。
+    struct PendingThenCancelSink {
         submits: std::sync::Mutex<Vec<AuditEnvelope>>,
         completer: std::sync::Mutex<Option<crate::audit::AuditCompleter>>,
+        token: CancellationToken,
     }
 
-    impl PendingOnceSink {
-        /// submit された envelope（Ack したかどうかに依らず）。
-        fn received(&self) -> Vec<AuditEnvelope> {
-            self.submits.lock().expect("lock").clone()
-        }
-    }
-
-    impl AuditSink for PendingOnceSink {
+    impl AuditSink for PendingThenCancelSink {
         fn submit(
             &self,
             batch: Arc<[AuditEnvelope]>,
@@ -8889,13 +9054,408 @@ let y = 2
             };
             let mut submits = self.submits.lock().expect("lock");
             submits.extend(batch.iter().cloned());
-            if submits.len() == 2 {
+            if submits.len() >= 2 {
                 let (ticket, completer) = crate::audit::new_audit_ticket();
-                *self.completer.lock().expect("lock") = Some(completer);
+                let mut slot = self.completer.lock().expect("lock");
+                if slot.is_none() {
+                    *slot = Some(completer);
+                }
+                self.token.cancel();
                 return crate::audit::AuditSubmit::Pending(ticket);
             }
             crate::audit::AuditSubmit::Ack(ack)
         }
+    }
+
+    /// 永続 `Pending` のまま cancel された実行を回し、(outcome, ticket が cancel されたか, 受け取った列) を返す。
+    fn run_pending_then_cancel(backend: Backend, source: &Input) -> (AuditedOutcome, bool, usize) {
+        let token = CancellationToken::new();
+        let sink = Arc::new(PendingThenCancelSink {
+            submits: std::sync::Mutex::new(Vec::new()),
+            completer: std::sync::Mutex::new(None),
+            token: token.clone(),
+        });
+        let engine =
+            engine_with_budget(backend, Arc::clone(&sink) as Arc<dyn AuditSink>, None, None);
+        let mut side = Side {
+            ctx: ExecutionContext::new(&engine),
+            engine,
+            recorded: Box::new(Vec::new),
+            dir: temp_dir("pending-cancel"),
+        };
+        let linked = link_for(&side, source);
+        let clock = Arc::new(FakeClock::new());
+        let request = request_for(&side, source, 1102, &clock).cancellation(token);
+        let out = side.engine.run_audited(&linked, &mut side.ctx, request);
+        let cancelled = sink
+            .completer
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .is_some_and(|completer| completer.is_cancelled());
+        let received = sink.submits.lock().expect("lock").len();
+        (out, cancelled, received)
+    }
+
+    /// AVT-AT-11: 永続 `Pending` のまま cancel された実行は、tree と同じく
+    /// `AuditFailed { failure: BackpressureDeadline }` になり、ticket が cancel される。
+    #[test]
+    fn avt_at_11_persistent_pending_is_backpressure_deadline() {
+        let source = input(
+            "let x = 1\nwrite_file(\"@data/f.txt\", \"x\")\nlet y = 2\n",
+            Grant::ReadWrite,
+        );
+        let (tree_out, tree_cancelled, tree_received) =
+            run_pending_then_cancel(Backend::TreeWalk, &source);
+        let (vm_out, vm_cancelled, vm_received) =
+            run_pending_then_cancel(Backend::VmExperimental, &source);
+        assert_eq!(
+            comparable_outcome(&tree_out),
+            comparable_outcome(&vm_out),
+            "AuditedOutcome"
+        );
+        match &vm_out {
+            AuditedOutcome::AuditFailed { failure, .. } => {
+                assert_eq!(*failure, AuditFailure::BackpressureDeadline);
+            }
+            other => panic!("BackpressureDeadline を期待: {other:?}"),
+        }
+        assert!(tree_cancelled && vm_cancelled, "ticket を cancel する");
+        assert_eq!(tree_received, vm_received, "受け取った submit の数");
+    }
+
+    /// AVT-AT-11: test の poll trace に `YieldReason::AuditBackpressure` が VM でも積まれる。
+    #[test]
+    fn avt_at_11_poll_trace_records_backpressure_on_vm() {
+        let source = input(
+            "let x = 1\nwrite_file(\"@data/f.txt\", \"x\")\n",
+            Grant::ReadWrite,
+        );
+        let traces: Vec<usize> = [Backend::TreeWalk, Backend::VmExperimental]
+            .into_iter()
+            .map(|backend| {
+                let mut plan = vec![ScriptedResponse::AckCorrect];
+                plan.push(ScriptedResponse::PendingThenAck { pending_times: 1 });
+                let mut side = side_with(backend, Some(plan), None);
+                let linked = link_for(&side, &source);
+                let clock = Arc::new(FakeClock::new());
+                let request = request_for(&side, &source, 1103, &clock);
+                let (trace, out) =
+                    side.engine
+                        .poll_audited_for_test(&linked, &mut side.ctx, request);
+                assert!(
+                    matches!(out.outcome(), Some(ExecutionOutcome::Completed { .. })),
+                    "{backend:?}: {out:?}"
+                );
+                trace
+                    .iter()
+                    .filter(|poll| {
+                        matches!(
+                            poll,
+                            crate::engine::PollResult::Yielded {
+                                reason: crate::engine::YieldReason::AuditBackpressure,
+                                ..
+                            }
+                        )
+                    })
+                    .count()
+            })
+            .collect();
+        assert_eq!(traces, vec![1, 1], "tree と VM の poll trace");
+    }
+
+    /// AVT-AT-12（queue の計上）: VM の計器は、同じ event 列を tree の計器に通した値と同じ byte 数を数え、
+    /// ack（release）で 0 に戻る。計器の無い VM（sink 無し・REPL）は計上も判定もしない。
+    #[test]
+    fn avt_at_12_vm_queue_meter_matches_tree_meter() {
+        let overhead = crate::audit::queue_envelope_overhead_bytes("0.21");
+        let mut tree = crate::eval::Evaluator::new();
+        let mut vm = crate::vm::Vm::new_repl();
+        assert_eq!(vm.audit_queue_bytes(), None, "計器の無い VM");
+        tree.set_audit_queue(u64::MAX, overhead);
+        vm.set_audit_queue(u64::MAX, overhead);
+        // 同じ yield/resume の手順（共有の AuditYieldPairs）で buffer へ積む。
+        tree.record_backpressure_yield().expect("yield");
+        vm.record_backpressure_yield().expect("yield");
+        tree.record_backpressure_resume();
+        vm.record_backpressure_resume();
+        let tree_events = tree.drain_audit_events();
+        let vm_events = vm.drain_audit_events();
+        assert_eq!(tree_events, vm_events, "同じ event 列");
+        assert_eq!(tree_events.len(), 2);
+        assert_eq!(tree.audit_queue_bytes(), vm.audit_queue_bytes());
+        assert!(vm.audit_queue_bytes().expect("計器") > 0);
+        // accumulator から直接 drain した分も同じ関数で計上・解放する。
+        let charge = AuditEvent::BudgetCharged {
+            resource: BudgetResource::Fuel,
+            committed_delta: 3,
+            released_delta: 0,
+            usage_after: 3,
+            peak_after: None,
+            charge_count: 1,
+            reason: crate::audit::BudgetChargeReason::Operation,
+        };
+        tree.audit_queue_admit(&charge);
+        vm.audit_queue_admit(&charge);
+        assert_eq!(tree.audit_queue_bytes(), vm.audit_queue_bytes());
+        for event in tree_events.iter().chain(std::iter::once(&charge)) {
+            tree.audit_queue_release(event);
+            vm.audit_queue_release(event);
+        }
+        assert_eq!(vm.audit_queue_bytes(), Some(0), "ack で 0 へ戻る");
+        assert_eq!(tree.audit_queue_bytes(), Some(0));
+        // 入口（据え直し）で計器を外す。
+        vm.begin_repl_submission(BudgetConfig::for_legacy(1_000_000, 1_000_000));
+        assert_eq!(
+            vm.audit_queue_bytes(),
+            None,
+            "REPL の submission は計器を持たない"
+        );
+    }
+
+    /// AVT-AT-12: 監査付きの VM の実行で、各 flush の後に queue が 0 になり（`flush_events` の
+    /// `debug_assert!` が VM の計器を読む）、queue の上限の yield が起きても列が tree と一致する。
+    /// sink 無しの VM の run は計器を持たない。
+    #[test]
+    fn avt_at_12_vm_queue_drains_after_each_flush() {
+        let source = input(ALLOW_SOURCE, Grant::ReadWrite);
+        let mut tree = side_full(Backend::TreeWalk, None, None, Some(TINY_LIMIT));
+        let mut vm = side_full(Backend::VmExperimental, None, None, Some(TINY_LIMIT));
+        let (envs, _) = assert_parity_on("queue-drain", &mut tree, &mut vm, &source, 1201);
+        assert!(backpressure_pairs(&envs) >= 4, "{envs:#?}");
+        assert_eq!(vm.ctx.audit_queue_bytes(), Some(0), "terminal の後の queue");
+    }
+
+    /// 1 回の host-call triple より小さく、`Resumed` 1 件より大きい queue の上限（AVT-AT-13）。host call の
+    /// 後の最初のトップレベル境界で必ず yield し、resume の直後の境界では `Resumed` だけでは yield しない。
+    const TINY_LIMIT: u64 = 400;
+
+    fn assert_queue_parity(case: &str, source: &Input, limit: u64) -> Vec<AuditEnvelope> {
+        let mut tree = side_full(Backend::TreeWalk, None, None, Some(limit));
+        let mut vm = side_full(Backend::VmExperimental, None, None, Some(limit));
+        let (envs, _) = assert_parity_on(case, &mut tree, &mut vm, source, 1301);
+        envs
+    }
+
+    /// AVT-AT-13（トップレベル境界の yield）: 小さい上限で、トップレベルの while・for（`continue` を含む）・
+    /// if と try の本体・条件の中の host call の各 source について、`Yielded`/`Resumed(AuditBackpressure)`
+    /// の位置と数を含む列が tree と一致する。
+    #[test]
+    fn avt_at_13_top_level_boundary_yields_match_tree() {
+        let cases: [(&str, &'static str, usize); 5] = [
+            (
+                "while",
+                "let i = 0\nwhile i < 3\n    write_file(\"@data/a.txt\", \"x\")\n    i = i + 1\nend\nlet done = 1\n",
+                3,
+            ),
+            (
+                "for-continue",
+                "for x in [1, 2, 3]\n    write_file(\"@data/a.txt\", \"x\")\n    if x == 2\n        continue\n    end\n    let y = x\nend\nlet z = 1\n",
+                3,
+            ),
+            (
+                "if-try",
+                "if true\n    write_file(\"@data/a.txt\", \"x\")\nend\ntry\n    append_file(\"@data/a.txt\", \"y\")\ncatch e\n    let n = 1\nend\ntry\n    read_file(\"@data/missing.txt\")\ncatch e\n    let m = 2\nend\nlet done = 1\n",
+                3,
+            ),
+            (
+                "condition",
+                "write_file(\"@data/a.txt\", \"ab\")\nlet i = 0\nwhile read_file(\"@data/a.txt\") == \"ab\" and i < 2\n    i = i + 1\nend\nif read_file(\"@data/a.txt\") == \"zz\"\n    let q = 1\nend\nlet w = 2\n",
+                5,
+            ),
+            (
+                "last-statement",
+                "let i = 0\nwrite_file(\"@data/a.txt\", \"x\")\n",
+                1,
+            ),
+        ];
+        for (case, text, yields) in cases {
+            let envs = assert_queue_parity(case, &input(text, Grant::ReadWrite), TINY_LIMIT);
+            assert_eq!(
+                backpressure_pairs(&envs),
+                yields,
+                "{case}: host call の後の最初の境界ごとに 1 回: {envs:#?}"
+            );
+        }
+    }
+
+    /// AVT-AT-13: 関数本体の中と `map`・`each` の callback の中の host call の連続では、戻るまで yield
+    /// しない（B-2 の B2-AT-09 と同じ）。
+    #[test]
+    fn avt_at_13_function_and_callback_bodies_do_not_yield() {
+        let text = "fn work()\n    write_file(\"@data/a.txt\", \"x\")\n    append_file(\"@data/a.txt\", \"y\")\nend\nwork()\nlet r = map([1, 2], fn(x)\n    append_file(\"@data/a.txt\", \"z\")\n    return x\nend)\neach([1, 2], fn(x)\n    append_file(\"@data/a.txt\", \"w\")\nend)\nlet done = 1\n";
+        let envs = assert_queue_parity(
+            "function-callback",
+            &input(text, Grant::ReadWrite),
+            TINY_LIMIT,
+        );
+        // 各トップレベル文（work()・map・each）が返った後の境界で 1 回ずつ。
+        assert_eq!(backpressure_pairs(&envs), 3, "{envs:#?}");
+        // 最初の yield は work() の 2 つの host call の後。
+        let first_yield = envs
+            .iter()
+            .position(|e| matches!(e.event, AuditEvent::Yielded { .. }))
+            .expect("yield");
+        let finished_before = envs[..first_yield]
+            .iter()
+            .filter(|e| matches!(e.event, AuditEvent::HostCallFinished { .. }))
+            .count();
+        assert_eq!(finished_before, 2, "関数の中では yield しない");
+    }
+
+    /// AVT-AT-13: 上限が 1 件の event より小さくても（0 を含む）VM は前進し、yield と resume だけを
+    /// 繰り返さない。
+    #[test]
+    fn avt_at_13_tiny_limit_makes_progress_on_vm() {
+        let text =
+            "let i = 0\nwhile i < 5\n    write_file(\"@data/a.txt\", \"x\")\n    i = i + 1\nend\n";
+        for limit in [0u64, 1, 64] {
+            let mut vm = side_full(Backend::VmExperimental, None, None, Some(limit));
+            let (envs, out) = run(
+                &mut vm,
+                &input(text, Grant::ReadWrite),
+                1302,
+                &Arc::new(FakeClock::new()),
+            );
+            assert!(
+                matches!(out.outcome(), Some(ExecutionOutcome::Completed { .. })),
+                "limit={limit}: {out:?}"
+            );
+            let pairs = backpressure_pairs(&envs);
+            assert!((1..=40).contains(&pairs), "limit={limit}: 有界: {pairs}");
+        }
+    }
+
+    /// AVT-AT-13: `Resumed` の後の REPL の commit・rollback と `exit` の commit が、中断しない実行と同じになる。
+    #[test]
+    fn avt_at_13_commit_and_rollback_across_yields() {
+        // (source, 後の probe, exit を grant するか)
+        let cases: [(&str, &'static str, &'static str, bool); 3] = [
+            (
+                "commit",
+                "let a = 1\nwrite_file(\"@data/a.txt\", \"x\")\nlet b = a + 1\n",
+                "let c = a + b\n",
+                false,
+            ),
+            (
+                "rollback",
+                "let a = 1\nwrite_file(\"@data/a.txt\", \"x\")\nlet b = missing_name\n",
+                "let c = a\n",
+                false,
+            ),
+            (
+                "exit",
+                "let a = 1\nwrite_file(\"@data/a.txt\", \"x\")\nlet b = 2\nexit(3)\nlet d = 4\n",
+                "let c = a + b\n",
+                true,
+            ),
+        ];
+        for (case, first, probe, exit) in cases {
+            let mut source = input(first, Grant::ReadWrite);
+            source.exit = exit;
+            let mut probe_input = input(probe, Grant::ReadWrite);
+            probe_input.exit = exit;
+            for limit in [None, Some(TINY_LIMIT)] {
+                let mut tree = side_full(Backend::TreeWalk, None, None, limit);
+                let mut vm = side_full(Backend::VmExperimental, None, None, limit);
+                let (envs, _) = assert_parity_on(case, &mut tree, &mut vm, &source, 1303);
+                if limit.is_some() {
+                    assert!(backpressure_pairs(&envs) >= 1, "{case}: yield する");
+                }
+                // 2 回目の run で、1 回目が残した language-state を読む。
+                assert_parity_on(case, &mut tree, &mut vm, &probe_input, 1304);
+            }
+            // 中断した実行と中断しない実行で、VM の 2 回目の outcome が同じ。
+            let outcome_of = |limit: Option<u64>| {
+                let mut vm = side_full(Backend::VmExperimental, None, None, limit);
+                let clock = Arc::new(FakeClock::new());
+                run(&mut vm, &source, 1305, &clock);
+                let (_, out) = run(&mut vm, &probe_input, 1306, &clock);
+                comparable_outcome(&out)
+            };
+            assert_eq!(outcome_of(None), outcome_of(Some(TINY_LIMIT)), "{case}");
+        }
+    }
+
+    /// AVT-AT-13: yield の配送の途中で sink が `Failed` になったら、VM の実行を中断した位置で畳み
+    /// （開始時点へ rollback）、tree と同じ `AuditFailed { withheld: Cancelled, failure }` を返す。
+    #[test]
+    fn avt_at_13_mid_run_failure_rolls_back_like_tree() {
+        let source = input(
+            "let a = 1\nwrite_file(\"@data/a.txt\", \"x\")\nlet b = 2\n",
+            Grant::ReadWrite,
+        );
+        // queue の yield の Yielded の配送で Fail を返す。
+        let yielded_at = |backend: Backend| {
+            let mut side = side_full(backend, None, None, Some(TINY_LIMIT));
+            let (envs, _) = run(&mut side, &source, 700, &Arc::new(FakeClock::new()));
+            envs.iter()
+                .position(|e| matches!(e.event, AuditEvent::Yielded { .. }))
+                .expect("Yielded")
+        };
+        let plan = |backend: Backend| {
+            let mut plan = vec![ScriptedResponse::AckCorrect; yielded_at(backend)];
+            plan.push(ScriptedResponse::Fail);
+            plan
+        };
+        let mut tree = side_full(
+            Backend::TreeWalk,
+            Some(plan(Backend::TreeWalk)),
+            None,
+            Some(TINY_LIMIT),
+        );
+        let mut vm = side_full(
+            Backend::VmExperimental,
+            Some(plan(Backend::VmExperimental)),
+            None,
+            Some(TINY_LIMIT),
+        );
+        let (_, out) = assert_parity_on("mid-run-fail", &mut tree, &mut vm, &source, 1307);
+        match &out {
+            AuditedOutcome::AuditFailed { withheld, failure } => {
+                assert_eq!(*withheld, TerminalOutcome::Cancelled);
+                assert_eq!(*failure, AuditFailure::Sink);
+            }
+            other => panic!("mid-run-fail: {other:?}"),
+        }
+        // rollback: a は残らない。
+        // 計画を使い切った sink は Ack を返し続けるので、同じ context で次の run を回せる。
+        let probe = input("let c = a\n", Grant::None);
+        let (_, probe_out) =
+            assert_parity_on("mid-run-fail-probe", &mut tree, &mut vm, &probe, 1308);
+        assert!(
+            matches!(
+                probe_out.outcome(),
+                Some(ExecutionOutcome::RuntimeError { .. })
+            ),
+            "rollback されて a は無い: {probe_out:?}"
+        );
+    }
+
+    /// `Yielded(AuditBackpressure)` の数（対の `Resumed` が同じ poll_index で続くことも確かめる）。
+    fn backpressure_pairs(envs: &[AuditEnvelope]) -> usize {
+        use crate::audit::AuditYieldReason;
+        let mut open: Vec<u64> = Vec::new();
+        let mut pairs = 0;
+        for env in envs {
+            match &env.event {
+                AuditEvent::Yielded {
+                    reason: AuditYieldReason::AuditBackpressure,
+                    poll_index,
+                    ..
+                } => open.push(*poll_index),
+                AuditEvent::Resumed {
+                    previous_reason: AuditYieldReason::AuditBackpressure,
+                    poll_index,
+                    ..
+                } => {
+                    assert_eq!(open.pop(), Some(*poll_index), "Yielded と Resumed の対");
+                    pairs += 1;
+                }
+                _ => {}
+            }
+        }
+        pairs
     }
 
     /// AVT-AT-09: 既定と違う `policy_id` と policy を注入した engine で、Started の `redaction_policy_id` と
@@ -8959,12 +9519,33 @@ let y = 2
         );
     }
 
-    /// AVT-AT-10（の crate 内の部分）: 公開の `EngineBuilder::build` は今までどおり監査 sink と
-    /// `VmExperimental` の同時設定を拒否する。既存の test が期待値を変えずに緑であることは `cargo test`
-    /// と `git diff --stat`（`tests/` の既存ファイルを変えない）で確かめる。
+    /// AVT-AT-14（audit-vm-triple-c。b の AVT-AT-10 の「公開の build は拒否する」を置き換えた）: 公開の
+    /// `EngineBuilder::build` が監査 sink と `VmExperimental` の同時設定を通し、`run_audited` が VM で
+    /// 回る（Started の `backend` が `VmExperimental`）。sink 無しの VM の run も今までどおり回る。
     #[test]
-    fn avt_at_10_public_build_still_rejects_audit_sink_with_vm() {
-        let err = Engine::builder()
+    fn avt_at_14_public_build_accepts_audit_sink_with_vm() {
+        let mut vm = side(Backend::VmExperimental);
+        let (envs, out) = run(
+            &mut vm,
+            &input("let x = 1\n", Grant::None),
+            1401,
+            &Arc::new(FakeClock::new()),
+        );
+        assert!(
+            matches!(
+                envs[0].event,
+                AuditEvent::ExecutionStarted {
+                    backend: Backend::VmExperimental,
+                    ..
+                }
+            ),
+            "Started の backend: {envs:#?}"
+        );
+        assert!(
+            matches!(out.outcome(), Some(ExecutionOutcome::Completed { .. })),
+            "{out:?}"
+        );
+        Engine::builder()
             .config(EngineConfig {
                 backend: Backend::VmExperimental,
                 language_revision: LanguageRevision::CURRENT,
@@ -8975,8 +9556,7 @@ let y = 2
             .audit_sink(Arc::new(InMemoryAuditSink::new()) as Arc<dyn AuditSink>)
             .build()
             .map(|_| ())
-            .expect_err("拒否される");
-        assert_eq!(err, ConfigError::AuditSinkWithExperimentalBackend);
+            .expect("公開の build が通る");
         // sink 無しの VM の run は監査に関係なく今までどおり回る。
         let engine = Engine::builder()
             .config(EngineConfig {

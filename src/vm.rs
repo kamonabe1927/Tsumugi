@@ -209,6 +209,45 @@ pub struct Vm {
     /// と同じ意味）。監査付き実行の Terminal が §7.2 どおりの resource を載せるために使う。
     /// `Cell` なのは `control_stop_to_error` が ledger と共に共有参照で呼ばれるため。
     last_budget_resource: std::cell::Cell<Option<crate::budget::BudgetResource>>,
+
+    /// yield/resume lifecycle 監査 event の pair の状態（audit-vm-triple-c。tree の `Evaluator` と同じ
+    /// 型 [`crate::audit::AuditYieldPairs`]）。execution（REPL では submission）の入口で 0 へ戻す。
+    yield_pairs: crate::audit::AuditYieldPairs,
+
+    /// audit drain queue の計器（audit-vm-triple-c。tree と同じ型 [`crate::audit::AuditQueueMeter`]）。
+    /// 監査付き実行だけが [`Self::set_audit_queue`] で `Some` にする。`None`（sink 無しの経路・CLI・
+    /// REPL）では計上も判定も行わず、トップレベル境界で yield しない。
+    audit_queue: Option<crate::audit::AuditQueueMeter>,
+
+    /// この区切り（実行の開始か直前の resume から）で 1 文・1 反復以上進めたか（B-2 の前進保証。
+    /// tree の `Evaluator::audit_queue_progress` と同じ意味）。
+    audit_queue_progress: bool,
+
+    /// トップレベル境界で queue 上限による yield をして `run_frames` から戻ったか
+    /// （audit-vm-triple-c）。`run_repl_chunk_resumable` / `resume_repl_chunk` が `take` する。
+    yield_for_audit_queue: bool,
+
+    /// queue 上限の yield で中断している入力の rollback checkpoint（audit-vm-triple-c）。中断を
+    /// またいでも 1 回の実行として commit・rollback するため、`run_repl_chunk` のローカルをここへ移す。
+    suspended_repl: Option<ReplRunCheckpoint>,
+}
+
+/// REPL の入力 1 回の構造状態の checkpoint（`run_repl_chunk` の rollback 用。audit-vm-triple-c で
+/// queue 上限の yield の中断をまたいで持つため struct にした）。
+struct ReplRunCheckpoint {
+    frames: Vec<CallFrame>,
+    globals: HashMap<String, usize>,
+    try_handlers: Vec<TryHandler>,
+    steps: u64,
+}
+
+/// queue 上限の yield で中断できる VM の実行の 1 区切りの結果（audit-vm-triple-c）。
+pub(crate) enum VmRunStep {
+    /// トップレベル境界で `Yielded(AuditBackpressure)` を buffer へ積んで中断した。driver が buffer
+    /// を配送してから [`Vm::resume_repl_chunk`] で続きを回す。
+    Yielded,
+    /// 入力を最後まで回した（commit・rollback 済み）。
+    Done(Result<(), TsumugiError>),
 }
 
 impl Vm {
@@ -259,6 +298,11 @@ impl Vm {
             host_effects_may_remain: false,
             redaction_policy: crate::audit::RedactionPolicy::default(),
             last_budget_resource: std::cell::Cell::new(None),
+            yield_pairs: crate::audit::AuditYieldPairs::default(),
+            audit_queue: None,
+            audit_queue_progress: false,
+            yield_for_audit_queue: false,
+            suspended_repl: None,
         }
     }
 
@@ -298,6 +342,11 @@ impl Vm {
             host_effects_may_remain: false,
             redaction_policy: crate::audit::RedactionPolicy::default(),
             last_budget_resource: std::cell::Cell::new(None),
+            yield_pairs: crate::audit::AuditYieldPairs::default(),
+            audit_queue: None,
+            audit_queue_progress: false,
+            yield_for_audit_queue: false,
+            suspended_repl: None,
         }
     }
 
@@ -576,6 +625,104 @@ impl Vm {
         self.audit_events.clear();
         self.host_effects_may_remain = false;
         self.last_budget_resource.set(None);
+        // yield/resume の pair と queue の計器も入口で戻す（tree の `rearm_budget_for_repl` と同じ。
+        // 監査付き実行が据え直しの後に `set_audit_queue` で張り直す）。
+        self.yield_pairs.reset();
+        self.clear_audit_queue();
+    }
+
+    /// 監査付き実行の audit drain queue 上限を設定する（audit-vm-triple-c。tree の
+    /// `Evaluator::set_audit_queue` と同じ意味）。据え直し（[`Self::begin_execution`]）の後に呼ぶ。
+    pub(crate) fn set_audit_queue(&mut self, limit: u64, envelope_overhead: u64) {
+        self.audit_queue = Some(crate::audit::AuditQueueMeter::new(limit, envelope_overhead));
+        self.audit_queue_progress = false;
+        self.yield_for_audit_queue = false;
+    }
+
+    /// queue の計器を外す（sink 無しの経路と同じ「計上・判定なし」へ戻す）。
+    fn clear_audit_queue(&mut self) {
+        self.audit_queue = None;
+        self.audit_queue_progress = false;
+        self.yield_for_audit_queue = false;
+    }
+
+    /// event 1 件を queue へ計上する（計器が無ければ no-op）。
+    pub(crate) fn audit_queue_admit(&mut self, event: &crate::audit::AuditEvent) {
+        if let Some(meter) = self.audit_queue.as_mut() {
+            meter.admit(event);
+        }
+    }
+
+    /// sink の ack を得た event 1 件を queue から外す（計器が無ければ no-op）。
+    pub(crate) fn audit_queue_release(&mut self, event: &crate::audit::AuditEvent) {
+        if let Some(meter) = self.audit_queue.as_mut() {
+            meter.release(event);
+        }
+    }
+
+    /// 現在の queue の推定 byte 数（計器が無ければ `None`）。VM の ledger の確定済み分を足す。
+    pub(crate) fn audit_queue_bytes(&self) -> Option<u64> {
+        self.audit_queue
+            .map(|meter| meter.queued_bytes(&self.budget))
+    }
+
+    /// トップレベル境界で queue 上限による yield が必要か（tree の `Evaluator::audit_queue_exceeded`
+    /// と同じ関数で判定する）。
+    fn audit_queue_exceeded(&self) -> bool {
+        self.audit_queue
+            .is_some_and(|meter| meter.exceeded(self.audit_queue_progress, &self.budget))
+    }
+
+    /// sink の `Pending` で `Yielded(AuditBackpressure)` を buffer へ積む（tree の
+    /// `Evaluator::record_backpressure_yield` と同じ手順）。
+    pub(crate) fn record_backpressure_yield(&mut self) -> Result<(), TsumugiError> {
+        self.flush_charges_into_audit_events();
+        let event = self
+            .yield_pairs
+            .record_backpressure_yield(self.budget.usage())?;
+        self.push_audit_event(event);
+        Ok(())
+    }
+
+    /// backpressure から resume したときの `Resumed(AuditBackpressure)` を buffer へ積む（tree の
+    /// `Evaluator::record_backpressure_resume` と同じ手順）。
+    pub(crate) fn record_backpressure_resume(&mut self) {
+        if let Some(event) = self
+            .yield_pairs
+            .record_backpressure_resume(self.budget.usage())
+        {
+            self.push_audit_event(event);
+        }
+    }
+
+    /// cancel の checkpoint（backpressure の待ちの各ステップで読む。`begin_execution` で据えた token）。
+    pub(crate) fn checkpoint_cancel(&self) -> Result<(), crate::budget::ControlStop> {
+        self.budget.checkpoint_cancel()
+    }
+
+    /// deadline の checkpoint（`begin_execution` で据えた clock）。
+    pub(crate) fn checkpoint_deadline(&self) -> Result<(), crate::budget::ControlStop> {
+        self.budget.checkpoint_deadline()
+    }
+
+    /// トップレベル境界で queue 上限を判定し、必要なら `Yielded(AuditBackpressure)` を積む
+    /// （audit-vm-triple-c）。yield したら `Ok(true)`。しなかったらこの境界を前進として数える。
+    ///
+    /// tree の `run_driver` と同じく、判定（前進済みかつ上限以上）→ 前進の記録の順で、yield の前に
+    /// accumulator を flush する（§8 規則7）。poll_index の枯渇は internal error。
+    fn audit_queue_boundary(&mut self) -> Result<bool, TsumugiError> {
+        if self.audit_queue_exceeded() {
+            self.flush_charges_into_audit_events();
+            let event = self.yield_pairs.record_yield(
+                crate::audit::AuditYieldReason::AuditBackpressure,
+                self.budget.usage(),
+            )?;
+            self.push_audit_event(event);
+            self.yield_for_audit_queue = true;
+            return Ok(true);
+        }
+        self.audit_queue_progress = true;
+        Ok(false)
     }
 
     /// 蓄積済みの host-call 監査 event を temporal 順のまま drain して返す（audit-vm-triple-a。
@@ -613,6 +760,7 @@ impl Vm {
         if crate::builtin_core::audit_event_marks_host_effect(&event) {
             self.host_effects_may_remain = true;
         }
+        self.audit_queue_admit(&event);
         self.audit_events.push(event);
     }
 
@@ -627,15 +775,34 @@ impl Vm {
     /// REPL 用: 既存のスタック（ローカル変数）を保持したまま新しいチャンクを実行する。
     /// 前回のフレームを差し替えて実行し、終了後もスタック上の値を保持する。
     pub fn run_repl_chunk(&mut self, chunk: VerifiedChunk) -> Result<(), TsumugiError> {
+        // queue の計器が無い経路（CLI・sink 無しの run）は yield しないので 1 回で終わる。計器が
+        // あっても、buffer を配送しない呼び出し元では resume を続けて最後まで回す。
+        let mut step = self.run_repl_chunk_resumable(chunk);
+        loop {
+            match step {
+                VmRunStep::Done(result) => return result,
+                VmRunStep::Yielded => step = self.resume_repl_chunk(),
+            }
+        }
+    }
+
+    /// [`Self::run_repl_chunk`] の中断できる形（audit-vm-triple-c）。queue 上限のトップレベル境界の
+    /// yield で [`VmRunStep::Yielded`] を返し、checkpoint を持ったまま中断する。続きは
+    /// [`Self::resume_repl_chunk`]。REPL の commit・rollback と `exit` の commit は中断をまたいで
+    /// 1 回の実行として行う。
+    pub(crate) fn run_repl_chunk_resumable(&mut self, chunk: VerifiedChunk) -> VmRunStep {
         let chunk = chunk.into_inner();
         // 未捕捉エラー時に、入力途中の一時値・callee frame・try handlerを
         // 次の入力へ持ち越さないための構造状態checkpoint。
         // stackはList/Dictを深く複製せず、既存slotの書換・削除時だけjournalへ退避する。
-        let frames_checkpoint = self.frames.clone();
-        let globals_checkpoint = self.globals.clone();
-        let handlers_checkpoint = self.try_handlers.clone();
-        let steps_checkpoint = self.budget.committed_fuel();
+        let checkpoint = ReplRunCheckpoint {
+            frames: self.frames.clone(),
+            globals: self.globals.clone(),
+            try_handlers: self.try_handlers.clone(),
+            steps: self.budget.committed_fuel(),
+        };
         debug_assert!(self.repl_stack_checkpoint.is_none());
+        debug_assert!(self.suspended_repl.is_none());
         // 新しい transaction 開始時に保留 heap 超過をクリアする（REV-015 PR-d）。
         self.pending_heap_stop = None;
         self.repl_top_level_initialized = self.stack.len();
@@ -685,16 +852,66 @@ impl Vm {
             Err(error) => {
                 // 課金超過なら 1 命令も実行せず、checkpoint を破棄して state を巻き戻す。
                 self.repl_stack_checkpoint = None;
-                self.frames = frames_checkpoint;
-                self.globals = globals_checkpoint;
-                self.try_handlers = handlers_checkpoint;
-                self.budget.restore_fuel(steps_checkpoint);
-                return Err(error);
+                self.frames = checkpoint.frames;
+                self.globals = checkpoint.globals;
+                self.try_handlers = checkpoint.try_handlers;
+                self.budget.restore_fuel(checkpoint.steps);
+                return VmRunStep::Done(Err(error));
             }
         };
         self.chunk_tokens = chunk_tokens;
+        self.audit_queue_progress = false;
+        self.drive_repl_chunk(checkpoint)
+    }
 
-        match self.run_frames(0) {
+    /// queue 上限の yield で中断した入力を続ける（audit-vm-triple-c）。tree の `run_slice` の先頭と
+    /// 同じく、最初の命令より前に対の `Resumed(AuditBackpressure)` を buffer へ積み、前進の記録を
+    /// 戻す（resume 直後の境界では再 yield しない）。
+    pub(crate) fn resume_repl_chunk(&mut self) -> VmRunStep {
+        let Some(checkpoint) = self.suspended_repl.take() else {
+            return VmRunStep::Done(Err(internal_error(
+                0,
+                "中断していない VM の実行は再開できません",
+            )));
+        };
+        if let Some(event) = self.yield_pairs.take_resume(self.budget.usage()) {
+            self.push_audit_event(event);
+        }
+        self.audit_queue_progress = false;
+        self.drive_repl_chunk(checkpoint)
+    }
+
+    /// queue 上限の yield で中断した入力を、実行の開始時点へ畳む（audit-vm-triple-c）。yield の配送で
+    /// 監査が失敗したときに使う（tree の `abort_session` と同じく rollback する）。
+    pub(crate) fn abort_suspended_repl_chunk(&mut self) {
+        if let Some(checkpoint) = self.suspended_repl.take() {
+            self.rollback_repl_chunk(checkpoint);
+        }
+    }
+
+    /// 入力の未捕捉エラーと同じ rollback（`run_repl_chunk` の失敗の腕を共有する）。
+    fn rollback_repl_chunk(&mut self, checkpoint: ReplRunCheckpoint) {
+        let stack_checkpoint = self.repl_stack_checkpoint.take();
+        self.frames = checkpoint.frames;
+        if let Some(stack_checkpoint) = stack_checkpoint {
+            self.restore_repl_stack(stack_checkpoint);
+        }
+        self.globals = checkpoint.globals;
+        self.try_handlers = checkpoint.try_handlers;
+        if !self.repl_rollback_keeps_fuel {
+            self.budget.restore_fuel(checkpoint.steps);
+        }
+    }
+
+    /// 入力の frame を回し、終わったら commit・rollback する。queue 上限の yield では checkpoint を
+    /// `suspended_repl` へ移して中断する。
+    fn drive_repl_chunk(&mut self, checkpoint: ReplRunCheckpoint) -> VmRunStep {
+        let result = self.run_frames(0);
+        if std::mem::take(&mut self.yield_for_audit_queue) {
+            self.suspended_repl = Some(checkpoint);
+            return VmRunStep::Yielded;
+        }
+        VmRunStep::Done(match result {
             Ok(_) => {
                 self.repl_stack_checkpoint = None;
                 Ok(())
@@ -719,19 +936,10 @@ impl Vm {
                 Err(error)
             }
             Err(error) => {
-                let stack_checkpoint = self.repl_stack_checkpoint.take();
-                self.frames = frames_checkpoint;
-                if let Some(stack_checkpoint) = stack_checkpoint {
-                    self.restore_repl_stack(stack_checkpoint);
-                }
-                self.globals = globals_checkpoint;
-                self.try_handlers = handlers_checkpoint;
-                if !self.repl_rollback_keeps_fuel {
-                    self.budget.restore_fuel(steps_checkpoint);
-                }
+                self.rollback_repl_chunk(checkpoint);
                 Err(error)
             }
-        }
+        })
     }
 
     /// フレーム実行ループ（共通エンジン）
@@ -751,6 +959,10 @@ impl Vm {
             if frame.ip >= frame.chunk.code.len() {
                 // フレームの命令が尽きた = 暗黙 null return
                 if self.frames.len() <= stop_depth + 1 {
+                    // トップレベルの末尾も queue 上限の判定点（tree の root frame の末尾と同じ）。
+                    if self.at_audit_queue_top_level(stop_depth) && self.audit_queue_boundary()? {
+                        return Ok(Value::Null);
+                    }
                     // トップレベルまたは stop_depth に戻った
                     break;
                 }
@@ -777,6 +989,19 @@ impl Vm {
                 .get(frame.ip)
                 .copied()
                 .ok_or_else(|| internal_error(0, "命令に対応する行番号がありません"))?;
+            // audit drain queue 上限（audit-vm-triple-c、tree の `run_driver` と同じ判定点）。トップレベル
+            // （frame 1 段で callback の再入の中ではない）の文の境界（`Charge(Statement)` の前）と反復の
+            // 境界（back-edge の `Loop` の前）と末尾（`Return` の前）でだけ判定する。yield するときは ip を
+            // 進めずに戻り、resume でこの命令から続ける（前進保証で同じ境界では再 yield しない）。
+            if self.at_audit_queue_top_level(stop_depth)
+                && matches!(
+                    instruction,
+                    OpCode::Charge(ChargeKind::Statement) | OpCode::Loop(_) | OpCode::Return
+                )
+                && self.audit_queue_boundary()?
+            {
+                return Ok(Value::Null);
+            }
             self.frame_mut(line)?.ip += 1;
 
             // fuel は論理課金点（Loop の back-edge・PrepareCall の直前の Charge と callback）でだけ課金する
@@ -907,6 +1132,13 @@ impl Vm {
             }
         }
         Ok(Value::Null)
+    }
+
+    /// queue 上限を判定するトップレベルにいるか（audit-vm-triple-c）。計器があり、callback の再入
+    /// （`stop_depth > 0`）ではなく、frame が 1 段（関数本体の中ではない）のとき。tree の
+    /// `can_yield && !in_driver_call()` に当たる。
+    fn at_audit_queue_top_level(&self, stop_depth: usize) -> bool {
+        stop_depth == 0 && self.frames.len() == 1 && self.audit_queue.is_some()
     }
 
     /// 保留中の heap 超過を表に出す（REV-015 PR-d）。全命令の dispatch 前に呼ぶ。
