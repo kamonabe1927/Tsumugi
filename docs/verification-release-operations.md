@@ -1207,7 +1207,7 @@ b・c はスライスの大きさを a の結果（1 Phase あたりの行数）
      各行の `tests` は、既存のテストを `grep` で受入 ID・テスト名から探して紐づけ、見つからなければ `[]` にする。
      逸脱一覧に行が残る ID は、その行を直すスライスを `open` に書く（直すスライスが無ければ `open` を空にし、`note` に逸脱一覧の行を指す）。
   3. `tests/phase_gates_contract.rs` を足し、§19.3 の 1〜4 を確かめる。TOML の部分集合パーサは `tests/slices_contract.rs` から
-     `tests/common/toml_subset.rs` へ移し、両方のテストから `mod` で使う（`[[slice]]` 以外の表名 `[[gate]]`・`[[unnumbered]]` も読めるようにする。
+     `tests/support/toml_subset.rs` へ移し、両方のテストから `#[path = "support/toml_subset.rs"] mod toml_subset;` で取り込む（`[[slice]]` 以外の表名 `[[gate]]`・`[[unnumbered]]` も読めるようにする。
      読める書き方の範囲は変えず、部分集合の外は今までどおり失敗させる）。`slices_contract.rs` の検査の中身は変えない。
   4. ロードマップのマイルストーン表の Phase 0・1 の「完了 gate」列から `docs/phase-gates.toml` を参照させる。
   5. 本書の逸脱一覧の §19 の行を、Phase 2〜7 の行がまだ無いことだけを書く形に直す。
@@ -1224,7 +1224,7 @@ b・c はスライスの大きさを a の結果（1 Phase あたりの行数）
   - **PGT-AT-04**（Phase 0・1 の行）: ロードマップの Phase 0・1 の「完了 gate」列に挙がる受入 ID がすべて一覧にあり、受入 ID の無い条件は
     `[[unnumbered]]` にある。`cargo test`（`slices_contract` を含む）がすべて通る。確かめ方: 列と一覧の対応表を実装 PR の本文に書き、レビュー役が見る。
 - **想定の変更規模**: `src/` の差分は 0 行。テストは `tests/phase_gates_contract.rs` +200〜350 行と、パーサの移動（`tests/slices_contract.rs` −160 行程度・
-  `tests/common/toml_subset.rs` +170 行程度）。`docs/phase-gates.toml` は Phase 0・1 で 25〜40 行のエントリ。触る仕組みは文書の契約テスト 1 つ、
+  `tests/support/toml_subset.rs` +170 行程度）。`docs/phase-gates.toml` は Phase 0・1 で 25〜40 行のエントリ。触る仕組みは文書の契約テスト 1 つ、
   受入基準は 4 項目で、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。言語の挙動・課金・監査を変えないので、§14.1 の tree と VM の規則は当たらない。
 - **触る trust boundary と脅威**: 該当なし。文書とテストだけを足し、[脅威モデル](threat-model.md) §6 の B1〜B6 のどの境界の実行時の挙動も変えない。
 
