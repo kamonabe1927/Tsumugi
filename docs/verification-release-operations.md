@@ -3,7 +3,7 @@
 最終更新: 2026-11-17
 設計ステータス: **実装仕様確定・部分実装**
 
-本文書の §1〜§18 は **到達目標の確定仕様**であり、現在の実装状態ではない。現在の実装が目標からどう逸脱しているか・どこが未実装かは、
+本文書の §1〜§19 は **到達目標の確定仕様**であり、現在の実装状態ではない。現在の実装が目標からどう逸脱しているか・どこが未実装かは、
 下の **逸脱一覧** が唯一の正本である（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。表は現在の逸脱と
 未実装範囲だけを持ち、解消した行は削除する。実装スライスの進捗の正本は [`slices.toml`](slices.toml)。
 
@@ -44,6 +44,7 @@ D-99・D-100 で capability-model に合わせた）。
 | OCI image が無い（`Dockerfile` が無い） | §9・§17 VRO-AT-12 | — |
 | Kubernetes の参照用 Job・NetworkPolicy が無い（`deploy/` が無い。§1.1 のとおり image の公開前には作らない） | §10・§11・§17 VRO-AT-13/14 | — |
 | 運用 SLO・運用指標が無い | §13・§17 VRO-AT-15 | — |
+| Phase の完了 gate の一覧（`docs/phase-gates.toml`）と、その検査（`tests/phase_gates_contract.rs`）が無い。ロードマップのマイルストーン表の「完了 gate」列は節・spec の slice・受入 ID を文章で並べるだけで、Phase ごとの残りを数えられない | §19 | —（未実装範囲。phase-gates-a〜c で作る） |
 
 ## 1. 目的と適用範囲
 
@@ -1183,6 +1184,50 @@ bin の扱い（Q1=A）・検査の置き場所（Q2=A）・dead code の warnin
   [開発ループ手順書](loop-runbook.md) §14.1 に収まる。done にする実装 PR で、[次期意味論・実装決定](semantic-decisions.md) の逸脱一覧の
   `default-features = false` の行を削除する（本書は逸脱一覧をまだ持たない）。
 
+### phase-gates-a 実装スライス（Phase の完了 gate の一覧の形と検査を作り、Phase 0・1 を載せる）
+
+issue #547 を受け入れて足した。目標は §19。§19 の一覧を Phase 0〜7 まで一度に作ると、受入 ID と既存テストの突き合わせが
+数百件になり 1 回の実装（[開発ループ手順書](loop-runbook.md) §14.3 の 90 分）に収まらないので、3 本に分ける。
+
+| スライス | 範囲 |
+|---|---|
+| phase-gates-a（本節） | `docs/phase-gates.toml` の形（冒頭のフィールド定義）、`tests/phase_gates_contract.rs`、Phase 0・1 の行 |
+| phase-gates-b（`todo`） | Phase 2・3・4 の行（Capability の CAP-AT、execution-control §15・§16、EMB-AT-21・22 ほか） |
+| phase-gates-c（`todo`） | Phase 5・6・7 の行（determinism-and-audit §15・§16、EMB-AT-23・CAP-AT-30、VRO-AT-01〜15 ほか） |
+
+割り方の理由: 形と検査を最初の 1 本に置けば、b・c は行を足すだけになり、足した行は a の検査がその場で確かめる。
+Phase 0・1 は gate の受入 ID が少なく（TM-AT と EMB-AT の 20 件前後）、形と検査の妥当性を小さく確かめられる。
+b・c はスライスの大きさを a の結果（1 Phase あたりの行数）で見積もり直して設計する。
+- **決定記録（判断役が選択（PR #558）、Q1=A）:** a を §6.7 の VM パリティのフェーズのあいだに `ready`（order 121）で置く。理由: §6.7 が絞るのは手順書 §6.2 の 5・6 だけで 4（実装）は絞らず、order 121 はフェーズのスライス（audit-vm-slice-fuel 74・audit-vm-block-end-boundary 75）より後なので、それらが `ready` になれば先に選ばれる。小節と受入基準がそろったものを `todo`（未設計）に置くと状態の読み方が崩れる（原則 9）。採らなかった B（フェーズ後まで `todo`）は、その食い違いが残り、`ready` にするだけの設計 PR が 1 本増える。
+
+- **実装範囲**:
+  1. `docs/phase-gates.toml` を作り、冒頭のコメントに §19.2 のフィールドの定義を置く。
+  2. Phase 0・1 の行を置く。対象は[ロードマップ](roadmap.md)の「完了 gate」列の Phase 0（[脅威モデル](threat-model.md) §11 Phase 0、TM-AT-07・TM-AT-12 の host 部分）と
+     Phase 1（[組み込みAPI仕様](embedding-api.md) 第14〜15節 E1〜E6・E8a、EMB-AT-01〜09・13・15〜17）で、§19.2 のとおり受入 ID に開く。
+     各行の `tests` は、既存のテストを `grep` で受入 ID・テスト名から探して紐づけ、見つからなければ `[]` にする。
+     逸脱一覧に行が残る ID は、その行を直すスライスを `open` に書く（直すスライスが無ければ `open` を空にし、`note` に逸脱一覧の行を指す）。
+  3. `tests/phase_gates_contract.rs` を足し、§19.3 の 1〜4 を確かめる。TOML の部分集合パーサは `tests/slices_contract.rs` から
+     `tests/support/toml_subset.rs` へ移し、両方のテストから `#[path = "support/toml_subset.rs"] mod toml_subset;` で取り込む（`[[slice]]` 以外の表名 `[[gate]]`・`[[unnumbered]]` も読めるようにする。
+     読める書き方の範囲は変えず、部分集合の外は今までどおり失敗させる）。`slices_contract.rs` の検査の中身は変えない。
+  4. ロードマップのマイルストーン表の Phase 0・1 の「完了 gate」列から `docs/phase-gates.toml` を参照させる。
+  5. 本書の逸脱一覧の §19 の行を、Phase 2〜7 の行がまだ無いことだけを書く形に直す。
+- **範囲外**: Phase 2〜7 の行（phase-gates-b・c）。§19.4 の各項目。手順書 §6.2 の 6・§9・§9.1 の文言（issue #547 の設計 PR で先に入れる）。
+  受入 ID の採番が無い条件に新しく ID を振ること（各 spec の設計で行う。ここでは `[[unnumbered]]` に置くだけ）。
+- **受入基準（phase-gates-a）**:
+  - **PGT-AT-01**（形）: `[[gate]]`・`[[unnumbered]]` の必須フィールドの欠け・`phase` の範囲外・`source` の見出しの不在と、`[[gate]]` の同じ `phase` と `id` の組の重複・
+    見出しの節に `id` が現れないことを、それぞれ検査が失敗として報告する。確かめ方: 実装 PR で各種類の壊れた行を一時的に足して失敗を確かめ、
+    結果を PR 本文に書く（`slices_contract.rs` の `subset_parser_rejects_unsupported_forms` と同じく、パーサの拒否はテストに持つ）。
+  - **PGT-AT-02**（テストの紐づけ）: `tests` の項目のパスが `tests/` か `src/` の下の `.rs` でない・ファイルが無い・`fn <関数名>` が無い・`open` の id が `slices.toml` に無いか `done` で
+    あることを、検査が失敗として報告する。確かめ方: PGT-AT-01 と同じ。
+  - **PGT-AT-03**（数）: `cargo test --test phase_gates_contract -- --nocapture` が Phase 0〜7 の 8 行（Phase 2〜7 は `一覧なし`）を出し、
+    数によって失敗しない。確かめ方: 出力を実装 PR の本文に貼る。
+  - **PGT-AT-04**（Phase 0・1 の行）: ロードマップの Phase 0・1 の「完了 gate」列に挙がる受入 ID がすべて一覧にあり、受入 ID の無い条件は
+    `[[unnumbered]]` にある。`cargo test`（`slices_contract` を含む）がすべて通る。確かめ方: 列と一覧の対応表を実装 PR の本文に書き、レビュー役が見る。
+- **想定の変更規模**: `src/` の差分は 0 行。テストは `tests/phase_gates_contract.rs` +200〜350 行と、パーサの移動（`tests/slices_contract.rs` −160 行程度・
+  `tests/support/toml_subset.rs` +170 行程度）。`docs/phase-gates.toml` は Phase 0・1 で 25〜40 行のエントリ。触る仕組みは文書の契約テスト 1 つ、
+  受入基準は 4 項目で、[開発ループ手順書](loop-runbook.md) §14.1 に収まる。言語の挙動・課金・監査を変えないので、§14.1 の tree と VM の規則は当たらない。
+- **触る trust boundary と脅威**: 該当なし。文書とテストだけを足し、[脅威モデル](threat-model.md) §6 の B1〜B6 のどの境界の実行時の挙動も変えない。
+
 ## 17. 最終受入基準
 
 本文書の「実装済み」への変更は次をすべて満たした場合だけ許可する。
@@ -1213,3 +1258,58 @@ bin の扱い（Q1=A）・検査の置き場所（Q2=A）・dead code の warnin
 - **配布・運用資材不足:** Slice 4〜7でbinary release、OCI、参照用Kubernetes Job、runbook、SLOを順に追加する。存在しないimageを参照する先行manifestは禁止する。
 
 本文書で未決定事項は残さない。toolやbase imageのpatch version・digestは、実装時点で本文書の固定policyに従って機械取得しSHAへpinする実装値であり、architectureや運用方針を再判断する事項ではない。
+
+## 19. Phase の完了 gate の一覧と検査
+
+issue #547 を受け入れて足した。[ロードマップ](roadmap.md)のマイルストーン表の「完了 gate」列は、Phase ごとの完了条件を節・spec の slice・受入 ID の文章で並べている。
+これでは「その Phase の残りはいくつか」を数えられず、作業の選び方（[開発ループ手順書](loop-runbook.md) §6.2 の 6・§9）にも振り返り（同 §9.1）にも使えない。
+そこで、各 Phase の完了 gate を受入 ID の一覧にし、各 ID を満たすテストを紐づけ、Phase ごとの「満たした数 / 全数」を `cargo test` で出す。
+数は振り返りのための観測であり、目標値や閾値を置かない（同 §9.1）。数を理由に CI を落とすことはしない。
+
+### 19.1 置き場所
+
+- 一覧は `docs/phase-gates.toml` の 1 ファイルに置く（Phase 0〜7 を 1 ファイルで持つ）。理由: 検査のテストが機械的に読む正本で、[`slices.toml`](slices.toml) と同じく 1 ファイル・同じ TOML の部分集合にすると、検査の書き方と読み手の探し方が 1 つで済む。Phase ごとに各 spec へ表を置く形は、Phase 2・5・6 のように gate が複数の spec にまたがる Phase で同じ ID の行が 2 か所に分かれる。
+- ファイルの冒頭のコメントにフィールドの定義だけを置き、運用の規則は本節と手順書に置く（`slices.toml` と同じ分け方）。
+- ロードマップの「完了 gate」列は、一覧に載った Phase について `docs/phase-gates.toml` の該当 Phase を参照する形に変える。列の文章は残してよいが、残りの数は書かない（状態の正本は一覧と検査の出力。[ドキュメント運用ガイド](documentation-guide.md)「状態の正本は粒度ごとに 1 箇所だけ」）。
+
+### 19.2 エントリの形
+
+```toml
+[[gate]]
+phase  = 0                                          # 必須。0〜7
+id     = "TM-AT-07"                                 # 必須。受入 ID（spec にある名前そのまま）
+source = { doc = "docs/threat-model.md", section = "Phase 0" }  # 必須。ID が書かれた見出し（完全一致）
+tests  = ["tests/value_nesting_depth_limit.rs::<関数名>"]  # 必須。満たすテスト。まだ無ければ []
+open   = ["fix-vm-callback-recursion-stack"]        # 任意。満たすのにまだ要るスライスの id
+note   = "debug build の --vm の callback 経由の再帰は open のスライスで直す"  # 任意
+
+[[unnumbered]]
+phase  = 0                                          # 必須。0〜7
+source = { doc = "docs/threat-model.md", section = "Phase 0" }  # 必須。条件が書かれた見出し（完全一致）
+note   = "actor・asset・trust boundary・保証/非保証・責任分界が release documentation から参照できる（受入 ID が未採番）"  # 必須。条件の中身
+```
+
+- `[[unnumbered]]` の必須フィールドは `phase`・`source`・`note` の 3 つで、`id`・`tests`・`open` は持たない。
+
+- `tests` の 1 項目は `<リポジトリからの相対パス>::<関数名>` と書く。パスは `tests/` か `src/` の下の `.rs` で、その中に `fn <関数名>` がある。
+- 1 つの受入 ID は、その ID が完了 gate に挙がる Phase ごとに 1 行だけ持つ（同じ `phase` と `id` の組を 2 行にしない）。ID に部分がある書き方（「TM-AT-12（host 部分）」など）は、`id` を `TM-AT-12` にし、部分を `note` に書く。
+- 完了 gate が節や spec の slice（「第11節 Phase 0」「C1〜C10」など）で書かれているものは、その節・slice の受入基準にある受入 ID に開いて並べる。受入 ID が採番されていない条件は `[[unnumbered]]` に 1 行ずつ置き、全数に入れずに別に数える。
+- **決定記録（判断役が選択（PR #558）、Q3=A）:** 受入 ID の無い条件は `[[unnumbered]]` に置き、全数に入れずに別に数える。ID の採番は各 spec の設計で行う。理由: 一覧の `id` を spec にある名前だけにすれば、spec が実装の正本のままで、§19.3 の 2 の検査を例外なしに当てられ、未採番の条件も失われない（原則 9）。採らなかった B（一覧の中で仮の ID を振って全数に入れる）は、spec に無い ID が一覧にだけ生まれ、ID の正本が 2 か所になる。
+- **満たした**: `tests` が空でなく、`open` が空のもの。`tests` があっても `open` があるもの（逸脱一覧の行が残る部分実装）と、`tests` が空のもの（まだ無い）は残りに数える。
+
+### 19.3 検査（`tests/phase_gates_contract.rs`）
+
+`tests/slices_contract.rs` と同じく、依存 crate を足さずに TOML の部分集合を読んで、次を確かめる。
+
+1. 各 `[[gate]]` と各 `[[unnumbered]]` に必須フィールド（§19.2）があり、`phase` が 0〜7 である。`[[gate]]` は同じ `phase` と `id` の組が 1 行だけである。
+2. 各 `[[gate]]` と各 `[[unnumbered]]` の `source.doc` が実在し、`source.section` がその見出しとして完全一致で存在する。`[[gate]]` は `id` がその見出しの節の本文に現れる（`[[unnumbered]]` は `id` を持たないので、この確かめは当てない）。
+3. `tests` の各項目のパスが `tests/` か `src/` の下の `.rs` で（§19.2）、そのファイルが実在し、`fn <関数名>` を含む。`open` の各 id が `slices.toml` にあり、`done` でない。
+4. Phase ごとに `Phase N: 満たした M / 全 K（残り K-M。ID 未採番 U）` を 1 行ずつ標準出力に出す（`cargo test --test phase_gates_contract -- --nocapture` で見える）。一覧に 1 行も無い Phase は `Phase N: 一覧なし` と出す。この行は数を出すだけで、数によって失敗しない。
+
+1〜3 に反する行があればテストを失敗させ、どの行がどう反するかをまとめて出す（`slices_contract.rs` の `report` と同じ形）。
+
+### 19.4 範囲外
+
+- テストが tree と VM の両方で走っているかの検査（受入 ID の文面が両 engine を求めるかの読み取りは機械的に決まらない。[開発ループ手順書](loop-runbook.md) §6.7 の差分テストが engine の差を持つ）。
+- テストが本当にその受入 ID の内容を確かめているかの判定（レビュー役が一覧を足す PR で見る）。
+- `.github/workflows/` の変更（凍結ファイル。検査は CI が走らせる `cargo test` の中で行う）。

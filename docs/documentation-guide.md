@@ -57,6 +57,7 @@ AI エージェント・人間のどちらも、新しい情報を書く前に�
 | 実装スライスの設計（実装範囲・逸脱・受入基準の記録） | 該当する spec の「実装slice」章の小節（時点の記録として凍結） | ✕ |
 | spec の現在の実装状態（目標仕様に対する逸脱・未実装範囲） | 該当する spec の **逸脱一覧**（冒頭の設計ステータス段落、表形式、spec ごとに 1 つ） | ✕ |
 | **実装スライスの一覧・状態・依存・着手順** | **[`slices.toml`](slices.toml)** | ✕（link のみ） |
+| Phase の完了 gate の受入 ID の一覧と、各 ID を満たすテスト（Phase ごとの残りの数は `tests/phase_gates_contract.rs` が出す） | `docs/phase-gates.toml`（形と検査は[検証・リリース・運用設計](verification-release-operations.md) §19。作るのは phase-gates-a〜c） | ✕（「完了 gate」列から参照のみ） |
 | 開発ループの守り（信頼する入力・凍結・マニフェストの 3 段の守り・マージの条件・上限・人間の入口）。凍結 | [開発ループの守り](loop-guard.md) | ✕ |
 | 定時実行の開発ループの実行手順 | [開発ループ手順書](loop-runbook.md) | ✕ |
 | 開発ループの各モード・各役の手順（規則は loop-guard と手順書が正本） | `.claude/skills/<名前>/`（進行は [loop-advance](../.claude/skills/loop-advance/SKILL.md)、朝の点検は [loop-morning](../.claude/skills/loop-morning/SKILL.md)。審査役の [manifesto-gate](../.claude/skills/manifesto-gate/SKILL.md) は凍結） | ✕ |
@@ -105,7 +106,7 @@ AI エージェント・人間のどちらも、新しい情報を書く前に�
 | （新規追加）→ todo | 設計 PR または状態整理 PR | `slices.toml` へのエントリ追加 |
 | （新規追加）→ ready（issue から、[開発ループ手順書](loop-runbook.md)「issue の仕分け」） | 設計 PR | `slices.toml` へのエントリ追加と、todo → ready と同じもの。ready の条件を満たさなければ todo で追加する |
 | todo → ready | 設計 PR | spec の実装スライス小節の追加・更新、`status` の変更、`spec`・`acceptance`・`design_pr` の記入 |
-| ready → done | 実装 PR | 実装・テスト、spec の逸脱一覧の更新（新しい逸脱・未実装範囲の追加、解消した行の削除）、`status` の変更、`impl_pr` の記入、ロードマップの「ステータス一覧」の該当行の更新（項目の状態が変わる場合） |
+| ready → done | 実装 PR | 実装・テスト、spec の逸脱一覧の更新（新しい逸脱・未実装範囲の追加、解消した行の削除）、`status` の変更、`impl_pr` の記入、ロードマップの「ステータス一覧」の該当行の更新（項目の状態が変わる場合）、そのスライスの id が `docs/phase-gates.toml` の `open` にあれば外し、満たすテストを `tests` に足すこと（[検証・リリース運用](verification-release-operations.md) §19.2 の「満たした」と §19.3 の 3） |
 | ready → todo（差し戻しの確定） | 設計 PR | spec の修正、`issues` への追記、needs-design issue のクローズ |
 | → blocked / blocked → todo | 状態整理 PR | `blocked_reason` の記入・削除 |
 

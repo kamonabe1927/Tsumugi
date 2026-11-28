@@ -1608,3 +1608,151 @@ acceptance = ["NUS-AT-01..03"]
 design_pr  = 551
 impl_pr    = 552
 order      = 120
+
+# issue #547（kamonabe、手順書 §8 の仕分けで「受け入れ」）から作った、Phase の完了 gate の一覧と検査（verification-release-operations §19）。
+#   一覧を Phase 0〜7 まで一度に作ると 1 回の実装に収まらないので、形と検査と Phase 0・1 を a に、Phase 2〜4 を b に、Phase 5〜7 を c に割った
+#   （割り方の理由は verification-release-operations「phase-gates-a 実装スライス」）。parent は Phase 7 の検証の gate を持つ AUD-022。
+# order は loop-runbook §8 の「それ以外」の既定（すべてのスライスより後。設計時点の最大は 120）。§6.7 のフェーズのスライスは今 todo で
+#   この order より前（74・75）にあるので、フェーズのスライスが ready になれば先に実装される。a は今 ready に置く（判断役が選択（PR #558）、Q1=A。
+#   §6.7 は §6.2 の 4 を絞らず、フェーズのスライスは order で先に選ばれる）。
+# 見積もり（a）: src/ 0 行、テスト +200〜350 行とパーサの移動、docs/phase-gates.toml 25〜40 行、受入基準 4。
+[[slice]]
+id         = "phase-gates-a"
+title      = "Phase の完了 gate の一覧 docs/phase-gates.toml の形と検査 tests/phase_gates_contract.rs を作り、Phase 0・1 の受入 ID とテストを載せる（verification-release-operations §19、issue #547）"
+status     = "ready"
+parent     = "AUD-022"
+spec       = { doc = "docs/verification-release-operations.md", section = "phase-gates-a 実装スライス（Phase の完了 gate の一覧の形と検査を作り、Phase 0・1 を載せる）" }
+acceptance = ["PGT-AT-01..04"]
+design_pr  = 558
+order      = 121
+
+# 見積もり: docs/phase-gates.toml に Phase 2・3・4 の行（CAP-AT-01〜30 の該当分・TM-AT の Phase 2/3 分・execution-control §15・§16・EMB-AT-21・22 ほか、
+#   100〜200 行）。src/ 0 行。受入基準は設計で決める。大きければ設計で Phase ごとに分ける。
+[[slice]]
+id         = "phase-gates-b"
+title      = "Phase の完了 gate の一覧に Phase 2・3・4 の受入 ID とテストを載せる（verification-release-operations §19、issue #547）"
+status     = "todo"
+parent     = "AUD-022"
+depends_on = ["phase-gates-a"]
+order      = 122
+
+# 見積もり: docs/phase-gates.toml に Phase 5・6・7 の行（determinism-and-audit §15・§16・EMB-AT-23・CAP-AT-30・VRO-AT-01〜15 ほか、100〜200 行）。
+#   src/ 0 行。受入基準は設計で決める。大きければ設計で Phase ごとに分ける。
+[[slice]]
+id         = "phase-gates-c"
+title      = "Phase の完了 gate の一覧に Phase 5・6・7 の受入 ID とテストを載せる（verification-release-operations §19、issue #547）"
+status     = "todo"
+parent     = "AUD-022"
+depends_on = ["phase-gates-a"]
+order      = 123
+
+# ── issue #547 の 3: ロードマップの ⬜・🟡 の項目のうち、todo・ready・blocked のスライスが無いものの placeholder ──
+# どれも 1 本の実装には大きすぎる見込みで、設計の前に loop-runbook §10 で分割する（設計役は大きすぎれば分割案を付けて返す。loop-design）。
+# 見積もりは粗いもので、分割のときに見直す。order は §8 の「それ以外」の既定（すべてのスライスより後）で、ロードマップの表の順に並べた。
+# done のスライスだけがある項目（REV-007・REV-024・AUD-022・Phase 5 残）も残りがあるので含めた（判断役が選択（PR #558）、Q4=A。
+#   issue #547 の目的は todo の列が残りを表すことで、含めないとこの 4 項目の残りが列に現れない）。
+
+# 見積もり: ExecutionContext の session state と run meter の分離。src/ 300〜800 行（tree・VM）、2〜3 本に分かれる見込み。
+[[slice]]
+id         = "placeholder-rev-007"
+title      = "placeholder: ExecutionContext の session state と run meter を request ごとに分離する（REV-007 の残り。分割前）"
+status     = "todo"
+parent     = "REV-007"
+order      = 124
+
+# 見積もり: 32-bit target の i64 as usize の wrap を try_from / checked へ。src/ の変換箇所の洗い出しと置き換えで 100〜400 行、1〜2 本。
+[[slice]]
+id         = "placeholder-rev-010"
+title      = "placeholder: 32-bit target の i64 as usize の wrap を try_from / checked へ直す（REV-010。分割前）"
+status     = "todo"
+parent     = "REV-010"
+order      = 125
+
+# 見積もり: language revision・engine 差・status の機械可読な単一正本と生成。owning spec が未定（ロードマップの表で —）で、設計の前に置き場所の判断が要る見込み。2〜4 本。
+[[slice]]
+id         = "placeholder-rev-011"
+title      = "placeholder: language revision・engine 差・status を機械可読な単一正本から生成する（REV-011。分割前）"
+status     = "todo"
+parent     = "REV-011"
+order      = 126
+
+# 見積もり: sandbox / env / limits / stdio / clock を EngineConfig / ExecutionRequest へ移す。公開 API に触れ、3〜6 本に分かれる見込み。
+[[slice]]
+id         = "placeholder-rev-014"
+title      = "placeholder: sandbox / env / limits / stdio / clock を EngineConfig / ExecutionRequest へ移す（REV-014。分割前）"
+status     = "todo"
+parent     = "REV-014"
+order      = 127
+
+# 見積もり: script からの Rc cycle による回収不能 heap の扱い（baseline 課金・clear・tenant 分離）。design.md に設計の詳細が要る見込みで、2〜4 本。
+[[slice]]
+id         = "placeholder-rev-016"
+title      = "placeholder: script からの Rc cycle による回収不能 heap を扱う（baseline 課金・clear・tenant 分離。REV-016。分割前）"
+status     = "todo"
+parent     = "REV-016"
+order      = 128
+
+# 見積もり: now() の epoch 前 / clock error と u64 as i64 を clock capability と checked で扱う。src/ 100〜300 行（tree・VM）、1〜2 本。
+[[slice]]
+id         = "placeholder-rev-019"
+title      = "placeholder: now() の epoch 前 / clock error と u64 as i64 を clock capability と checked で扱う（REV-019。分割前）"
+status     = "todo"
+parent     = "REV-019"
+order      = 129
+
+# 見積もり: MSRV 固定・action pin・release / fuzz / stress gate の段階導入の残り。action pin は .github/**（凍結）に触れるので、ループの外の分がある。2〜4 本。
+[[slice]]
+id         = "placeholder-rev-024"
+title      = "placeholder: MSRV 固定・action pin・release / fuzz / stress gate の段階導入の残り（REV-024。分割前）"
+status     = "todo"
+parent     = "REV-024"
+order      = 130
+
+# 見積もり: parse diagnostic の件数の上限。src/ 50〜200 行、1 本の見込み。
+[[slice]]
+id         = "placeholder-rev-025"
+title      = "placeholder: parse diagnostic の件数に上限を置く（REV-025。分割前）"
+status     = "todo"
+parent     = "REV-025"
+order      = 131
+
+# 見積もり: language-spec / LANG_GUIDE / design の drift の解消。文書だけで、整合点検の輪番と重なる。1〜3 本。
+[[slice]]
+id         = "placeholder-aud-021"
+title      = "placeholder: language-spec / LANG_GUIDE / design の drift を解消する（AUD-021。分割前）"
+status     = "todo"
+parent     = "AUD-021"
+order      = 132
+
+# 見積もり: fuzz・stress・failure injection の gate（verification-release-operations Slice 3）。fuzz/ と CI job（凍結）に触れる分がある。3〜5 本。
+[[slice]]
+id         = "placeholder-aud-022"
+title      = "placeholder: REPL / differential / limit / defensive に加えて fuzz・stress・failure injection の gate を置く（AUD-022 の残り。分割前）"
+status     = "todo"
+parent     = "AUD-022"
+order      = 133
+
+# 見積もり: MSRV・CI・install / release・artifact・署名 / SBOM / OCI・運用 gate（verification-release-operations Slice 1〜7）。
+#   .github/**（凍結）に触れる分が多く、ループの外の分がある。5〜10 本。
+[[slice]]
+id         = "placeholder-aud-045"
+title      = "placeholder: MSRV・stable / MSRV CI・install / release・artifact・署名 / SBOM / OCI・運用 gate（AUD-045。分割前）"
+status     = "todo"
+parent     = "AUD-045"
+order      = 134
+
+# 見積もり: determinism Slice 2〜6（HostBoundary / FakeHost・VM parity・audit normalize・record/replay 等）の残り。VM parity は §6.7 のフェーズのスライスが持つ。5〜10 本。
+[[slice]]
+id         = "placeholder-phase5-rest"
+title      = "placeholder: determinism Slice 2〜6 の残り（HostBoundary / FakeHost・audit normalize・record/replay 等。Phase 5 残。分割前）"
+status     = "todo"
+parent     = "Phase 5 残"
+order      = 135
+
+# 見積もり: dispatch の match 分割・exec_stmt 分割・sandbox の OnceLock のテスタビリティ・fuzzing 導入。リファクタで 4 本前後。
+[[slice]]
+id         = "placeholder-quality"
+title      = "placeholder: 未着手の処理改善（dispatch の match 分割・exec_stmt 分割・sandbox の OnceLock のテスタビリティ・fuzzing 導入。品質改善。分割前）"
+status     = "todo"
+parent     = "品質改善"
+order      = 136
