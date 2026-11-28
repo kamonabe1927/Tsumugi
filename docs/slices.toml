@@ -902,7 +902,7 @@ parent     = "VM parity"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-slice-fuel-a 実装スライス（VM の実行ループの slice fuel の yield 可能点と `Yielded`/`Resumed(SliceFuelExhausted)`）" }
 acceptance = ["AVSF-AT-01..05"]
-design_pr  = 562
+design_pr  = 564
 depends_on = ["audit-vm-triple-c"]
 order      = 74
 
