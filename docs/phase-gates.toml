@@ -1,0 +1,167 @@
+# Phase の完了 gate の一覧（verification-release-operations §19）。
+#
+# ロードマップのマイルストーン表の「完了 gate」列を受入 ID に開き、各 ID を満たすテストを紐づける。
+# 検査は tests/phase_gates_contract.rs（cargo test --test phase_gates_contract -- --nocapture で Phase ごとの数が見える）。
+# 運用の規則は §19 と loop-runbook に置き、ここにはフィールドの定義だけを置く。数は観測で、目標値・閾値ではない。
+#
+# [[gate]]（受入 ID があるもの）
+#   phase  = 整数 0〜7。必須。
+#   id     = 文字列。必須。spec にある受入 ID そのまま（部分は note に書く）。同じ phase と id の組は 1 行だけ。
+#   source = { doc = "...", section = "..." }。必須。ID が書かれた見出し（完全一致）。id がその見出しの節の本文に現れること。
+#   tests  = ["<tests/ か src/ の下の .rs>::<関数名>", ...]。必須。満たすテスト。まだ無ければ []。
+#   open   = ["<スライス id>", ...]。任意。満たすのにまだ要るスライス（slices.toml にあり、done でない）。
+#   note   = 文字列。任意。
+#
+# [[unnumbered]]（受入 ID が未採番の条件。全数に入れず別に数える）
+#   phase・source・note の 3 つ（すべて必須）。id・tests・open は持たない。note に条件の中身を書く。
+#
+# 満たした = tests が空でなく open が空。tests があっても open があるもの、tests が空のものは残りに数える。
+
+# ── Phase 0（脅威モデル 第11節 Phase 0）──
+
+[[unnumbered]]
+phase  = 0
+source = { doc = "docs/threat-model.md", section = "Phase 0" }
+note   = "actor・asset・trust boundary・保証/非保証・責任分界・全脅威 ID が release documentation から参照できる（受入 ID が未採番）"
+
+[[unnumbered]]
+phase  = 0
+source = { doc = "docs/threat-model.md", section = "Phase 0" }
+note   = "各 TM-ID に Attack・Mitigation・Residual risk・Phase・受入 ID が 1 件以上あり、孤立 ID がない（受入 ID が未採番。tests/threat_model_traceability.rs が TM-AT の ID の過不足を見る）"
+
+[[gate]]
+phase  = 0
+id     = "TM-AT-07"
+source = { doc = "docs/threat-model.md", section = "Phase 0" }
+tests  = ["tests/depth_boundary.rs::dbt_at_01_expression_nesting_boundary_tree_and_vm", "tests/depth_boundary.rs::dbt_at_01_block_nesting_boundary_tree_and_vm", "tests/depth_boundary.rs::dbt_at_02_import_depth_boundary_tree_and_vm", "tests/integration.rs::user_call_depth_boundary_is_identical_across_engines", "tests/value_nesting_depth_limit.rs::vnd_at_01_boundary_and_catch_in_both_engines", "tests/value_nesting_depth_limit.rs::vnd_at_02_repro_does_not_abort"]
+open   = ["fix-closure-capture-chain-stack", "fix-vm-callback-recursion-stack"]
+note   = "closure の capture の連鎖の破棄と debug build の --vm の callback 経由の再帰は、脅威モデルの逸脱一覧の行を open のスライスで直す"
+
+[[gate]]
+phase  = 0
+id     = "TM-AT-12"
+source = { doc = "docs/threat-model.md", section = "Phase 0" }
+tests  = []
+note   = "host 部分（dependency lock・review・OS 隔離が host 責任と明記されること）は文書の項目でテストの対象外。engine 部分は Phase 1 の節にあり、対応は tests/threat_model_traceability.rs"
+
+# ── Phase 1（組み込みAPI 第14〜15節 E1〜E6・E8a、EMB-AT-01〜09・13・15〜17）──
+# E1〜E6 の完了条件は受入 ID が無い文章なので [[unnumbered]] に置く。E8a の完了条件は EMB-AT-15〜17 に開いた。
+
+[[unnumbered]]
+phase  = 1
+source = { doc = "docs/embedding-api.md", section = "14. 実装slice" }
+note   = "E1 の完了条件: constructor、default、secret-free Debug（ID/config/error/outcome/EngineBuilder）"
+
+[[unnumbered]]
+phase  = 1
+source = { doc = "docs/embedding-api.md", section = "14. 実装slice" }
+note   = "E2 の完了条件: byte-level hash、source 非保持 default（CompiledScript、import なし LinkedScript、source/root hash）"
+
+[[unnumbered]]
+phase  = 1
+source = { doc = "docs/embedding-api.md", section = "14. 実装slice" }
+note   = "E3 の完了条件: 既存 tree 意味論、CLI 同一入口（tree backend adapter）"
+
+[[unnumbered]]
+phase  = 1
+source = { doc = "docs/embedding-api.md", section = "14. 実装slice" }
+note   = "E4 の完了条件: 再利用、poison、drop、全 language-state rollback（Context/Handle cleanup と transaction journal の縦切り。Phase 1/3）"
+
+[[unnumbered]]
+phase  = 1
+source = { doc = "docs/embedding-api.md", section = "14. 実装slice" }
+note   = "E5 の完了条件: process 継続、catch 規則（Completed/Runtime/Internal/Cancelled〔pre-run〕channel）"
+
+[[unnumbered]]
+phase  = 1
+source = { doc = "docs/embedding-api.md", section = "14. 実装slice" }
+note   = "E6 の完了条件: unwind test、fault ID（compile/link/run panic 隔離）"
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-01"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = ["tests/engine_api.rs::compile_and_execute_returns_completed"]
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-02"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = ["src/embedding.rs::config_and_outcome_types_are_send_sync"]
+open   = ["fix-execution-request-send-sync"]
+note   = "ExecutionRequest が Send・Sync でない（embedding-api の逸脱一覧の行）。Context/Handle の !Send・!Sync の assertion は無い"
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-03"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = ["src/embedding.rs::link_rejects_foreign_engine", "src/embedding.rs::run_rejects_foreign_context"]
+open   = ["fix-run-foreign-engine-mismatch"]
+note   = "foreign context の run は開始前の mismatch でなく InternalFailure（embedding-api の逸脱一覧の行）"
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-04"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = []
+note   = "同 context の同時 start を拒否するテストが無い"
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-05"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = ["src/embedding.rs::emb_at_05_run_does_not_call_resolver"]
+note   = "Phase 1 の範囲（run 時 resolver 0）"
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-06"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = []
+note   = "Ready drop が命令 0・context 再利用可であるテストが無い"
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-07"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = ["src/embedding.rs::e4_runtime_error_does_not_poison", "src/embedding.rs::e4_internal_failure_poisons_and_blocks_reuse", "src/embedding.rs::e5_pre_run_cancel_does_not_poison"]
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-08"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = ["src/embedding.rs::e4_runtime_error_rolls_back_language_state", "src/embedding.rs::e4_completed_commits_language_state", "src/embedding.rs::e4_caught_error_then_completed_commits"]
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-09"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = ["tests/engine_api.rs::runtime_error_surfaces_as_runtime_error_outcome", "src/embedding.rs::e5_pre_run_cancel_returns_cancelled_without_running", "src/embedding.rs::e6_run_panic_maps_to_internal_failure_and_poisons"]
+note   = "Phase 1 の範囲（Completed・Runtime・InternalFailure・pre-run Cancelled）"
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-13"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = ["src/embedding.rs::golden_hashes_are_stable"]
+note   = "Phase 1 の範囲（root hash）"
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-15"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = ["tests/integration.rs::args_returns_script_arguments_in_both_engines", "tests/integration.rs::args_is_empty_without_script_arguments", "tests/integration.rs::rejects_non_utf8_argument_without_host_panic"]
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-16"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = ["tests/cli_safe_profile.rs::allow_exit_propagates_exit_code_via_profile"]
+note   = "実装済み outcome の exit mapping。Phase 1 の範囲"
+
+[[gate]]
+phase  = 1
+id     = "EMB-AT-17"
+source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
+tests  = []
+note   = "tree の CLI が Engine API だけを通ることを固定するテストが無い。VM 側は embedding-api の逸脱一覧の VM backend adapter の行（E9）"

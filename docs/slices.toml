@@ -1619,7 +1619,7 @@ order      = 120
 [[slice]]
 id         = "phase-gates-a"
 title      = "Phase の完了 gate の一覧 docs/phase-gates.toml の形と検査 tests/phase_gates_contract.rs を作り、Phase 0・1 の受入 ID とテストを載せる（verification-release-operations §19、issue #547）"
-status     = "ready"
+status     = "done"
 parent     = "AUD-022"
 spec       = { doc = "docs/verification-release-operations.md", section = "phase-gates-a 実装スライス（Phase の完了 gate の一覧の形と検査を作り、Phase 0・1 を載せる）" }
 acceptance = ["PGT-AT-01..04"]

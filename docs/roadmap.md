@@ -19,8 +19,8 @@
 
 | Phase | 目的 | 設計正本 | 状態 | 完了 gate |
 |---|---|---|---|---|
-| 0 | 保証範囲と脅威モデル | [脅威モデル](threat-model.md) | 🟡 | 第11節 Phase 0、TM-AT-07・TM-AT-12（host 部分） |
-| 1 | 安定した組み込み API | [組み込みAPI仕様](embedding-api.md) | 🟡 | 第14〜15節 E1〜E6・E8a、EMB-AT-01〜09・13・15〜17 |
+| 0 | 保証範囲と脅威モデル | [脅威モデル](threat-model.md) | 🟡 | 受入 ID の一覧とテストの対応は `docs/phase-gates.toml` の Phase 0（元の gate: 第11節 Phase 0、TM-AT-07・TM-AT-12〔host 部分〕） |
+| 1 | 安定した組み込み API | [組み込みAPI仕様](embedding-api.md) | 🟡 | 受入 ID の一覧とテストの対応は `docs/phase-gates.toml` の Phase 1（元の gate: 第14〜15節 E1〜E6・E8a、EMB-AT-01〜09・13・15〜17） |
 | 2 | deny-by-default capability | [Capability Model仕様](capability-model.md)・[組み込みAPI仕様](embedding-api.md) | 🟡 | Capability 第18〜19節 C1〜C10・Phase 2 CAP-AT、Embedding E7〔tree REPL 統合済み〕・E8b〔完了：profile/options 配線済み・migration warning descope 済み・EMB-AT-10/11 を profile 経由 subprocess で固定済み〕。embedding 側 E7・E8b は完了、Phase 2 全体の状態は capability model 側 Phase 2 基準（CAP-AT 等）にも依存 |
 | 3 | 包括的な実行予算 | [実行予算・協調実行仕様](execution-control.md) | 🟡 | 第3〜8・10・15.1〜15.3・16節、EMB-AT-21 |
 | 4 | 協調実行と負荷制御 | [実行予算・協調実行仕様](execution-control.md) | 🟡 | 第6.2・9・11〜12・15.3〜15.5・16節、EMB-AT-22 |

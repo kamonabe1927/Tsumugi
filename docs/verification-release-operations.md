@@ -44,7 +44,7 @@ D-99・D-100 で capability-model に合わせた）。
 | OCI image が無い（`Dockerfile` が無い） | §9・§17 VRO-AT-12 | — |
 | Kubernetes の参照用 Job・NetworkPolicy が無い（`deploy/` が無い。§1.1 のとおり image の公開前には作らない） | §10・§11・§17 VRO-AT-13/14 | — |
 | 運用 SLO・運用指標が無い | §13・§17 VRO-AT-15 | — |
-| Phase の完了 gate の一覧（`docs/phase-gates.toml`）と、その検査（`tests/phase_gates_contract.rs`）が無い。ロードマップのマイルストーン表の「完了 gate」列は節・spec の slice・受入 ID を文章で並べるだけで、Phase ごとの残りを数えられない | §19 | —（未実装範囲。phase-gates-a〜c で作る） |
+| Phase の完了 gate の一覧（`docs/phase-gates.toml`）に Phase 2〜7 の行が無い。形と検査（`tests/phase_gates_contract.rs`）と Phase 0・1 の行は phase-gates-a で作った。ロードマップの「完了 gate」列は Phase 2〜7 では節・spec の slice・受入 ID を文章で並べるだけで、残りを数えられない | §19 | —（未実装範囲。Phase 2〜4 は phase-gates-b、Phase 5〜7 は phase-gates-c で作る） |
 
 ## 1. 目的と適用範囲
 

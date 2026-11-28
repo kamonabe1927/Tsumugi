@@ -16,13 +16,17 @@
 //!
 //! 失敗したときは、正本（documentation-guide「状態の正本」）でない側を直す。
 //!
-//! `slices.toml` の読み取りには依存 crate を足さず、このファイルが使う TOML の部分集合
-//! （`[[slice]]`、文字列・整数・配列・inline table、行末コメント）だけを読む小さなパーサを置く。
+//! `slices.toml` の読み取りには依存 crate を足さず、TOML の部分集合
+//! （`[[slice]]`、文字列・整数・配列・inline table、行末コメント）だけを読む小さなパーサ（`tests/support/toml_subset.rs`）を使う。
 //! 部分集合の外の書き方を見つけたら、黙って読み飛ばさずに失敗させる。
+
+#[path = "support/toml_subset.rs"]
+mod toml_subset;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use toml_subset::{Value, headings, parse_tables};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -33,219 +37,17 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("{} を読めません: {e}", path.display()))
 }
 
-// ── TOML の部分集合パーサ ─────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq)]
-enum Value {
-    Str(String),
-    Int(i64),
-    Arr(Vec<Value>),
-    Table(BTreeMap<String, Value>),
-}
-
-impl Value {
-    fn as_str(&self) -> Option<&str> {
-        match self {
-            Value::Str(s) => Some(s),
-            _ => None,
-        }
-    }
-    fn as_int(&self) -> Option<i64> {
-        match self {
-            Value::Int(n) => Some(*n),
-            _ => None,
-        }
-    }
-    fn as_arr(&self) -> Option<&[Value]> {
-        match self {
-            Value::Arr(v) => Some(v),
-            _ => None,
-        }
-    }
-}
-
-struct Cursor<'a> {
-    chars: Vec<char>,
-    pos: usize,
-    line: usize,
-    file: &'a str,
-}
-
-impl Cursor<'_> {
-    fn fail(&self, msg: &str) -> ! {
-        panic!(
-            "{}:{}: TOML の部分集合として読めません（{msg}）。このテストのパーサが読める書き方に揃えるか、パーサを広げてください",
-            self.file, self.line
-        )
-    }
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
-    }
-    fn skip_ws(&mut self) {
-        while matches!(self.peek(), Some(' ' | '\t')) {
-            self.pos += 1;
-        }
-    }
-    fn expect(&mut self, c: char) {
-        self.skip_ws();
-        if self.peek() != Some(c) {
-            self.fail(&format!("'{c}' が必要"));
-        }
-        self.pos += 1;
-    }
-    fn key(&mut self) -> String {
-        self.skip_ws();
-        let start = self.pos;
-        while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            self.pos += 1;
-        }
-        if start == self.pos {
-            self.fail("キーが必要");
-        }
-        self.chars[start..self.pos].iter().collect()
-    }
-    fn value(&mut self) -> Value {
-        self.skip_ws();
-        match self.peek() {
-            Some('"') => {
-                self.pos += 1;
-                let mut s = String::new();
-                loop {
-                    match self.peek() {
-                        Some('"') => {
-                            self.pos += 1;
-                            return Value::Str(s);
-                        }
-                        Some('\\') => self.fail("エスケープは未対応"),
-                        Some(c) => {
-                            s.push(c);
-                            self.pos += 1;
-                        }
-                        None => self.fail("文字列が閉じていない"),
-                    }
-                }
-            }
-            Some('[') => {
-                self.pos += 1;
-                let mut items = Vec::new();
-                loop {
-                    self.skip_ws();
-                    if self.peek() == Some(']') {
-                        self.pos += 1;
-                        return Value::Arr(items);
-                    }
-                    items.push(self.value());
-                    self.skip_ws();
-                    match self.peek() {
-                        Some(',') => self.pos += 1,
-                        Some(']') => {}
-                        _ => self.fail("配列は 1 行で書き、要素は ',' で区切る"),
-                    }
-                }
-            }
-            Some('{') => {
-                self.pos += 1;
-                let mut table = BTreeMap::new();
-                loop {
-                    self.skip_ws();
-                    if self.peek() == Some('}') {
-                        self.pos += 1;
-                        return Value::Table(table);
-                    }
-                    let k = self.key();
-                    self.expect('=');
-                    let v = self.value();
-                    if table.insert(k.clone(), v).is_some() {
-                        self.fail(&format!("inline table のキー {k} が重複"));
-                    }
-                    self.skip_ws();
-                    match self.peek() {
-                        Some(',') => self.pos += 1,
-                        Some('}') => {}
-                        _ => self.fail("inline table の区切りは ','"),
-                    }
-                }
-            }
-            Some(c) if c.is_ascii_digit() => {
-                let start = self.pos;
-                while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
-                    self.pos += 1;
-                }
-                let text: String = self.chars[start..self.pos].iter().collect();
-                Value::Int(
-                    text.parse()
-                        .unwrap_or_else(|_| self.fail("整数が大きすぎる")),
-                )
-            }
-            _ => self.fail("値は文字列・整数・配列・inline table のどれか"),
-        }
-    }
-    fn end_of_line(&mut self) {
-        self.skip_ws();
-        match self.peek() {
-            None | Some('#') => {}
-            _ => self.fail("値の後ろに余計な文字がある"),
-        }
-    }
-}
+// ── TOML の部分集合パーサ（本体は support/toml_subset.rs） ─────────
 
 /// `[[slice]]` の並びを読む。各要素は (開始行, キー → 値)。
 fn parse_slices(text: &str, file: &str) -> Vec<(usize, BTreeMap<String, Value>)> {
-    let mut slices: Vec<(usize, BTreeMap<String, Value>)> = Vec::new();
-    for (i, raw) in text.lines().enumerate() {
-        let line_no = i + 1;
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line == "[[slice]]" {
-            slices.push((line_no, BTreeMap::new()));
-            continue;
-        }
-        let mut cur = Cursor {
-            chars: raw.chars().collect(),
-            pos: 0,
-            line: line_no,
-            file,
-        };
-        if line.starts_with('[') {
-            cur.fail("[[slice]] 以外の table は未対応");
-        }
-        let Some((_, current)) = slices.last_mut() else {
-            cur.fail("[[slice]] より前にキーがある");
-        };
-        let key = cur.key();
-        cur.expect('=');
-        let value = cur.value();
-        cur.end_of_line();
-        if current.insert(key.clone(), value).is_some() {
-            cur.fail(&format!("キー {key} が重複"));
-        }
-    }
-    slices
+    parse_tables(text, file, &["slice"])
+        .into_iter()
+        .map(|(line, _, fields)| (line, fields))
+        .collect()
 }
 
 // ── Markdown の補助 ───────────────────────────────────────────────
-
-/// フェンス付きコードブロックの外にある見出しのテキスト（`#` と前後の空白を除いたもの）。
-fn headings(markdown: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut in_fence = false;
-    for line in markdown.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
-            continue;
-        }
-        let hashes = line.chars().take_while(|&c| c == '#').count();
-        if (1..=6).contains(&hashes) && line[hashes..].starts_with(' ') {
-            out.insert(line[hashes..].trim().to_string());
-        }
-    }
-    out
-}
 
 /// `## <title>` で始まる節の本文（次の同じ深さ以上の見出しの手前まで）。
 fn section<'a>(markdown: &'a str, title: &str) -> Option<&'a str> {
