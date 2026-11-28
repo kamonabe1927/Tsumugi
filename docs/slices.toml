@@ -883,17 +883,33 @@ design_pr  = 556
 impl_pr    = 557
 order      = 72
 
-# audit-vm-triple-c の設計 PR で登録（判断の候補 Q2 の推奨案 A）。c は監査 sink・audit_slice_fuel・VmExperimental の同時設定を
-#   ConfigError::AuditSliceFuelWithExperimentalBackend で拒否し、slice 境界の Yielded/Resumed(SliceFuelExhausted) を
-#   tree と同じ位置（関数本体の中と式の operand 境界を含む）で VM に出すことをこのスライスへ送る。§6.7 のフェーズのスライス。未設計。
+# audit-vm-triple-c の設計 PR で登録した audit-vm-slice-fuel（判断の候補 Q2 の推奨案 A）を、設計 PR で a・b に分けた
+#   （spec「audit-vm-slice-fuel のスライス分割」小節に理由。判断の候補 Q1〜Q3 は判断役が Q1=A・Q2=A・Q3=A を選んだ（PR #562）。決定記録は spec の a の小節）。元の id は置き換えて残さない。§6.7 のフェーズのスライス。
+# a: VM の run_frames(0) のループに tree の yield 可能点（文/反復境界・関数本体・式の operand 境界）を置き、監査付き実行で
+#   Yielded/Resumed(SliceFuelExhausted) を tree と同じ位置に出す。公開の build の拒否は残す。見積もり src/ 約 220〜420 行、
+#   tests 約 350〜550 行、受入基準 5（AVSF-AT-01..05）。§6.7 のとおり §14.1 の上限は当てない。
+# b: callback（map・filter・each）と bulk builtin（join・contains・sort）の chunk 境界の yield 可能点、
+#   ConfigError::AuditSliceFuelWithExperimentalBackend の撤去、tests/vm_parity.rs の Axis::Audit のケース。a の done の後に設計する。
 [[slice]]
-id         = "audit-vm-slice-fuel"
-title      = "監査付きの VM 実行で audit_slice_fuel の slice 境界の Yielded/Resumed(SliceFuelExhausted) を tree と同じ位置で出し、ConfigError::AuditSliceFuelWithExperimentalBackend を撤去する"
+id         = "audit-vm-slice-fuel-a"
+title      = "監査付きの VM 実行で、実行ループ（トップレベル・関数本体・式の operand 境界）の slice fuel の yield 可能点に Yielded/Resumed(SliceFuelExhausted) を tree と同じ位置で出す"
+status     = "ready"
+parent     = "VM parity"
+spec_slice = "determinism Slice 6"
+spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-slice-fuel-a 実装スライス（VM の実行ループの slice fuel の yield 可能点と `Yielded`/`Resumed(SliceFuelExhausted)`）" }
+acceptance = ["AVSF-AT-01..05"]
+design_pr  = 562
+depends_on = ["audit-vm-triple-c"]
+order      = 74
+
+[[slice]]
+id         = "audit-vm-slice-fuel-b"
+title      = "VM の map・filter・each の callback と join・contains・sort の chunk 境界を slice fuel の yield 可能点にし、ConfigError::AuditSliceFuelWithExperimentalBackend を撤去する"
 status     = "todo"
 parent     = "VM parity"
 spec_slice = "determinism Slice 6"
-depends_on = ["audit-vm-triple-c"]
-order      = 74
+depends_on = ["audit-vm-slice-fuel-a"]
+order      = 76
 
 # audit-vm-triple-c の実装 PR #557 で登録（判断の候補 Q1=A、判断役が選択（PR #557））。VM の audit drain queue の上限の判定点に、
 #   tree の run_driver と同じ block（if・else・try・catch の本体）の末尾を足し、上限が Resumed 1 件の計上 byte 数より小さいときも
