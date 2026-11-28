@@ -864,14 +864,33 @@ impl_pr    = 542
 depends_on = ["audit-vm-triple-a", "vm-engine-run-route"]
 order      = 71
 
+# c の設計 PR（main 9941f25、todo → ready）: 前提の b（PR #542）が done になったので受入基準を採番した。分けずに 1 本（判断の候補 Q3）。
+#   見積もり src/ 約 220〜420 行、tests 約 450〜700 行、受入基準 5（AVT-AT-11..15。tests/vm_parity.rs の監査の軸は AVT-AT-15、
+#   PR #535 の Q2=A の条件 1）。§6.7 のとおり §14.1 の上限は当てない。
+#   判断の候補 Q1（queue の計上の HeapBytes の差）・Q2（audit_slice_fuel と VM）・Q3（分けるか）は spec の c の小節と PR に書いた。
+#   Q2 の推奨案 A のとおり、VM の slice 境界の yield の延期先 audit-vm-slice-fuel を todo で登録した（order は c の後で空いている 74）。
 [[slice]]
 id         = "audit-vm-triple-c"
 title      = "VM の audit backpressure（drain queue の byte 計上とトップレベル境界の Yielded/Resumed）と ConfigError::AuditSinkWithExperimentalBackend の撤去"
-status     = "todo"
+status     = "ready"
 parent     = "Phase 6 残"
 spec_slice = "determinism Slice 6"
+spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-triple-c 実装スライス（VM の audit backpressure と `ConfigError::AuditSinkWithExperimentalBackend` の撤去）" }
+acceptance = ["AVT-AT-11..15"]
 depends_on = ["audit-vm-triple-b"]
 order      = 72
+
+# audit-vm-triple-c の設計 PR で登録（判断の候補 Q2 の推奨案 A）。c は監査 sink・audit_slice_fuel・VmExperimental の同時設定を
+#   ConfigError::AuditSliceFuelWithExperimentalBackend で拒否し、slice 境界の Yielded/Resumed(SliceFuelExhausted) を
+#   tree と同じ位置（関数本体の中と式の operand 境界を含む）で VM に出すことをこのスライスへ送る。§6.7 のフェーズのスライス。未設計。
+[[slice]]
+id         = "audit-vm-slice-fuel"
+title      = "監査付きの VM 実行で audit_slice_fuel の slice 境界の Yielded/Resumed(SliceFuelExhausted) を tree と同じ位置で出し、ConfigError::AuditSliceFuelWithExperimentalBackend を撤去する"
+status     = "todo"
+parent     = "VM parity"
+spec_slice = "determinism Slice 6"
+depends_on = ["audit-vm-triple-c"]
+order      = 74
 
 [[slice]]
 id         = "audit-record-replay"
