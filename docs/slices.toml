@@ -1619,12 +1619,14 @@ order      = 120
 [[slice]]
 id         = "phase-gates-a"
 title      = "Phase の完了 gate の一覧 docs/phase-gates.toml の形と検査 tests/phase_gates_contract.rs を作り、Phase 0・1 の受入 ID とテストを載せる（verification-release-operations §19、issue #547）"
-status     = "ready"
+status     = "blocked"
 parent     = "AUD-022"
 spec       = { doc = "docs/verification-release-operations.md", section = "phase-gates-a 実装スライス（Phase の完了 gate の一覧の形と検査を作り、Phase 0・1 を載せる）" }
 acceptance = ["PGT-AT-01..04"]
 design_pr  = 558
 order      = 121
+blocked_reason = "manifesto: 原則9（学びと検証）— 実装 PR #559 の docs/phase-gates.toml で、EMB-AT-01（compile→link→run）と EMB-AT-15（CLI 引数 0/1/複数/--/非 UTF-8）の行が範囲の一部しか確かめないテスト（facade の compile→execute、引数 0・3 個・非 UTF-8 だけ）で §19.2 の「満たした」に数えられ、検証していない条件を満たしたと数える（実装 PR #559 の審査、issue #560）"
+issues     = [560]
 
 # 見積もり: docs/phase-gates.toml に Phase 2・3・4 の行（CAP-AT-01〜30 の該当分・TM-AT の Phase 2/3 分・execution-control §15・§16・EMB-AT-21・22 ほか、
 #   100〜200 行）。src/ 0 行。受入基準は設計で決める。大きければ設計で Phase ごとに分ける。
