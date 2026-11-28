@@ -893,7 +893,7 @@ order      = 72
 [[slice]]
 id         = "audit-vm-slice-fuel-a"
 title      = "監査付きの VM 実行で、実行ループ（トップレベル・関数本体・式の operand 境界）の slice fuel の yield 可能点に Yielded/Resumed(SliceFuelExhausted) を tree と同じ位置で出す"
-status     = "ready"
+status     = "blocked"
 parent     = "VM parity"
 spec_slice = "determinism Slice 6"
 spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-slice-fuel-a 実装スライス（VM の実行ループの slice fuel の yield 可能点と `Yielded`/`Resumed(SliceFuelExhausted)`）" }
@@ -901,6 +901,8 @@ acceptance = ["AVSF-AT-01..05"]
 design_pr  = 562
 depends_on = ["audit-vm-triple-c"]
 order      = 74
+blocked_reason = "manifesto: 原則3（すべての実行に予算）— issue #563 の判断（block の末尾・式 frame の入口を判定点に入れる）を反映した設計 PR #564 で、side table を「ip ごとの判定点の列」にし BlockEnd ごとに本体の範囲の飛ぶ命令すべてを飛び元として記録する形にしたが、heap の課金に含めないままで、入れ子の深さ倍に膨らみうる大きさの上限と課金に含めない根拠が書かれていない（設計 PR #564 の審査、issue #565）"
+issues     = [563, 565]
 
 [[slice]]
 id         = "audit-vm-slice-fuel-b"
