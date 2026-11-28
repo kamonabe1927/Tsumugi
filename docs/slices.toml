@@ -890,6 +890,10 @@ order      = 72
 #   tests 約 350〜550 行、受入基準 5（AVSF-AT-01..05）。§6.7 のとおり §14.1 の上限は当てない。
 # b: callback（map・filter・each）と bulk builtin（join・contains・sort）の chunk 境界の yield 可能点、
 #   ConfigError::AuditSliceFuelWithExperimentalBackend の撤去、tests/vm_parity.rs の Axis::Audit のケース。a の done の後に設計する。
+# a は実装役が needs-design #563 で止まり（tree は block の末尾でも slice fuel を判定する）、判断役が Q1=A・Q2=A を選んだ。
+#   その反映の設計 PR で、spec の a の小節に「再設計（main 16038ae。issue #563 の判断の反映）」を足し（yield 可能点を ip ごとの
+#   判定点の列にし、block の末尾と式の入口を足す）、想定の変更規模を src/ 約 300〜560 行・tests 約 420〜650 行に直し、
+#   design_pr をその PR にした（初版の設計 PR は #562）。status・order・acceptance は変えない。
 [[slice]]
 id         = "audit-vm-slice-fuel-a"
 title      = "監査付きの VM 実行で、実行ループ（トップレベル・関数本体・式の operand 境界）の slice fuel の yield 可能点に Yielded/Resumed(SliceFuelExhausted) を tree と同じ位置で出す"
@@ -915,13 +919,15 @@ order      = 76
 #   tree の run_driver と同じ block（if・else・try・catch の本体）の末尾を足し、上限が Resumed 1 件の計上 byte 数より小さいときも
 #   Yielded/Resumed(AuditBackpressure) の数を tree と一致させる。受入基準の候補: その上限のケースを tests/vm_parity.rs の
 #   Axis::Audit に入れて一致を gate する。§6.7 のフェーズのスライス。未設計。order は audit-vm-slice-fuel（74）の後で空いている 75。
+#   issue #563 の判断の反映の設計 PR で depends_on に audit-vm-slice-fuel-a を足した（a が VM の side table に block の末尾の
+#   判定点と到着を入れ、このスライスはそれを queue の上限の判定にも使う。spec の a の小節の再設計に関係を書いた）。範囲は変えない。
 [[slice]]
 id         = "audit-vm-block-end-boundary"
 title      = "VM の audit drain queue の上限の判定点に block の末尾を足し、Resumed より小さい上限でも AuditBackpressure の yield の数を tree と一致させる"
 status     = "todo"
 parent     = "VM parity"
 spec_slice = "determinism Slice 6"
-depends_on = ["audit-vm-triple-c"]
+depends_on = ["audit-vm-triple-c", "audit-vm-slice-fuel-a"]
 order      = 75
 
 [[slice]]
