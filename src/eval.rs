@@ -624,26 +624,11 @@ pub struct Evaluator {
     /// 同値を operation_id / call_id 兼用で使う。REPL 再利用で巻き戻さないよう `reset_budget` で
     /// 0 へ戻す。`next_host_call_id`（cooperative host-call の call_id、Slice 5）とは別概念。
     next_host_operation_id: u64,
-    /// yield/resume lifecycle 監査 event（§7.2 CBOR tag 5/6）に発番する poll_index の次値
-    /// （Phase 6、設計 determinism-and-audit.md §7.2/§8）。execution ごとに 0 始まりで単調増加し、
-    /// 1 回の yield/resume pair（`Yielded` とその直後の `Resumed`）へ同値を使う。REPL 再利用で
-    /// 巻き戻さないよう `reset_budget` で 0 へ戻す。`next_host_operation_id` と同じ fail-closed 規律。
-    poll_index: u64,
-    /// 直前の slice が yield した事由（§8 規則8）。`run_slice` が yield 分岐で `Some(reason)` に
-    /// 設定し、次の `run_slice`（resume）の先頭で `take` して `Resumed { previous_reason }` を
-    /// 組む。resume ではない通常終了・terminal では `None`。
-    last_yield_reason: Option<crate::audit::AuditYieldReason>,
-    /// 直前の yield に発番した poll_index（§8）。`Yielded` と対になる `Resumed` が同じ値を使い、
-    /// golden test で `previous_reason`/poll_index が揃うようにする。
-    last_yield_poll_index: u64,
-    /// backpressure（AuditBackpressure）yield が SliceFuel/Explicit yield の **内側で** 起きた
-    /// ときに、外側 yield の `last_yield_reason` / `last_yield_poll_index` を退避する slot
-    /// （Phase 6 B-1、§5.1）。backpressure は slice 境界の event 配送中に起き、外側 yield の
-    /// Resumed はまだ出ていない。`record_backpressure_yield` が退避し、
-    /// `record_backpressure_resume` が backpressure Resumed を出した後に復元することで、外側
-    /// yield の pair（SliceFuel Yielded↔Resumed）を壊さない。単一 batch の round-trip は
-    /// yield→resume で閉じるため、ネストは深さ 1 に限られ 1 slot で足りる。
-    saved_yield_before_backpressure: Option<(crate::audit::AuditYieldReason, u64)>,
+    /// yield/resume lifecycle 監査 event（§7.2 CBOR tag 5/6）の pair の状態（poll_index の発番・
+    /// 直前の yield の事由と poll_index・backpressure の退避 slot。Phase 6 B-1、§7.2/§8）。
+    /// VM（`Vm`）と同じ型 [`crate::audit::AuditYieldPairs`] で持ち（audit-vm-triple-c）、
+    /// `reset_budget`・`rearm_budget_for_repl` で 0 へ戻す。
+    yield_pairs: crate::audit::AuditYieldPairs,
     /// 監査 event の emission 待ちバッファ（§7.3 の `BudgetCharged` 蓄積と同じ deferred-drain 規律）。
     ///
     /// host-call 境界が triple を、`run_slice` が slice 境界で `Resumed`/`Yielded`（と直前に flush
@@ -673,7 +658,7 @@ pub struct Evaluator {
     ///
     /// 監査付き facade だけが [`Self::set_audit_queue`] で `Some` にする。`None`（sink 無し経路・
     /// engine-poll 経路・REPL）では計上も判定も行わず、従来挙動と byte-for-byte 一致する。
-    audit_queue: Option<AuditQueueMeter>,
+    audit_queue: Option<crate::audit::AuditQueueMeter>,
     /// この slice で 1 文以上（または 1 反復以上）実行したか（B-2 の前進保証）。
     ///
     /// `run_slice` 先頭で `false` に戻し、driver が文/反復を進めるたびに `true` にする。queue 上限の
@@ -703,23 +688,6 @@ pub struct Evaluator {
     /// 強制 yield フックの前進条件に使う。B-2 の前進フラグ（`audit_queue_progress`）とは別に持ち、
     /// 式の operand 境界は audit drain queue 上限の判定に影響しない。
     expr_progress: bool,
-}
-
-/// audit drain queue の byte 計器（Phase 6 B-2、`docs/determinism-and-audit.md` §10.2）。
-///
-/// queue は「生成済みだが sink の ack をまだ得ていない通常 event」の推定 encoded byte 合計。
-/// `bytes` は評価器 buffer（host-call triple・`Yielded`/`Resumed`・buffer へ移った
-/// `BudgetCharged`）に積んだ時点で加算し、facade が sink の ack を得た時点で減算する（drain 済み・
-/// in-flight の event も ack まで queue に残る）。accumulator 内の確定済み `BudgetCharged` は
-/// [`crate::budget::BudgetLedger`] 側の合計を判定時に足す。
-#[derive(Debug, Clone, Copy)]
-struct AuditQueueMeter {
-    /// `AuditBudget.max_pending_bytes`（per-execution 上限）。
-    limit: u64,
-    /// envelope 固定部の上限値の byte 数（`audit::queue_envelope_overhead_bytes`）。
-    envelope_overhead: u64,
-    /// 評価器 buffer 由来の未 ack event の推定 byte 合計。
-    bytes: u64,
 }
 
 /// suspend / resume できる 1 回の実行セッション（REV-015 Slice 3 PR-d-2）。
@@ -785,10 +753,7 @@ impl Evaluator {
             // host-call lifecycle 監査（Phase 6）。execution ごとに 0 始まり。
             next_host_operation_id: 0,
             // yield/resume lifecycle 監査（Phase 6）。execution ごとに 0 始まり。
-            poll_index: 0,
-            last_yield_reason: None,
-            last_yield_poll_index: 0,
-            saved_yield_before_backpressure: None,
+            yield_pairs: crate::audit::AuditYieldPairs::default(),
             audit_events: Vec::new(),
             host_effects_may_remain: false,
             yield_for_host_call: false,
@@ -859,10 +824,7 @@ impl Evaluator {
         self.next_host_operation_id = 0;
         // yield/resume lifecycle 監査（Phase 6）の poll_index と buffer も execution ごとに戻す。
         // REPL 再利用で poll_index を巻き戻し、前実行の pending resume / yield event を持ち越さない。
-        self.poll_index = 0;
-        self.last_yield_reason = None;
-        self.last_yield_poll_index = 0;
-        self.saved_yield_before_backpressure = None;
+        self.yield_pairs.reset();
         self.audit_events.clear();
         self.host_effects_may_remain = false;
         // audit drain queue 計器（B-2）も execution ごとに外す。監査付き facade が install 後に
@@ -895,10 +857,7 @@ impl Evaluator {
             .begin_repl_submission(config, Some(clock), cancellation);
         self.last_budget_resource.set(None);
         self.next_host_operation_id = 0;
-        self.poll_index = 0;
-        self.last_yield_reason = None;
-        self.last_yield_poll_index = 0;
-        self.saved_yield_before_backpressure = None;
+        self.yield_pairs.reset();
         self.audit_events.clear();
         self.host_effects_may_remain = false;
         self.clear_audit_queue();
@@ -1383,11 +1342,7 @@ impl Evaluator {
     /// 固定部（`audit::queue_envelope_overhead_bytes(language_revision)`）。監査付き facade が
     /// budget install（[`Self::reset_budget`]、計器を外す）の後に呼ぶ。
     pub(crate) fn set_audit_queue(&mut self, limit: u64, envelope_overhead: u64) {
-        self.audit_queue = Some(AuditQueueMeter {
-            limit,
-            envelope_overhead,
-            bytes: 0,
-        });
+        self.audit_queue = Some(crate::audit::AuditQueueMeter::new(limit, envelope_overhead));
         self.audit_queue_progress = false;
         self.yield_for_audit_queue = false;
     }
@@ -1404,20 +1359,14 @@ impl Evaluator {
     /// envelope 固定部の上限値 ＋ event 本体の実 encode 長で数える（journal の append の増分以上）。
     pub(crate) fn audit_queue_admit(&mut self, event: &crate::audit::AuditEvent) {
         if let Some(meter) = self.audit_queue.as_mut() {
-            let bytes = meter
-                .envelope_overhead
-                .saturating_add(crate::audit::queued_event_bytes(event));
-            meter.bytes = meter.bytes.saturating_add(bytes);
+            meter.admit(event);
         }
     }
 
     /// sink の ack を得た event 1 件を audit drain queue から外す（計器が無ければ no-op）。
     pub(crate) fn audit_queue_release(&mut self, event: &crate::audit::AuditEvent) {
         if let Some(meter) = self.audit_queue.as_mut() {
-            let bytes = meter
-                .envelope_overhead
-                .saturating_add(crate::audit::queued_event_bytes(event));
-            meter.bytes = meter.bytes.saturating_sub(bytes);
+            meter.release(event);
         }
     }
 
@@ -1425,37 +1374,16 @@ impl Evaluator {
     ///
     /// 評価器 buffer 由来の未 ack 分に、accumulator 内の確定済み `BudgetCharged` を足す。
     pub(crate) fn audit_queue_bytes(&self) -> Option<u64> {
-        self.audit_queue.map(|meter| {
-            meter.bytes.saturating_add(
-                self.budget
-                    .audit_finalized_charge_bytes(meter.envelope_overhead),
-            )
-        })
+        self.audit_queue
+            .map(|meter| meter.queued_bytes(&self.budget))
     }
 
     /// トップレベル境界で queue 上限による yield が必要か（B-2）。
     ///
     /// この slice で 1 文以上実行済み（前進保証）かつ queue が上限以上のときだけ `true`。
     fn audit_queue_exceeded(&self) -> bool {
-        match (self.audit_queue, self.audit_queue_bytes()) {
-            (Some(meter), Some(bytes)) => self.audit_queue_progress && bytes >= meter.limit,
-            _ => false,
-        }
-    }
-
-    /// 1 つの yield/resume poll point へ監査 poll_index を発番する（Phase 6、§7.2/§8）。
-    ///
-    /// execution 内で 0 始まり単調増加。`checked_add` で overflow を fail-closed にし、通常運用で
-    /// 到達不能な overflow は [`Self::alloc_host_call_operation_id`] と同じく internal error
-    /// （terminal）へ写す。`Yielded` に新しい値を発番し、対になる `Resumed` は
-    /// `last_yield_poll_index` に退避した同値を再利用する。
-    fn alloc_poll_index(&mut self, line: usize) -> Result<u64, TsumugiError> {
-        let index = self.poll_index;
-        self.poll_index = self
-            .poll_index
-            .checked_add(1)
-            .ok_or_else(|| TsumugiError::internal(line, "yield poll_index を割り当てできません"))?;
-        Ok(index)
+        self.audit_queue
+            .is_some_and(|meter| meter.exceeded(self.audit_queue_progress, &self.budget))
     }
 
     /// この execution で外部効果が残りうる host call（`Committed` / `Unknown`）を積んだか。
@@ -1483,36 +1411,13 @@ impl Evaluator {
     /// その時点の BudgetCharged accumulator を flush する。overflow は `run_slice` と同様に
     /// fail-closed（`Err`）で、呼び出し元が internal terminal へ写す。
     pub(crate) fn record_backpressure_yield(&mut self) -> Result<(), TsumugiError> {
-        // backpressure は外側 yield（SliceFuel/Explicit）の Resumed がまだ出ていない段階で、
-        // slice 境界の event 配送中に起きうる。外側 yield の pair 情報（`last_yield_*`）を退避して
-        // おき、backpressure の Resumed を出した後に復元する（§5.1）。ネストは深さ 1（単一 batch の
-        // round-trip は yield→resume で閉じる）なので 1 slot で足りる。
-        self.saved_yield_before_backpressure = self
-            .last_yield_reason
-            .take()
-            .map(|reason| (reason, self.last_yield_poll_index));
-        // 規則7: flush（確定済み BudgetCharged を先に）してから Yielded。
+        // 規則7: flush（確定済み BudgetCharged を先に）してから Yielded。外側 yield の pair 情報の
+        // 退避と復元は共有の `AuditYieldPairs` が行う（§5.1、audit-vm-triple-c で VM と共有）。
         self.flush_charges_into_audit_events();
-        let reason = crate::audit::AuditYieldReason::AuditBackpressure;
-        let poll_index = match self.alloc_poll_index(0) {
-            Ok(poll_index) => poll_index,
-            Err(e) => {
-                // 発番失敗。退避した外側 yield を復元してから fail-closed（呼び出し元が terminal 化）。
-                if let Some((reason, index)) = self.saved_yield_before_backpressure.take() {
-                    self.last_yield_reason = Some(reason);
-                    self.last_yield_poll_index = index;
-                }
-                return Err(e);
-            }
-        };
-        let usage = self.budget.usage();
-        self.push_audit_event(crate::audit::AuditEvent::Yielded {
-            reason: reason.clone(),
-            poll_index,
-            usage,
-        });
-        self.last_yield_reason = Some(reason);
-        self.last_yield_poll_index = poll_index;
+        let event = self
+            .yield_pairs
+            .record_backpressure_yield(self.budget.usage())?;
+        self.push_audit_event(event);
         Ok(())
     }
 
@@ -1524,27 +1429,11 @@ impl Evaluator {
     /// SliceFuel 由来の Resumed は従来どおり `run_slice` 先頭が積むので、ここでは backpressure 由来
     /// だけを扱う（二重積みを避ける）。
     pub(crate) fn record_backpressure_resume(&mut self) {
-        if matches!(
-            self.last_yield_reason,
-            Some(crate::audit::AuditYieldReason::AuditBackpressure)
-        ) {
-            let previous_reason = self
-                .last_yield_reason
-                .take()
-                .expect("checked AuditBackpressure above");
-            let usage = self.budget.usage();
-            let poll_index = self.last_yield_poll_index;
-            self.push_audit_event(crate::audit::AuditEvent::Resumed {
-                previous_reason,
-                poll_index,
-                usage,
-            });
-            // 退避しておいた外側 yield（SliceFuel/Explicit）の pair 情報を復元する。次の
-            // `run_slice` 先頭がこれを使って外側 yield の Resumed を出す（§5.1）。
-            if let Some((reason, index)) = self.saved_yield_before_backpressure.take() {
-                self.last_yield_reason = Some(reason);
-                self.last_yield_poll_index = index;
-            }
+        if let Some(event) = self
+            .yield_pairs
+            .record_backpressure_resume(self.budget.usage())
+        {
+            self.push_audit_event(event);
         }
     }
 
@@ -1668,14 +1557,8 @@ impl Evaluator {
         // `Resumed { previous_reason, poll_index, usage }` を audit_events へ積む。run_driver を
         // 呼ぶ前（まだ 1 文も実行していない）に積むので §8 規則8 を満たす。sink 無し経路は drain
         // しないため emission ゼロ・byte-for-byte 不変。
-        if let Some(previous_reason) = self.last_yield_reason.take() {
-            let usage = self.budget.usage();
-            let poll_index = self.last_yield_poll_index;
-            self.push_audit_event(crate::audit::AuditEvent::Resumed {
-                previous_reason,
-                poll_index,
-                usage,
-            });
+        if let Some(event) = self.yield_pairs.take_resume(self.budget.usage()) {
+            self.push_audit_event(event);
         }
 
         // この slice の fuel 予算を張り直す（slice ごとに 0 から数える）。
@@ -1720,17 +1603,8 @@ impl Evaluator {
                     self.flush_charges_into_audit_events();
                     // poll_index を新規発番し、pair の Resumed が再利用できるよう退避する。
                     // overflow（通常到達不能）は fail-closed で terminal 化する。
-                    match self.alloc_poll_index(0) {
-                        Ok(poll_index) => {
-                            let usage = self.budget.usage();
-                            self.push_audit_event(crate::audit::AuditEvent::Yielded {
-                                reason: reason.clone(),
-                                poll_index,
-                                usage,
-                            });
-                            self.last_yield_reason = Some(reason);
-                            self.last_yield_poll_index = poll_index;
-                        }
+                    match self.yield_pairs.record_yield(reason, self.budget.usage()) {
+                        Ok(event) => self.push_audit_event(event),
                         Err(e) => {
                             // poll_index 枯渇は internal terminal。session を rollback して終了する。
                             self.finalize_session(false);

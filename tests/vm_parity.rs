@@ -491,6 +491,8 @@ enum Axis {
     CliStderr,
     /// CLI の終了コード。
     CliExit,
+    /// 監査 sink が受け取った envelope の列と `AuditedOutcome`（audit-vm-triple-c）。
+    Audit,
 }
 
 /// 1 つの差。軸ごとに、最初に差の出た入力の値を持つ。
@@ -1832,6 +1834,13 @@ const KNOWN_DIFFS: &[KnownDiff] = &[
         pattern: "repl/*",
         description: "REPL で error で終わった入力の committed.fuel が、VM は 0（run_repl_chunk が入力開始時点へ戻す。compile error は実行しない）、tree は消費した分を残す",
     },
+    // audit-vm-triple-c（決定記録 Q1=A、PR #556）。heap の通知が揃ったら消す。
+    KnownDiff {
+        id: "KD-5",
+        axis: Axis::Audit,
+        pattern: "audit/queue_medium_limit",
+        description: "中くらいの queue の上限で、tree だけが出す HeapBytes の BudgetCharged の byte 数が queue に入る分だけ、tree の方が早く（多く）AuditBackpressure の yield をする（各 backend は自分が積んだ event を同じ関数で数える）",
+    },
 ];
 
 /// `diffs` を `known` と突き合わせ、問題（一覧に無い差・差の出ない項目）を返す。
@@ -2410,4 +2419,490 @@ fn vpd_at_10_fixture_distribution() {
             .iter()
             .any(|(n, _, _)| *n == "hello")
     );
+}
+
+// =============================================================================
+// 監査の軸（audit-vm-triple-c、AVT-AT-13・15）
+// =============================================================================
+//
+// 監査 sink 付きの `TreeWalk` と `VmExperimental` の engine に、同じ source・capability・budget・
+// `execution_id`・`FakeClock` を流し、sink が受け取った envelope の列を比べる（ケース名 `audit/<名前>`）。
+// 比べる前に除くのは、`BudgetCharged { resource: HeapBytes }`（後ろの sequence を詰める）、
+// `ExecutionStarted` の `backend`、`Terminal`・`Yielded`・`Resumed` の usage の heap の数値だけである
+// （audit-vm-triple-a の決定記録 Q1=A（PR #531）、audit-vm-triple-b の比較 test の `comparable` と同じ）。
+// 差は `Axis::Audit` として既存の差と同じ gate（`KNOWN_DIFFS`）にかける。
+
+/// 監査の軸のケースの filesystem の grant。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditGrant {
+    None,
+    ReadOnly,
+    ReadWrite,
+}
+
+/// 監査の軸の 1 ケース。
+struct AuditCase {
+    name: String,
+    source: &'static str,
+    grant: AuditGrant,
+    /// `import` の module を解決する resolver（`tests/fixtures` を root にする）を grant するか。
+    import: bool,
+    /// sink の応答の計画（Started を含む submit の順）。尽きたら Ack を返す。
+    plan: Vec<tsumugi::ScriptedResponse>,
+    /// audit drain queue の上限（`max_pending_bytes`）。`None` は既定。
+    limit: Option<u64>,
+}
+
+/// 1 回の監査付き run の観測（比較の対象にした envelope 列と outcome）。
+struct AuditRun {
+    envelopes: Vec<String>,
+    outcome: String,
+}
+
+/// 監査の軸の比較の除外（上の節の説明のとおり）を当てた envelope 列。
+fn comparable_audit(envelopes: &[tsumugi::AuditEnvelope]) -> Vec<String> {
+    use tsumugi::{AuditEvent, BudgetResource};
+    let is_heap = |env: &tsumugi::AuditEnvelope| {
+        matches!(
+            env.event,
+            AuditEvent::BudgetCharged {
+                resource: BudgetResource::HeapBytes,
+                ..
+            }
+        )
+    };
+    let heap_seqs: Vec<u64> = envelopes
+        .iter()
+        .filter(|env| is_heap(env))
+        .map(|env| env.sequence)
+        .collect();
+    envelopes
+        .iter()
+        .filter(|env| !is_heap(env))
+        .cloned()
+        .map(|mut env| {
+            let removed = heap_seqs.iter().filter(|&&seq| seq < env.sequence).count();
+            env.sequence -= removed as u64;
+            match &mut env.event {
+                AuditEvent::ExecutionStarted { backend, .. } => {
+                    *backend = tsumugi::Backend::TreeWalk;
+                }
+                AuditEvent::Terminal { usage, .. }
+                | AuditEvent::Yielded { usage, .. }
+                | AuditEvent::Resumed { usage, .. } => mask_audit_heap(usage),
+                _ => {}
+            }
+            format!("{env:?}")
+        })
+        .collect()
+}
+
+fn mask_audit_heap(usage: &mut BudgetUsage) {
+    usage.live_heap_bytes = 0;
+    usage.reserved_heap_bytes = 0;
+    usage.peak_heap_bytes = 0;
+}
+
+/// `AuditedOutcome` の比較用の表現（usage の heap の数値だけを揃える）。
+fn comparable_audited(outcome: &tsumugi::AuditedOutcome) -> String {
+    use tsumugi::EmbeddingOutcome as O;
+    match outcome {
+        tsumugi::AuditedOutcome::Outcome(outcome) => {
+            let mut outcome = (**outcome).clone();
+            match &mut outcome {
+                O::Completed { usage }
+                | O::Exited { usage, .. }
+                | O::RuntimeError { usage, .. }
+                | O::BudgetExceeded { usage, .. }
+                | O::DeadlineExceeded { usage }
+                | O::Cancelled { usage }
+                | O::InternalFailure { usage, .. } => mask_audit_heap(usage),
+                _ => {}
+            }
+            format!("Outcome({outcome:?})")
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+/// 監査付きの engine で 1 回 run する（公開 API だけを使う）。
+fn run_audited_case(
+    case: &AuditCase,
+    backend: tsumugi::Backend,
+    tag: &str,
+    clock: &Arc<dyn tsumugi::MonotonicClock>,
+) -> AuditRun {
+    use tsumugi::{
+        AuditBudget, AuditSink, CompileOptions, EmbeddingContext, EmbeddingEngine,
+        EmbeddingRequest, EngineConfig, ExecutionId, FilesystemCapability,
+        FilesystemModuleResolver, FilesystemRoot, FsOperation, LanguageRevision, LinkRequest,
+        MountName, OsDirectoryHandle, ScriptedAuditSink, Source, SourceId, SymlinkPolicy,
+    };
+    let dir = FreshDir({
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "tsg-vm-parity-audit-{}-{}-{tag}",
+            std::process::id(),
+            case.name.replace('/', "_")
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("temp dir");
+        path
+    });
+    let sink = Arc::new(ScriptedAuditSink::new(case.plan.clone()));
+    let mut builder = EmbeddingEngine::builder()
+        .config(EngineConfig {
+            backend,
+            language_revision: LanguageRevision::CURRENT,
+            audit_sink: None,
+            audit_slice_fuel: None,
+        })
+        .allow_experimental_backend(true)
+        .audit_sink(Arc::clone(&sink) as Arc<dyn AuditSink>);
+    if let Some(limit) = case.limit {
+        builder = builder.audit_budget_for_test(AuditBudget {
+            max_pending_bytes: limit,
+            ..AuditBudget::default()
+        });
+    }
+    // AVT-AT-14: 公開の build が監査 sink と VmExperimental の同時設定を通す。
+    let engine = builder.build().expect("監査付きの engine");
+    let capabilities = || {
+        let mut builder = CapabilitySet::builder();
+        let ops: Option<Vec<FsOperation>> = match case.grant {
+            AuditGrant::None => None,
+            AuditGrant::ReadOnly => Some(vec![FsOperation::Read]),
+            AuditGrant::ReadWrite => Some(vec![
+                FsOperation::Read,
+                FsOperation::Write,
+                FsOperation::Create,
+            ]),
+        };
+        if let Some(ops) = ops {
+            let pid = policy(11);
+            let handle = OsDirectoryHandle::new(dir.0.clone(), pid, SymlinkPolicy::DenyAll);
+            let root = FilesystemRoot::new(
+                MountName::new("data").expect("mount"),
+                pid,
+                ops.into_iter().collect(),
+                SymlinkPolicy::DenyAll,
+                Arc::new(handle),
+            )
+            .expect("root");
+            builder = builder
+                .filesystem(FilesystemCapability::new(vec![root]).expect("fs"))
+                .expect("fs grant");
+        }
+        if case.import {
+            let pid = policy(7);
+            let handle = OsDirectoryHandle::new(fixture_dir(), pid, SymlinkPolicy::DenyAll);
+            let resolver = FilesystemModuleResolver::new(
+                pid,
+                [(MountName::new("default").expect("mount"), Arc::new(handle))],
+            )
+            .expect("resolver");
+            builder = builder
+                .module_resolver(Arc::new(resolver))
+                .expect("resolver grant");
+        }
+        builder.build()
+    };
+    let script = engine
+        .compile(
+            Source::new(SourceId::new("main").expect("id"), case.source),
+            &CompileOptions {
+                retain_source: true,
+            },
+        )
+        .expect("compile");
+    let linked = engine
+        .link(
+            &script,
+            LinkRequest::new(
+                ExecutionId::new(policy(1)),
+                capabilities(),
+                tree_budget(clock.as_ref()),
+            ),
+        )
+        .expect("link");
+    let request = EmbeddingRequest::new(tree_budget(clock.as_ref()), Arc::clone(clock))
+        .expect("request")
+        .with_capabilities(capabilities())
+        .with_execution_id(ExecutionId::new(policy(77)));
+    let mut context = EmbeddingContext::new(&engine);
+    let outcome = engine.run_audited(&linked, &mut context, request);
+    AuditRun {
+        envelopes: comparable_audit(&sink.snapshot()),
+        outcome: comparable_audited(&outcome),
+    }
+}
+
+fn fake_clock() -> Arc<dyn tsumugi::MonotonicClock> {
+    Arc::new(tsumugi::FakeClock::new())
+}
+
+/// 監査の軸で比べる。最初に違った envelope（または件数・outcome）を報告する。
+fn compare_audit(name: &str, tree: &AuditRun, vm: &AuditRun) -> Vec<Diff> {
+    let diff = |tree: String, vm: String| Diff {
+        case: name.to_string(),
+        axis: Axis::Audit,
+        tree,
+        vm,
+    };
+    if let Some(i) = (0..tree.envelopes.len().max(vm.envelopes.len()))
+        .find(|&i| tree.envelopes.get(i) != vm.envelopes.get(i))
+    {
+        let at = |run: &AuditRun| {
+            format!(
+                "envelope{i}（全 {} 件）: {}",
+                run.envelopes.len(),
+                run.envelopes.get(i).map_or("なし", String::as_str)
+            )
+        };
+        return vec![diff(at(tree), at(vm))];
+    }
+    if tree.outcome != vm.outcome {
+        return vec![diff(tree.outcome.clone(), vm.outcome.clone())];
+    }
+    Vec::new()
+}
+
+/// 1 回の host-call triple より小さく、`Resumed` 1 件より大きい queue の上限（AVT-AT-13）。
+const AUDIT_TINY_LIMIT: u64 = 400;
+/// 数回の host call で上限に達する queue の上限（AVT-AT-13 の中くらいの上限）。
+const AUDIT_MEDIUM_LIMIT: u64 = 1000;
+
+const AUDIT_FS_SOURCE: &str = "write_file(\"@data/a.txt\", \"hello\")\n\
+append_file(\"@data/a.txt\", 12)\n\
+let c = read_file(\"@data/a.txt\")\n\
+let ls = read_lines(\"@data/a.txt\")\n";
+
+const AUDIT_CAUGHT_SOURCE: &str = "let n = 0\n\
+try\n    read_file(\"@data/missing.txt\")\ncatch e\n    n = n + 1\nend\n\
+try\n    read_lines(\"@data/missing.txt\")\ncatch e\n    n = n + 1\nend\n\
+try\n    write_file(\"@data/w.txt\", \"x\")\ncatch e\n    n = n + 1\nend\n\
+try\n    append_file(\"@data/w.txt\", [1, 2])\ncatch e\n    n = n + 1\nend\n";
+
+const AUDIT_LOOP_SOURCE: &str = "let i = 0\nwhile i < 6\n    append_file(\"@data/a.txt\", \"x\")\n    i = i + 1\nend\n\
+for x in [1, 2, 3]\n    append_file(\"@data/a.txt\", \"y\")\n    if x == 2\n        continue\n    end\n    let y = x\nend\n\
+if true\n    append_file(\"@data/a.txt\", \"z\")\nend\n\
+try\n    read_file(\"@data/missing.txt\")\ncatch e\n    let m = 2\nend\n\
+while read_file(\"@data/a.txt\") == \"\"\n    let q = 1\nend\n\
+let done = 1\n";
+
+fn audit_case(
+    name: &str,
+    source: &'static str,
+    grant: AuditGrant,
+    plan: Vec<tsumugi::ScriptedResponse>,
+    limit: Option<u64>,
+) -> AuditCase {
+    AuditCase {
+        name: format!("audit/{name}"),
+        source,
+        grant,
+        import: false,
+        plan,
+        limit,
+    }
+}
+
+/// 監査の軸のケース（ケース名 `audit/<名前>`）。
+fn audit_cases() -> Vec<AuditCase> {
+    use tsumugi::ScriptedResponse::{AckCorrect, Fail, PendingThenAck};
+    let ack = |n: usize| vec![AckCorrect; n];
+    let then = |mut plan: Vec<tsumugi::ScriptedResponse>, last| {
+        plan.push(last);
+        plan
+    };
+    let mut cases = vec![
+        audit_case(
+            "fs_allow",
+            AUDIT_FS_SOURCE,
+            AuditGrant::ReadWrite,
+            Vec::new(),
+            None,
+        ),
+        audit_case(
+            "fs_deny_ungranted",
+            AUDIT_CAUGHT_SOURCE,
+            AuditGrant::None,
+            Vec::new(),
+            None,
+        ),
+        audit_case(
+            "fs_deny_operation",
+            AUDIT_CAUGHT_SOURCE,
+            AuditGrant::ReadOnly,
+            Vec::new(),
+            None,
+        ),
+        audit_case(
+            "fs_host_error",
+            AUDIT_CAUGHT_SOURCE,
+            AuditGrant::ReadWrite,
+            Vec::new(),
+            None,
+        ),
+        audit_case(
+            "no_host_call",
+            "let i = 0\nwhile i < 3\n    i = i + 1\nend\nlet s = upper(\"ab\")\n",
+            AuditGrant::None,
+            Vec::new(),
+            None,
+        ),
+        // Started の次（0 始まりで 1 番目以降）の submit で Pending を 1 回返す。どの位置でも tree と
+        // 同じ backpressure の対が入る（host-call event・BudgetCharged・Terminal を含む）。
+        audit_case(
+            "pending_host_call",
+            "write_file(\"@data/a.txt\", \"x\")\n",
+            AuditGrant::ReadWrite,
+            then(ack(6), PendingThenAck { pending_times: 1 }),
+            None,
+        ),
+        audit_case(
+            "pending_terminal",
+            "write_file(\"@data/a.txt\", \"x\")\n",
+            AuditGrant::ReadWrite,
+            then(ack(13), PendingThenAck { pending_times: 1 }),
+            None,
+        ),
+        audit_case(
+            "sink_failed",
+            "write_file(\"@data/a.txt\", \"x\")\nlet y = 1\n",
+            AuditGrant::ReadWrite,
+            then(ack(6), Fail),
+            None,
+        ),
+        audit_case(
+            "queue_tiny_limit",
+            AUDIT_LOOP_SOURCE,
+            AuditGrant::ReadWrite,
+            Vec::new(),
+            Some(AUDIT_TINY_LIMIT),
+        ),
+        audit_case(
+            "queue_medium_limit",
+            AUDIT_LOOP_SOURCE,
+            AuditGrant::ReadWrite,
+            Vec::new(),
+            Some(AUDIT_MEDIUM_LIMIT),
+        ),
+    ];
+    cases.push(AuditCase {
+        import: true,
+        ..audit_case(
+            "import",
+            "import \"import_lib.tsg\"\nlet v = add(1, 2)\nwrite_file(\"@data/a.txt\", \"x\")\n",
+            AuditGrant::ReadWrite,
+            Vec::new(),
+            None,
+        )
+    });
+    cases
+}
+
+fn audit_diffs(cases: Vec<AuditCase>) -> Vec<Diff> {
+    cases
+        .iter()
+        .flat_map(|case| {
+            // tree と VM で同じ FakeClock を使う（budget の deadline の clock_id も一致させる）。
+            let clock = fake_clock();
+            let tree = run_audited_case(case, tsumugi::Backend::TreeWalk, "tree", &clock);
+            let vm = run_audited_case(case, tsumugi::Backend::VmExperimental, "vm", &clock);
+            compare_audit(&case.name, &tree, &vm)
+        })
+        .collect()
+}
+
+/// AVT-AT-15: 監査の軸のケースを tree と VM で流し、差が既知の差分一覧と完全一致する。
+#[test]
+fn avt_at_15_audit_axis_matches_known_diffs() {
+    let cases = audit_cases();
+    for name in [
+        "audit/fs_allow",
+        "audit/fs_deny_ungranted",
+        "audit/fs_deny_operation",
+        "audit/fs_host_error",
+        "audit/no_host_call",
+        "audit/import",
+        "audit/pending_host_call",
+        "audit/pending_terminal",
+        "audit/sink_failed",
+        "audit/queue_tiny_limit",
+        "audit/queue_medium_limit",
+    ] {
+        assert!(cases.iter().any(|c| c.name == name), "{name} が無い");
+    }
+    let diffs = with_stack(|| audit_diffs(audit_cases()));
+    let problems = gate(&diffs, KNOWN_DIFFS, "audit/");
+    assert!(
+        problems.is_empty(),
+        "audit/: 既知の差分一覧と実際の差が一致しない（{} 件）\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
+/// AVT-AT-13: 小さい上限のケースでは queue の上限の yield が実際に起き、その列が tree と一致する
+/// （上の gate で差が出ないことに加え、yield が 1 回以上あることを確かめる）。
+#[test]
+fn avt_at_13_tiny_limit_case_yields_on_both_backends() {
+    let case = audit_cases()
+        .into_iter()
+        .find(|c| c.name == "audit/queue_tiny_limit")
+        .expect("case");
+    let (tree, vm) = with_stack(move || {
+        let clock = fake_clock();
+        (
+            run_audited_case(&case, tsumugi::Backend::TreeWalk, "tree-y", &clock),
+            run_audited_case(&case, tsumugi::Backend::VmExperimental, "vm-y", &clock),
+        )
+    });
+    let yields = |run: &AuditRun| {
+        run.envelopes
+            .iter()
+            .filter(|e| e.contains("Yielded { reason: AuditBackpressure"))
+            .count()
+    };
+    assert!(yields(&tree) >= 10, "tree の yield: {}", yields(&tree));
+    assert_eq!(yields(&tree), yields(&vm));
+    assert_eq!(tree.envelopes, vm.envelopes);
+}
+
+/// VPD-AT-01（監査の軸の自己検査）: わざと差を作った組（tree と VM に違う source を渡す）で、
+/// `Axis::Audit` の差を「ケース・軸・tree の値・VM の値」で報告する。
+#[test]
+fn vpd_at_01_compare_reports_audit_axis() {
+    let diffs = with_stack(|| {
+        let tree_case = audit_case("probe", "let x = 1\n", AuditGrant::None, Vec::new(), None);
+        let vm_case = audit_case(
+            "probe",
+            "let x = 1\nlet y = 2\n",
+            AuditGrant::None,
+            Vec::new(),
+            None,
+        );
+        let clock = fake_clock();
+        let tree = run_audited_case(&tree_case, tsumugi::Backend::TreeWalk, "probe-t", &clock);
+        let vm = run_audited_case(
+            &vm_case,
+            tsumugi::Backend::VmExperimental,
+            "probe-v",
+            &clock,
+        );
+        // 同じ source なら差は出ない。
+        let vm_same = run_audited_case(
+            &tree_case,
+            tsumugi::Backend::VmExperimental,
+            "probe-s",
+            &clock,
+        );
+        assert!(compare_audit("same", &tree, &vm_same).is_empty());
+        compare_audit("probe", &tree, &vm)
+    });
+    let diff = diffs.first().expect("Audit の差を報告する");
+    assert_eq!(diff.axis, Axis::Audit);
+    assert_ne!(diff.tree, diff.vm);
+    assert!(diff.tree.starts_with("envelope"), "{diff}");
 }
