@@ -884,7 +884,7 @@ impl_pr    = 557
 order      = 72
 
 # audit-vm-triple-c の設計 PR で登録した audit-vm-slice-fuel（判断の候補 Q2 の推奨案 A）を、設計 PR で a・b に分けた
-#   （spec「audit-vm-slice-fuel のスライス分割」小節に理由。判断の候補 Q1 の推奨案 A）。元の id は置き換えて残さない。§6.7 のフェーズのスライス。
+#   （spec「audit-vm-slice-fuel のスライス分割」小節に理由。判断の候補 Q1〜Q3 は判断役が Q1=A・Q2=A・Q3=A を選んだ（PR #562）。決定記録は spec の a の小節）。元の id は置き換えて残さない。§6.7 のフェーズのスライス。
 # a: VM の run_frames(0) のループに tree の yield 可能点（文/反復境界・関数本体・式の operand 境界）を置き、監査付き実行で
 #   Yielded/Resumed(SliceFuelExhausted) を tree と同じ位置に出す。公開の build の拒否は残す。見積もり src/ 約 220〜420 行、
 #   tests 約 350〜550 行、受入基準 5（AVSF-AT-01..05）。§6.7 のとおり §14.1 の上限は当てない。
