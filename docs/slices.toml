@@ -880,7 +880,7 @@ spec       = { doc = "docs/determinism-and-audit.md", section = "audit-vm-triple
 acceptance = ["AVT-AT-11..15"]
 depends_on = ["audit-vm-triple-b"]
 design_pr  = 556
-impl_pr    = 0
+impl_pr    = 557
 order      = 72
 
 # audit-vm-triple-c の設計 PR で登録（判断の候補 Q2 の推奨案 A）。c は監査 sink・audit_slice_fuel・VmExperimental の同時設定を
