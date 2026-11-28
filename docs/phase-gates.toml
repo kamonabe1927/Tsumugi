@@ -110,8 +110,8 @@ note   = "同 context の同時 start を拒否するテストが無い"
 phase  = 1
 id     = "EMB-AT-05"
 source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
-tests  = ["src/embedding.rs::emb_at_05_run_does_not_call_resolver"]
-note   = "Phase 1 の範囲（run 時 resolver 0）"
+tests  = []
+note   = "emb_at_05_run_does_not_call_resolver は import なし root の link・run の resolver 0 だけを確かめる。compile 時 resolver/OS/callback 0 と link 時 script/stdio 0 を確かめるテストが無い（判断役が選択（PR #559）、Q1=A）"
 
 [[gate]]
 phase  = 1
@@ -143,7 +143,7 @@ note   = "Phase 1 の範囲（Completed・Runtime・InternalFailure・pre-run Ca
 phase  = 1
 id     = "EMB-AT-13"
 source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
-tests  = ["src/embedding.rs::golden_hashes_are_stable"]
+tests  = ["src/embedding.rs::golden_hashes_are_stable", "src/embedding.rs::source_hash_changes_with_one_byte_diff", "src/embedding.rs::sha256_known_vectors"]
 note   = "Phase 1 の範囲（root hash）"
 
 [[gate]]
@@ -156,12 +156,13 @@ tests  = ["tests/integration.rs::args_returns_script_arguments_in_both_engines",
 phase  = 1
 id     = "EMB-AT-16"
 source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
-tests  = ["tests/cli_safe_profile.rs::allow_exit_propagates_exit_code_via_profile"]
-note   = "実装済み outcome の exit mapping。Phase 1 の範囲"
+tests  = []
+note   = "allow_exit_propagates_exit_code_via_profile（tests/cli_safe_profile.rs）は Exited の写像だけを確かめる。exit_code_for_outcome の他の outcome（RuntimeError・BudgetExceeded・Cancelled・InternalFailure など）の subprocess 完全一致検証が無い（判断役が選択（PR #559）、Q1=A）"
 
 [[gate]]
 phase  = 1
 id     = "EMB-AT-17"
 source = { doc = "docs/embedding-api.md", section = "15. 受入基準" }
 tests  = []
-note   = "tree の CLI が Engine API だけを通ることを固定するテストが無い。VM 側は embedding-api の逸脱一覧の VM backend adapter の行（E9）"
+open   = ["fix-cli-repl-compile-diagnostics"]
+note   = "tree の CLI が Engine API だけを通ることを固定するテストが無い。CLI の REPL が Lexer・Parser を直接呼ぶ行（embedding-api の逸脱一覧、loop:drift #429 D-134）は open のスライスで直す。VM 側は VM backend adapter の行（E9）"
