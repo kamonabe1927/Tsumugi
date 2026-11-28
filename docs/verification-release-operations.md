@@ -3,7 +3,7 @@
 最終更新: 2026-11-17
 設計ステータス: **実装仕様確定・部分実装**
 
-本文書の §1〜§18 は **到達目標の確定仕様**であり、現在の実装状態ではない。現在の実装が目標からどう逸脱しているか・どこが未実装かは、
+本文書の §1〜§19 は **到達目標の確定仕様**であり、現在の実装状態ではない。現在の実装が目標からどう逸脱しているか・どこが未実装かは、
 下の **逸脱一覧** が唯一の正本である（[ドキュメント運用ガイド](documentation-guide.md)「逸脱一覧の持ち方」）。表は現在の逸脱と
 未実装範囲だけを持ち、解消した行は削除する。実装スライスの進捗の正本は [`slices.toml`](slices.toml)。
 
@@ -1214,7 +1214,7 @@ b・c はスライスの大きさを a の結果（1 Phase あたりの行数）
 - **範囲外**: Phase 2〜7 の行（phase-gates-b・c）。§19.4 の各項目。手順書 §6.2 の 6・§9・§9.1 の文言（issue #547 の設計 PR で先に入れる）。
   受入 ID の採番が無い条件に新しく ID を振ること（各 spec の設計で行う。ここでは `[[unnumbered]]` に置くだけ）。
 - **受入基準（phase-gates-a）**:
-  - **PGT-AT-01**（形）: `[[gate]]` の必須フィールドの欠け・`phase` の範囲外・同じ `phase` と `id` の組の重複・`source` の見出しの不在・
+  - **PGT-AT-01**（形）: `[[gate]]`・`[[unnumbered]]` の必須フィールドの欠け・`phase` の範囲外・`source` の見出しの不在と、`[[gate]]` の同じ `phase` と `id` の組の重複・
     見出しの節に `id` が現れないことを、それぞれ検査が失敗として報告する。確かめ方: 実装 PR で各種類の壊れた行を一時的に足して失敗を確かめ、
     結果を PR 本文に書く（`slices_contract.rs` の `subset_parser_rejects_unsupported_forms` と同じく、パーサの拒否はテストに持つ）。
   - **PGT-AT-02**（テストの紐づけ）: `tests` の項目のファイルが無い・`fn <関数名>` が無い・`open` の id が `slices.toml` に無いか `done` で
@@ -1284,10 +1284,12 @@ open   = ["fix-vm-callback-recursion-stack"]        # 任意。満たすのに�
 note   = "debug build の --vm の callback 経由の再帰は open のスライスで直す"  # 任意
 
 [[unnumbered]]
-phase  = 0
-source = { doc = "docs/threat-model.md", section = "Phase 0" }
-note   = "actor・asset・trust boundary・保証/非保証・責任分界が release documentation から参照できる（受入 ID が未採番）"
+phase  = 0                                          # 必須。0〜7
+source = { doc = "docs/threat-model.md", section = "Phase 0" }  # 必須。条件が書かれた見出し（完全一致）
+note   = "actor・asset・trust boundary・保証/非保証・責任分界が release documentation から参照できる（受入 ID が未採番）"  # 必須。条件の中身
 ```
+
+- `[[unnumbered]]` の必須フィールドは `phase`・`source`・`note` の 3 つで、`id`・`tests`・`open` は持たない。
 
 - `tests` の 1 項目は `<リポジトリからの相対パス>::<関数名>` と書く。パスは `tests/` か `src/` の下の `.rs` で、その中に `fn <関数名>` がある。
 - 1 つの受入 ID は、その ID が完了 gate に挙がる Phase ごとに 1 行だけ持つ（同じ `phase` と `id` の組を 2 行にしない）。ID に部分がある書き方（「TM-AT-12（host 部分）」など）は、`id` を `TM-AT-12` にし、部分を `note` に書く。
@@ -1299,8 +1301,8 @@ note   = "actor・asset・trust boundary・保証/非保証・責任分界が re
 
 `tests/slices_contract.rs` と同じく、依存 crate を足さずに TOML の部分集合を読んで、次を確かめる。
 
-1. 各 `[[gate]]` に必須フィールドがあり、`phase` が 0〜7、同じ `phase` と `id` の組が 1 行だけである。
-2. `source.doc` が実在し、`source.section` がその見出しとして完全一致で存在し、`id` がその見出しの節の本文に現れる。
+1. 各 `[[gate]]` と各 `[[unnumbered]]` に必須フィールド（§19.2）があり、`phase` が 0〜7 である。`[[gate]]` は同じ `phase` と `id` の組が 1 行だけである。
+2. 各 `[[gate]]` と各 `[[unnumbered]]` の `source.doc` が実在し、`source.section` がその見出しとして完全一致で存在する。`[[gate]]` は `id` がその見出しの節の本文に現れる（`[[unnumbered]]` は `id` を持たないので、この確かめは当てない）。
 3. `tests` の各項目のファイルが実在し、`fn <関数名>` を含む。`open` の各 id が `slices.toml` にあり、`done` でない。
 4. Phase ごとに `Phase N: 満たした M / 全 K（残り K-M。ID 未採番 U）` を 1 行ずつ標準出力に出す（`cargo test --test phase_gates_contract -- --nocapture` で見える）。一覧に 1 行も無い Phase は `Phase N: 一覧なし` と出す。この行は数を出すだけで、数によって失敗しない。
 
