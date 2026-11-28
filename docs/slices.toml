@@ -1624,6 +1624,7 @@ parent     = "AUD-022"
 spec       = { doc = "docs/verification-release-operations.md", section = "phase-gates-a 実装スライス（Phase の完了 gate の一覧の形と検査を作り、Phase 0・1 を載せる）" }
 acceptance = ["PGT-AT-01..04"]
 design_pr  = 558
+impl_pr    = 559
 order      = 121
 
 # 見積もり: docs/phase-gates.toml に Phase 2・3・4 の行（CAP-AT-01〜30 の該当分・TM-AT の Phase 2/3 分・execution-control §15・§16・EMB-AT-21・22 ほか、
