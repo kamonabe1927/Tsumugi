@@ -1614,7 +1614,7 @@ order      = 120
 #   （割り方の理由は verification-release-operations「phase-gates-a 実装スライス」）。parent は Phase 7 の検証の gate を持つ AUD-022。
 # order は loop-runbook §8 の「それ以外」の既定（すべてのスライスより後。設計時点の最大は 120）。§6.7 のフェーズのスライスは今 todo で
 #   この order より前（89〜）にあるので、フェーズのスライスが ready になれば先に実装される。a を今 ready にするか、フェーズの後まで
-#   todo に置くかは設計 PR の判断の候補 Q1。
+#   todo に置くかは設計 PR #558 の判断の候補 Q1。
 # 見積もり（a）: src/ 0 行、テスト +200〜350 行とパーサの移動、docs/phase-gates.toml 25〜40 行、受入基準 4。
 [[slice]]
 id         = "phase-gates-a"
@@ -1623,6 +1623,7 @@ status     = "ready"
 parent     = "AUD-022"
 spec       = { doc = "docs/verification-release-operations.md", section = "phase-gates-a 実装スライス（Phase の完了 gate の一覧の形と検査を作り、Phase 0・1 を載せる）" }
 acceptance = ["PGT-AT-01..04"]
+design_pr  = 558
 order      = 121
 
 # 見積もり: docs/phase-gates.toml に Phase 2・3・4 の行（CAP-AT-01〜30 の該当分・TM-AT の Phase 2/3 分・execution-control §15・§16・EMB-AT-21・22 ほか、
@@ -1648,7 +1649,7 @@ order      = 123
 # ── issue #547 の 3: ロードマップの ⬜・🟡 の項目のうち、todo・ready・blocked のスライスが無いものの placeholder ──
 # どれも 1 本の実装には大きすぎる見込みで、設計の前に loop-runbook §10 で分割する（設計役は大きすぎれば分割案を付けて返す。loop-design）。
 # 見積もりは粗いもので、分割のときに見直す。order は §8 の「それ以外」の既定（すべてのスライスより後）で、ロードマップの表の順に並べた。
-# done のスライスだけがある項目（REV-007・REV-024・AUD-022・Phase 5 残）も残りがあるので含めた（設計 PR の判断の候補 Q4）。
+# done のスライスだけがある項目（REV-007・REV-024・AUD-022・Phase 5 残）も残りがあるので含めた（設計 PR #558 の判断の候補 Q4）。
 
 # 見積もり: ExecutionContext の session state と run meter の分離。src/ 300〜800 行（tree・VM）、2〜3 本に分かれる見込み。
 [[slice]]
