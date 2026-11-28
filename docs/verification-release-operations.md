@@ -1217,7 +1217,7 @@ b・c はスライスの大きさを a の結果（1 Phase あたりの行数）
   - **PGT-AT-01**（形）: `[[gate]]`・`[[unnumbered]]` の必須フィールドの欠け・`phase` の範囲外・`source` の見出しの不在と、`[[gate]]` の同じ `phase` と `id` の組の重複・
     見出しの節に `id` が現れないことを、それぞれ検査が失敗として報告する。確かめ方: 実装 PR で各種類の壊れた行を一時的に足して失敗を確かめ、
     結果を PR 本文に書く（`slices_contract.rs` の `subset_parser_rejects_unsupported_forms` と同じく、パーサの拒否はテストに持つ）。
-  - **PGT-AT-02**（テストの紐づけ）: `tests` の項目のファイルが無い・`fn <関数名>` が無い・`open` の id が `slices.toml` に無いか `done` で
+  - **PGT-AT-02**（テストの紐づけ）: `tests` の項目のパスが `tests/` か `src/` の下の `.rs` でない・ファイルが無い・`fn <関数名>` が無い・`open` の id が `slices.toml` に無いか `done` で
     あることを、検査が失敗として報告する。確かめ方: PGT-AT-01 と同じ。
   - **PGT-AT-03**（数）: `cargo test --test phase_gates_contract -- --nocapture` が Phase 0〜7 の 8 行（Phase 2〜7 は `一覧なし`）を出し、
     数によって失敗しない。確かめ方: 出力を実装 PR の本文に貼る。
@@ -1303,7 +1303,7 @@ note   = "actor・asset・trust boundary・保証/非保証・責任分界が re
 
 1. 各 `[[gate]]` と各 `[[unnumbered]]` に必須フィールド（§19.2）があり、`phase` が 0〜7 である。`[[gate]]` は同じ `phase` と `id` の組が 1 行だけである。
 2. 各 `[[gate]]` と各 `[[unnumbered]]` の `source.doc` が実在し、`source.section` がその見出しとして完全一致で存在する。`[[gate]]` は `id` がその見出しの節の本文に現れる（`[[unnumbered]]` は `id` を持たないので、この確かめは当てない）。
-3. `tests` の各項目のファイルが実在し、`fn <関数名>` を含む。`open` の各 id が `slices.toml` にあり、`done` でない。
+3. `tests` の各項目のパスが `tests/` か `src/` の下の `.rs` で（§19.2）、そのファイルが実在し、`fn <関数名>` を含む。`open` の各 id が `slices.toml` にあり、`done` でない。
 4. Phase ごとに `Phase N: 満たした M / 全 K（残り K-M。ID 未採番 U）` を 1 行ずつ標準出力に出す（`cargo test --test phase_gates_contract -- --nocapture` で見える）。一覧に 1 行も無い Phase は `Phase N: 一覧なし` と出す。この行は数を出すだけで、数によって失敗しない。
 
 1〜3 に反する行があればテストを失敗させ、どの行がどう反するかをまとめて出す（`slices_contract.rs` の `report` と同じ形）。
