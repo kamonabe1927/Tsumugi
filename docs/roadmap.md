@@ -15,7 +15,7 @@
 
 ## マイルストーン（Phase 0〜7）
 
-目標アーキテクチャへの移行順序。各 Phase の状態は粗い 1 記号で、Phase 内の個別項目の状態は下記「ステータス一覧」を参照する（ここでは再掲しない）。現行の step 上限・collection 上限・深度制限・filesystem/env allow-list・構造化エラー・差分テストは土台として再利用するが、それだけで各 Phase が完了したとはみなさない。
+目標アーキテクチャへの移行順序。各 Phase の状態は粗い 1 記号で、Phase 内の個別項目の状態は下記「ステータス一覧」を参照する（ここでは再掲しない）。「完了 gate」列の受入 ID の一覧と、各 ID を満たすテスト・Phase ごとの残りの数は `docs/phase-gates.toml` が持つ（形と検査は[検証・リリース・運用設計](verification-release-operations.md) §19、issue #547。一覧に載った Phase から、列をその一覧への参照に移す）。現行の step 上限・collection 上限・深度制限・filesystem/env allow-list・構造化エラー・差分テストは土台として再利用するが、それだけで各 Phase が完了したとはみなさない。
 
 | Phase | 目的 | 設計正本 | 状態 | 完了 gate |
 |---|---|---|---|---|
